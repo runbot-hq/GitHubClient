@@ -66,6 +66,12 @@ public final class GitHubClient {
     /// path. `TokenCache.invalidate()` is called automatically after every
     /// successful sign-in and sign-out.
     ///
+    /// Also wires `sharedGitHubTransport` to the same token-backed instance,
+    /// so all API free functions that default to `sharedGitHubTransport` are
+    /// immediately live without any additional `configureGH*` calls in
+    /// `AppDelegate`. See `GitHubTransportShims.swift` for the `nonisolated(unsafe)`
+    /// declaration and the once-written-at-launch invariant.
+    ///
     /// Must be called on the main actor because `OAuthService.init` is
     /// `@MainActor`-isolated. `AppDelegate` — the only production call site —
     /// satisfies this requirement automatically.
@@ -99,6 +105,12 @@ public final class GitHubClient {
             tokenProvider: { cache.token() },
             logger: logger
         )
+        // Wire the process-wide default used by all API functions via their
+        // `transport: any GitHubTransportProtocol = sharedGitHubTransport` defaults.
+        // Written once here, at app launch, before any concurrent API reads.
+        // The nonisolated(unsafe) declaration in GitHubTransportShims.swift
+        // is safe precisely because this is the only write site.
+        sharedGitHubTransport = transport
         self.oauthService = oauth
         self.transport = transport
     }
@@ -117,6 +129,10 @@ public final class GitHubClient {
     /// ⚠️ Callers must pass a `@MainActor`-isolated mock for `oauthService`
     /// to satisfy `OAuthServiceProtocol`'s `@MainActor` constraint. A mock
     /// that is not `@MainActor`-isolated will not compile.
+    ///
+    /// - Note: Does **not** touch `sharedGitHubTransport`. Test call sites
+    ///   always pass `transport:` explicitly at the API function call site
+    ///   and must never rely on the global singleton.
     ///
     /// - Parameters:
     ///   - oauthService: A mock or stub conforming to `OAuthServiceProtocol`.
