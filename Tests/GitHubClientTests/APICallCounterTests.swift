@@ -10,7 +10,8 @@
 //   4. snapshot() is atomic — consistent count + limit in one hop (P10).
 //   5. APICallCounterSnapshot is Equatable and Sendable.
 //   6. snapshot() returns zero after all timestamps expire (idle-gap regression).
-//   7. fetchRunners() / fetchActiveRuns() increment on non-nil AND skip on nil transport result.
+//   7. fetchRunners() / fetchActiveRuns() / fetchJobs() / fetchUserOrgs() /
+//      fetchUserRepos() increment on non-nil AND skip on nil transport result.
 //   8. record() trims buffer to hourlyLimit at >5,000 entries.
 //   9. purge() retains entries exactly at the 60-minute boundary (inclusive).
 //  10. purge() evicts entries just beyond the 60-minute boundary (exclusive).
@@ -235,9 +236,14 @@ struct APICallCounterTests {
 
   // MARK: - Transport increment guard
   //
-  // These four tests share the module-level `apiCallCounter` actor and each call
+  // These tests share the module-level `apiCallCounter` actor and each call
   // `reset()` on it. They are run .serialized to prevent concurrent scheduling
   // from interleaving a reset from one test with the record/snapshot of another.
+  //
+  // Nil-path tests are intentionally omitted for all functions: record() sits
+  // after a `guard let data = ... else { return }`, making it structurally
+  // unreachable on a nil transport result. Testing that would be testing Swift,
+  // not this module.
 
   @Suite("TransportIncrementGuard", .serialized)
   struct TransportIncrementGuard {
@@ -263,6 +269,42 @@ struct APICallCounterTests {
       let payload = makeRunsJSON()
       mock.onApiPaginated = { _, _ in payload }
       _ = await fetchActiveRuns(scope: .org("test"), transport: mock)
+      let snap = await apiCallCounter.snapshot()
+      #expect(snap.count == 1)
+    }
+
+    /// Verifies that `fetchJobs` increments `apiCallCounter` when the transport returns non-nil data.
+    @Test("fetchJobs() increments counter when transport returns non-nil data")
+    func fetchJobsIncrementsCounterOnNonNilResult() async {
+      await apiCallCounter.reset()
+      let mock = MockTransport()
+      let payload = makeJobsJSON()
+      mock.onApiPaginated = { _, _ in payload }
+      _ = await fetchJobs(runID: 1, scope: .repo("test", "repo"), transport: mock)
+      let snap = await apiCallCounter.snapshot()
+      #expect(snap.count == 1)
+    }
+
+    /// Verifies that `fetchUserOrgs` increments `apiCallCounter` when the transport returns non-nil data.
+    @Test("fetchUserOrgs() increments counter when transport returns non-nil data")
+    func fetchUserOrgsIncrementsCounterOnNonNilResult() async {
+      await apiCallCounter.reset()
+      let mock = MockTransport()
+      let payload = makeOrgsJSON()
+      mock.onApiPaginated = { _, _ in payload }
+      _ = await fetchUserOrgs(transport: mock)
+      let snap = await apiCallCounter.snapshot()
+      #expect(snap.count == 1)
+    }
+
+    /// Verifies that `fetchUserRepos` increments `apiCallCounter` when the transport returns non-nil data.
+    @Test("fetchUserRepos() increments counter when transport returns non-nil data")
+    func fetchUserReposIncrementsCounterOnNonNilResult() async {
+      await apiCallCounter.reset()
+      let mock = MockTransport()
+      let payload = makeReposJSON()
+      mock.onApiPaginated = { _, _ in payload }
+      _ = await fetchUserRepos(transport: mock)
       let snap = await apiCallCounter.snapshot()
       #expect(snap.count == 1)
     }
@@ -299,4 +341,19 @@ private func makeRunnersJSON() -> Data {
 /// Minimal valid workflow runs list JSON for `fetchActiveRuns` decode path.
 private func makeRunsJSON() -> Data {
   Data("{\"workflow_runs\":[]}".utf8)
+}
+
+/// Minimal valid jobs list JSON for `fetchJobs` decode path.
+private func makeJobsJSON() -> Data {
+  Data("{\"jobs\":[]}".utf8)
+}
+
+/// Minimal valid orgs list JSON for `fetchUserOrgs` decode path.
+private func makeOrgsJSON() -> Data {
+  Data("[]".utf8)
+}
+
+/// Minimal valid repos list JSON for `fetchUserRepos` decode path.
+private func makeReposJSON() -> Data {
+  Data("[]".utf8)
 }
