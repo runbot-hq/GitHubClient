@@ -178,6 +178,12 @@ struct APICallCounterTests {
   // MARK: - Boundary regression
 
   /// Regression test for purge() inclusive-boundary semantics.
+  ///
+  /// Uses `now - 3_599 s` (1 second inside the 60-minute window) rather than
+  /// exactly `now - 3_600 s` to provide a 1-second buffer against clock jitter
+  /// during test execution. The window is inclusive, so an entry at the boundary
+  /// must be retained; the buffer ensures a slow machine doesn't accidentally
+  /// push the seeded timestamp past the cutoff before `snapshot()` runs.
   @Test("purge() retains entry seeded exactly at the 60-minute boundary")
   func snapshotRetainsEntryExactlyAtCutoffBoundary() async {
     let counter = APICallCounter()
@@ -189,6 +195,11 @@ struct APICallCounterTests {
   }
 
   /// Regression test for purge() exclusive-boundary eviction.
+  ///
+  /// Uses `now - 3_601 s` (1 second past the 60-minute cutoff) rather than
+  /// exactly `now - 3_600 s` to provide a 1-second buffer against clock jitter.
+  /// An entry this far past the boundary must always be evicted regardless of
+  /// minor timing variance during test execution.
   @Test("purge() evicts entry seeded just beyond the 60-minute boundary")
   func snapshotEvictsEntryBeyondCutoff() async {
     let counter = APICallCounter()
@@ -235,7 +246,7 @@ struct APICallCounterTests {
     @Test("fetchRunners() increments counter when transport returns non-nil data")
     func fetchRunnersIncrementsCounterOnNonNilResult() async {
       await apiCallCounter.reset()
-      var mock = MockTransport()
+      let mock = MockTransport()
       let payload = makeRunnersJSON()
       mock.onApiPaginated = { _, _ in payload }
       _ = await fetchRunners(scopeString: "orgs/test", transport: mock)
@@ -248,7 +259,7 @@ struct APICallCounterTests {
     @Test("fetchActiveRuns() increments counter exactly once per invocation")
     func fetchActiveRunsIncrementsCounterOnNonNilResult() async {
       await apiCallCounter.reset()
-      var mock = MockTransport()
+      let mock = MockTransport()
       let payload = makeRunsJSON()
       mock.onApiPaginated = { _, _ in payload }
       _ = await fetchActiveRuns(scope: .org("test"), transport: mock)
