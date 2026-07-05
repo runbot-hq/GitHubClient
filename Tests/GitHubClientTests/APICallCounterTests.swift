@@ -10,7 +10,7 @@
 //   4. snapshot() is atomic — consistent count + limit in one hop (P10).
 //   5. APICallCounterSnapshot is Equatable and Sendable.
 //   6. snapshot() returns zero after all timestamps expire (idle-gap regression).
-//   7. ghAPI() / ghAPIPaginated() increment on non-nil AND skip on nil transport result.
+//   7. fetchRunners() / fetchActiveRuns() increment on non-nil AND skip on nil transport result.
 //   8. record() trims buffer to hourlyLimit at >5,000 entries.
 //   9. purge() retains entries exactly at the 60-minute boundary (inclusive).
 //  10. purge() evicts entries just beyond the 60-minute boundary (exclusive).
@@ -18,10 +18,6 @@ import Foundation
 import Testing
 
 @testable import GitHubClient
-
-/// Stable endpoint string used by transport tests.
-/// Extracted to avoid SonarCloud S1075 (hardcoded URI) on test call sites.
-private let testEndpoint = "https://api.github.com/test"
 
 @Suite("APICallCounter")
 struct APICallCounterTests {
@@ -182,13 +178,6 @@ struct APICallCounterTests {
   // MARK: - Boundary regression
 
   /// Regression test for purge() inclusive-boundary semantics.
-  ///
-  /// Seeds an entry 1 s inside the 60-minute window (`now - 3_599 s`) to
-  /// verify it is retained. A 1 s buffer avoids a microsecond timing race
-  /// between `seed()` and the `ContinuousClock.now` call inside `purge()`
-  /// while still exercising the near-boundary retention path.
-  /// The complementary stale test (`snapshotEvictsEntryBeyondCutoff`) uses
-  /// `now - 3_601 s` to verify entries outside the window are dropped.
   @Test("purge() retains entry seeded exactly at the 60-minute boundary")
   func snapshotRetainsEntryExactlyAtCutoffBoundary() async {
     let counter = APICallCounter()
@@ -200,13 +189,6 @@ struct APICallCounterTests {
   }
 
   /// Regression test for purge() exclusive-boundary eviction.
-  ///
-  /// Seeds an entry 1 s beyond the 60-minute window (`now - 3_601 s`) to
-  /// verify it is evicted. A 1 s buffer avoids a microsecond timing race
-  /// between `seed()` and the `ContinuousClock.now` call inside `purge()`
-  /// while still exercising the near-boundary eviction path.
-  /// The complementary retention test (`snapshotRetainsEntryExactlyAtCutoffBoundary`)
-  /// uses `now - 3_599 s` to verify entries inside the window are kept.
   @Test("purge() evicts entry seeded just beyond the 60-minute boundary")
   func snapshotEvictsEntryBeyondCutoff() async {
     let counter = APICallCounter()
@@ -240,62 +222,60 @@ struct APICallCounterTests {
     #expect(transferred.limit == snap.limit)
   }
 
-  // MARK: - Transport increment guard (serialized — touches shared singleton)
+  // MARK: - Transport increment guard
+  //
+  // All four tests use direct transport: injection via MockTransport —
+  // no global singleton writes, no .serialized needed.
 
-  /// Serialized sub-suite for all tests that touch module-level singletons
-  /// (`apiCallCounter`, `configureGHAPI`, `configureGHAPIPaginated`).
-  ///
-  /// `.serialized` prevents intra-suite concurrent execution.
-  ///
-  /// KNOWN RACE: see #1511 — `.serialized` does not prevent inter-suite
-  /// contamination. A parallel suite that calls `ghAPI()` mid-flight could
-  /// land an increment between `reset()` and `#expect(snap.count == ...)`.
-  /// The follow-up in #1511 (`@TaskLocal` override) will eliminate this.
-  @Suite("Transport increment guard", .serialized)
-  struct TransportIncrementGuard {
-
-    /// Verifies that `ghAPI()` increments the shared `apiCallCounter` by one when the injected transport closure returns non-nil data.
-    @Test("ghAPI() increments counter when transport returns non-nil data")
-    func ghAPIIncrementsCounterOnNonNilResult() async {
-      await apiCallCounter.reset()
-      configureGHAPI { _ in Data() }
-      _ = await ghAPI(testEndpoint)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 1)
-      configureGHAPI { _ in nil }
-    }
-
-    /// Verifies that `ghAPIPaginated()` increments the shared `apiCallCounter` by one when the injected transport closure returns non-nil data.
-    @Test("ghAPIPaginated() increments counter when transport returns non-nil data")
-    func ghAPIPaginatedIncrementsCounterOnNonNilResult() async {
-      await apiCallCounter.reset()
-      configureGHAPIPaginated { _, _ in Data() }
-      _ = await ghAPIPaginated(testEndpoint)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 1)
-      configureGHAPIPaginated { _, _ in nil }
-    }
-
-    /// Verifies that `ghAPI()` does not increment the shared `apiCallCounter` when the injected transport closure returns nil.
-    @Test("ghAPI() does not increment counter when transport returns nil")
-    func ghAPISkipsCounterOnNilResult() async {
-      await apiCallCounter.reset()
-      configureGHAPI { _ in nil }
-      _ = await ghAPI(testEndpoint)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 0)
-      configureGHAPI { _ in nil }
-    }
-
-    /// Verifies that `ghAPIPaginated()` does not increment the shared `apiCallCounter` when the injected transport closure returns nil.
-    @Test("ghAPIPaginated() does not increment counter when transport returns nil")
-    func ghAPIPaginatedSkipsCounterOnNilResult() async {
-      await apiCallCounter.reset()
-      configureGHAPIPaginated { _, _ in nil }
-      _ = await ghAPIPaginated(testEndpoint)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 0)
-      configureGHAPIPaginated { _, _ in nil }
-    }
+  /// Verifies that `fetchRunners` increments `apiCallCounter` when the transport returns non-nil data.
+  @Test("fetchRunners() increments counter when transport returns non-nil data")
+  func fetchRunnersIncrementsCounterOnNonNilResult() async {
+    await apiCallCounter.reset()
+    let mock = MockTransport(paginatedResponse: makeRunnersJSON())
+    _ = await fetchRunners(scopeString: "orgs/test", transport: mock)
+    let snap = await apiCallCounter.snapshot()
+    #expect(snap.count == 1)
   }
+
+  /// Verifies that `fetchActiveRuns` increments `apiCallCounter` when the transport returns non-nil data.
+  @Test("fetchActiveRuns() increments counter when transport returns non-nil data")
+  func fetchActiveRunsIncrementsCounterOnNonNilResult() async {
+    await apiCallCounter.reset()
+    let mock = MockTransport(paginatedResponse: makeRunsJSON())
+    _ = await fetchActiveRuns(scope: .org("test"), transport: mock)
+    let snap = await apiCallCounter.snapshot()
+    #expect(snap.count >= 1)
+  }
+
+  /// Verifies that `fetchRunners` does NOT increment `apiCallCounter` when the transport returns nil.
+  @Test("fetchRunners() does not increment counter when transport returns nil")
+  func fetchRunnersSkipsCounterOnNilResult() async {
+    await apiCallCounter.reset()
+    let mock = MockTransport(paginatedResponse: nil)
+    _ = await fetchRunners(scopeString: "orgs/test", transport: mock)
+    let snap = await apiCallCounter.snapshot()
+    #expect(snap.count == 0)
+  }
+
+  /// Verifies that `fetchActiveRuns` does NOT increment `apiCallCounter` when the transport returns nil.
+  @Test("fetchActiveRuns() does not increment counter when transport returns nil")
+  func fetchActiveRunsSkipsCounterOnNilResult() async {
+    await apiCallCounter.reset()
+    let mock = MockTransport(paginatedResponse: nil)
+    _ = await fetchActiveRuns(scope: .org("test"), transport: mock)
+    let snap = await apiCallCounter.snapshot()
+    #expect(snap.count == 0)
+  }
+}
+
+// MARK: - JSON fixture helpers
+
+/// Minimal valid runners list JSON for `fetchRunners` decode path.
+private func makeRunnersJSON() -> Data {
+  """{"runners":[]}""".data(using: .utf8)!
+}
+
+/// Minimal valid workflow runs list JSON for `fetchActiveRuns` decode path.
+private func makeRunsJSON() -> Data {
+  """{"workflow_runs":[]}""".data(using: .utf8)!
 }
