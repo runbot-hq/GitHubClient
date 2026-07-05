@@ -10,8 +10,17 @@ import os
 // MARK: - User orgs and repos
 
 /// Returns the login names of all GitHub organisations the authenticated user belongs to.
-public func fetchUserOrgs() async -> [String] {
-    guard let data = await ghAPIPaginated("\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)") else { return [] }
+///
+/// - Parameter transport: The network transport to use. Defaults to `sharedGitHubTransport`
+///   (wired at launch by `GitHubClient.init`). Pass a `MockGitHubTransport` in tests.
+@concurrent
+public func fetchUserOrgs(
+    transport: any GitHubTransportProtocol = sharedGitHubTransport
+) async -> [String] {
+    guard let data = await transport.apiPaginated(
+        "\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)"
+    ) else { return [] }
+    await apiCallCounter.record()
     /// Minimal org payload — only the login name is needed.
     struct Org: Decodable {
         /// The organisation's GitHub login name.
@@ -22,8 +31,17 @@ public func fetchUserOrgs() async -> [String] {
 }
 
 /// Returns the `owner/repo` full names of all repositories visible to the authenticated user.
-public func fetchUserRepos() async -> [String] {
-    guard let data = await ghAPIPaginated("\(GitHubConstants.userReposPath)?sort=updated&per_page=\(GitHubConstants.maxPageSize)") else { return [] }
+///
+/// - Parameter transport: The network transport to use. Defaults to `sharedGitHubTransport`
+///   (wired at launch by `GitHubClient.init`). Pass a `MockGitHubTransport` in tests.
+@concurrent
+public func fetchUserRepos(
+    transport: any GitHubTransportProtocol = sharedGitHubTransport
+) async -> [String] {
+    guard let data = await transport.apiPaginated(
+        "\(GitHubConstants.userReposPath)?sort=updated&per_page=\(GitHubConstants.maxPageSize)"
+    ) else { return [] }
+    await apiCallCounter.record()
     /// Minimal repo payload — only the full name is needed.
     struct Repo: Decodable {
         /// The repository's full name in `owner/repo` format.
@@ -46,28 +64,39 @@ private let ansiRegex: NSRegularExpression? = try? NSRegularExpression(
     pattern: "\u{001B}\\[[0-9;]*[A-Za-z]"
 )
 
-/// Fetches the log for a single step via the transport layer's `urlSessionRaw()`.
-/// `urlSessionRaw` uses `application/vnd.github.v3.raw` and lets URLSession follow
+/// Fetches the log for a single step via the transport layer's `raw()` method.
+/// `raw` uses `application/vnd.github.v3.raw` and lets URLSession follow
 /// the GitHub 302→S3 redirect automatically, eliminating the need for a manual
 /// two-step redirect implementation.
 ///
+/// - Parameters:
+///   - jobID: The numeric GitHub job ID.
+///   - stepNumber: The 1-based step index within the job.
+///   - scopeString: A scope string such as `"repos/acme/my-repo"`.
+///   - transport: The network transport to use. Defaults to `sharedGitHubTransport`.
+///
 /// Complexity: 3 (two guard branches).
 @concurrent
-public func fetchStepLog(jobID: Int, stepNumber: Int, scope scopeString: String) async -> String? {
+public func fetchStepLog(
+    jobID: Int,
+    stepNumber: Int,
+    scope scopeString: String,
+    transport: any GitHubTransportProtocol = sharedGitHubTransport
+) async -> String? {
     guard let scope = Scope.parse(scopeString) else {
-        ghLogger()?.log("fetchStepLog › invalid scope: \(scopeString)", category: "transport")
+        transport.logger?.log("fetchStepLog › invalid scope: \(scopeString)", category: "transport")
         return nil
     }
     guard case .repo = scope else {
-        ghLogger()?.log(
+        transport.logger?.log(
             "fetchStepLog › skipped: org-scoped logs not supported (scope=\(scopeString))",
             category: "transport")
         return nil
     }
     let endpoint = "\(scope.apiPrefix)/actions/jobs/\(jobID)/logs"
-    ghLogger()?.log("fetchStepLog › fetching \(endpoint) step=\(stepNumber)", category: "transport")
-    guard let raw = await fetchAndDecodeStepLog(endpoint: endpoint, jobID: jobID) else { return nil }
-    return parseStepLog(raw, stepNumber: stepNumber)
+    transport.logger?.log("fetchStepLog › fetching \(endpoint) step=\(stepNumber)", category: "transport")
+    guard let raw = await fetchAndDecodeStepLog(endpoint: endpoint, jobID: jobID, transport: transport) else { return nil }
+    return parseStepLog(raw, stepNumber: stepNumber, logger: transport.logger)
 }
 
 /// Fetches raw log data from `endpoint`, decodes it as UTF-8, and validates the response.
@@ -76,23 +105,27 @@ public func fetchStepLog(jobID: Int, stepNumber: Int, scope scopeString: String)
 ///
 /// Complexity: 4 (four guard/if branches).
 @concurrent
-private func fetchAndDecodeStepLog(endpoint: String, jobID: Int) async -> String? {
-    guard let data = await urlSessionRaw(endpoint) else {
-        ghLogger()?.log("fetchStepLog › urlSessionRaw returned nil for job \(jobID)", category: "transport")
+private func fetchAndDecodeStepLog(
+    endpoint: String,
+    jobID: Int,
+    transport: any GitHubTransportProtocol
+) async -> String? {
+    guard let data = await transport.raw(endpoint) else {
+        transport.logger?.log("fetchStepLog › raw returned nil for job \(jobID)", category: "transport")
         return nil
     }
     guard let raw = String(data: data, encoding: .utf8) else {
-        ghLogger()?.log(
+        transport.logger?.log(
             "fetchStepLog › UTF-8 decode failed for job \(jobID) (\(data.count) bytes)",
             category: "transport")
         return nil
     }
     guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-        ghLogger()?.log("fetchStepLog › empty body for job \(jobID)", category: "transport")
+        transport.logger?.log("fetchStepLog › empty body for job \(jobID)", category: "transport")
         return nil
     }
     if raw.hasPrefix("{") {
-        ghLogger()?.log("fetchStepLog › error JSON returned: \(raw.prefix(120))", category: "transport")
+        transport.logger?.log("fetchStepLog › error JSON returned: \(raw.prefix(120))", category: "transport")
         return nil
     }
     return raw
@@ -103,24 +136,28 @@ private func fetchAndDecodeStepLog(endpoint: String, jobID: Int) async -> String
 /// Falls back to the full log if sections cannot be parsed or the index is out of range.
 ///
 /// Complexity: 3 (two guard/if branches).
-private func parseStepLog(_ raw: String, stepNumber: Int) -> String? {
+private func parseStepLog(
+    _ raw: String,
+    stepNumber: Int,
+    logger: (any GitHubLogger)?
+) -> String? {
     let cleaned = stripAnsi(raw)
     let sections = buildLogSections(from: cleaned)
-    ghLogger()?.log("parseStepLog › parsed \(sections.count) section(s) from log", category: "transport")
+    logger?.log("parseStepLog › parsed \(sections.count) section(s) from log", category: "transport")
     if sections.isEmpty {
-        ghLogger()?.log("parseStepLog › no group markers, returning full raw log", category: "transport")
+        logger?.log("parseStepLog › no group markers, returning full raw log", category: "transport")
         return cleaned
     }
     let index = stepNumber - 1
     guard index >= 0, index < sections.count else {
-        ghLogger()?.log(
+        logger?.log(
             "parseStepLog › stepNumber \(stepNumber) out of range "
                 + "(sections=\(sections.count)), returning full log",
             category: "transport")
         return cleaned
     }
     let section = sections[index]
-    ghLogger()?.log("parseStepLog › step \(stepNumber) → \(section.count)ch", category: "transport")
+    logger?.log("parseStepLog › step \(stepNumber) → \(section.count)ch", category: "transport")
     return section
 }
 
