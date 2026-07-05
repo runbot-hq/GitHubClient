@@ -17,14 +17,14 @@ A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls 
 
 ## Features
 
-- **Dual authentication** — OAuth Authorization Code flow for interactive users; `GH_TOKEN` / `GITHUB_TOKEN` env var for CI and automation. Same call site, no branching
-- **Layered token resolution** — memory cache → Keychain → env var, resolved at call time
-- **Direct REST over `URLSession`** — no code generation, no auto-generated OpenAPI types, no third-party networking layer
-- **Rate-limit aware** — automatic backoff and retry on 429 / 403 rate-limit responses
-- **Link-header pagination** — cursor-based pagination handled transparently
-- **`KeychainTokenStore` built in** — ready-made Keychain integration via `Security.framework`; swap in a mock for tests via the `TokenStore` protocol
-- **Swift 6.2 strict concurrency** — no `@unchecked Sendable`, compiler-enforced boundaries throughout
-- **Testable by design** — every concrete type hidden behind a protocol; inject a fake transport or token store in tests with no Keychain involvement
+- 🔐 **Dual authentication** — OAuth Authorization Code flow for interactive users; `GH_TOKEN` / `GITHUB_TOKEN` env var for CI and automation. Same call site, no branching
+- 🪜 **Layered token resolution** — memory cache → Keychain → env var, resolved at call time
+- 🌐 **Direct REST over `URLSession`** — no code generation, no auto-generated OpenAPI types, no third-party networking layer
+- 🛡️ **Rate-limit aware** — automatic backoff and retry on 429 / 403 rate-limit responses
+- 📄 **Link-header pagination** — cursor-based pagination handled transparently
+- 🔑 **`KeychainTokenStore` built in** — ready-made Keychain integration via `Security.framework`; swap in a mock for tests via the `TokenStore` protocol
+- ⚡ **Swift 6.2 strict concurrency** — no `@unchecked Sendable`, compiler-enforced boundaries throughout
+- 🧪 **Testable by design** — every concrete type hidden behind a protocol; inject a fake transport or token store in tests with no Keychain involvement
 
 ## Requirements
 
