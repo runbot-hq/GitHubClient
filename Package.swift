@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "GitHubClient",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v15)
     ],
     products: [
         .library(
