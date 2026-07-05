@@ -224,14 +224,16 @@ struct APICallCounterTests {
 
   // MARK: - Transport increment guard
   //
-  // All four tests use direct transport: injection via MockTransport —
-  // no global singleton writes, no .serialized needed.
+  // All four tests use direct transport injection via MockTransport’s
+  // closure properties — no global singleton writes, no .serialized needed.
 
   /// Verifies that `fetchRunners` increments `apiCallCounter` when the transport returns non-nil data.
   @Test("fetchRunners() increments counter when transport returns non-nil data")
   func fetchRunnersIncrementsCounterOnNonNilResult() async {
     await apiCallCounter.reset()
-    let mock = MockTransport(paginatedResponse: makeRunnersJSON())
+    var mock = MockTransport()
+    let payload = makeRunnersJSON()
+    mock.onApiPaginated = { _, _ in payload }
     _ = await fetchRunners(scopeString: "orgs/test", transport: mock)
     let snap = await apiCallCounter.snapshot()
     #expect(snap.count == 1)
@@ -241,7 +243,9 @@ struct APICallCounterTests {
   @Test("fetchActiveRuns() increments counter when transport returns non-nil data")
   func fetchActiveRunsIncrementsCounterOnNonNilResult() async {
     await apiCallCounter.reset()
-    let mock = MockTransport(paginatedResponse: makeRunsJSON())
+    var mock = MockTransport()
+    let payload = makeRunsJSON()
+    mock.onApiPaginated = { _, _ in payload }
     _ = await fetchActiveRuns(scope: .org("test"), transport: mock)
     let snap = await apiCallCounter.snapshot()
     #expect(snap.count >= 1)
@@ -251,7 +255,7 @@ struct APICallCounterTests {
   @Test("fetchRunners() does not increment counter when transport returns nil")
   func fetchRunnersSkipsCounterOnNilResult() async {
     await apiCallCounter.reset()
-    let mock = MockTransport(paginatedResponse: nil)
+    let mock = MockTransport()
     _ = await fetchRunners(scopeString: "orgs/test", transport: mock)
     let snap = await apiCallCounter.snapshot()
     #expect(snap.count == 0)
@@ -261,7 +265,7 @@ struct APICallCounterTests {
   @Test("fetchActiveRuns() does not increment counter when transport returns nil")
   func fetchActiveRunsSkipsCounterOnNilResult() async {
     await apiCallCounter.reset()
-    let mock = MockTransport(paginatedResponse: nil)
+    let mock = MockTransport()
     _ = await fetchActiveRuns(scope: .org("test"), transport: mock)
     let snap = await apiCallCounter.snapshot()
     #expect(snap.count == 0)
@@ -272,10 +276,10 @@ struct APICallCounterTests {
 
 /// Minimal valid runners list JSON for `fetchRunners` decode path.
 private func makeRunnersJSON() -> Data {
-  """{"runners":[]}""".data(using: .utf8)!
+  Data("{\"runners\":[]}".utf8)
 }
 
 /// Minimal valid workflow runs list JSON for `fetchActiveRuns` decode path.
 private func makeRunsJSON() -> Data {
-  """{"workflow_runs":[]}""".data(using: .utf8)!
+  Data("{\"workflow_runs\":[]}".utf8)
 }
