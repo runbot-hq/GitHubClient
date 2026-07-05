@@ -7,25 +7,21 @@ import Foundation
 
 /// The process-wide default `GitHubTransport` instance.
 ///
-/// Wired with the production token provider and rate-limiter so existing free-function
-/// shims below forward to real network behaviour with zero configuration.
-/// Tests that need a fake transport should construct a `GitHubTransport` directly
-/// (or provide a mock conformer to `GitHubTransportProtocol`) and NOT use this global.
+/// Set once by `GitHubClient.init` to a fully token-wired instance before any
+/// API calls are made. Declared `nonisolated(unsafe)` because it is written
+/// exactly once at app launch — before any concurrent reads — satisfying the
+/// same once-written invariant that `TransportBox` previously enforced with
+/// `OSAllocatedUnfairLock`.
 ///
-/// ⚠️ Token-less by default: `tokenProvider` is `nil` until `GitHubClient.init` wires
-/// it via `configureGHAPI*`. Any call before `applicationDidFinishLaunching` completes
-/// will silently return `.noToken` / `nil` with no error.
+/// - Note: The initial `GitHubTransport()` value has `tokenProvider: nil`
+///   and will silently return `.noToken` for any call made before
+///   `GitHubClient.init` runs. This is intentional: it matches the previous
+///   behaviour and is the correct degraded path before auth is wired.
 ///
-/// This is intentional for the app target, where launch order is controlled and
-/// the silent `.noToken` path is the correct degraded behaviour before auth is
-/// wired. A `precondition`/`fatalError` on unconfigured calls is not added here
-/// because it would fire legitimately during app startup (before the wiring call)
-/// and would be a hazard for unit tests that import `GitHubClient` without
-/// going through `GitHubClient.init`. If `GitHubClient` is ever packaged as a
-/// true standalone library (step 14), add an explicit `assertionFailure` inside
-/// `GitHubTransport` when `tokenProvider` is nil and the caller is not in the
-/// signed-out / no-token flow.
-public let sharedGitHubTransport = GitHubTransport()
+/// - Warning: Do **not** reassign this after `GitHubClient.init` has run.
+///   Tests should always pass `transport:` explicitly at the call site and
+///   never rely on this global.
+nonisolated(unsafe) public var sharedGitHubTransport: GitHubTransport = GitHubTransport()
 
 // MARK: - Backward-compatibility shims
 //
