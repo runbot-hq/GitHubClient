@@ -23,34 +23,10 @@ import Foundation
 ///   never rely on this global.
 nonisolated(unsafe) public var sharedGitHubTransport: GitHubTransport = GitHubTransport()
 
-// MARK: - Backward-compatibility shims
+// MARK: - HTTP verb shims
 //
 // Call-site-compatible free functions delegating to `sharedGitHubTransport`.
-// TODO(#1513-cleanup): remove each shim as its callers are migrated in Items 4 and 8.
-
-/// Fetches a single GitHub API page. Returns `nil` on failure.
-/// - SeeAlso: ``GitHubTransport/apiAsync(_:timeout:)``
-@concurrent
-public func urlSessionAPIAsync(_ endpoint: String, timeout: TimeInterval = 20) async -> Data? {
-    await sharedGitHubTransport.apiAsync(endpoint, timeout: timeout)
-}
-
-/// Fetches and concatenates all pages for a paginated GitHub endpoint.
-/// - SeeAlso: ``GitHubTransport/apiPaginated(_:timeout:)``
-@concurrent
-public func urlSessionAPIPaginated(
-    _ endpoint: String,
-    timeout: TimeInterval = 60
-) async -> Data? {
-    await sharedGitHubTransport.apiPaginated(endpoint, timeout: timeout)
-}
-
-/// Fetches raw bytes (log endpoints). Returns `nil` on failure.
-/// - SeeAlso: ``GitHubTransport/raw(_:timeout:)``
-@concurrent
-public func urlSessionRaw(_ endpoint: String, timeout: TimeInterval = 60) async -> Data? {
-    await sharedGitHubTransport.raw(endpoint, timeout: timeout)
-}
+// TODO(#1513-cleanup): remove each shim as its callers are migrated.
 
 /// Sends a POST to `endpoint`. Returns response `Data` or `nil`.
 /// - SeeAlso: ``GitHubTransport/post(_:body:timeout:)``
@@ -75,13 +51,14 @@ public func urlSessionDelete(_ endpoint: String, timeout: TimeInterval = 30) asy
     await sharedGitHubTransport.delete(endpoint, timeout: timeout)
 }
 
+// MARK: - Domain shims
+
 /// Thin GET alias used widely across the module.
 /// - SeeAlso: ``GitHubTransport/apiAsync(_:timeout:)``
 ///
 /// Uses `@concurrent` (not `nonisolated(nonsending)`) because this calls
-/// `sharedGitHubTransport.apiAsync` directly rather than the `@concurrent`
-/// `urlSessionAPIAsync` shim. Consistent with all other shims in this file
-/// (`ghPost`, `deleteRunnerByID`, etc.) that delegate directly to the struct.
+/// `sharedGitHubTransport.apiAsync` directly rather than a shim.
+/// Consistent with all other domain shims in this file.
 @concurrent
 public func ghAPI(_ endpoint: String, timeout: TimeInterval = 20) async -> Data? {
     await sharedGitHubTransport.apiAsync(endpoint, timeout: timeout)
@@ -99,7 +76,7 @@ public func ghAPI(_ endpoint: String, timeout: TimeInterval = 20) async -> Data?
 public func ghPost(_ endpoint: String) async -> Bool {
     let result = await sharedGitHubTransport.post(endpoint)
     let success = result != nil
-    ghLogger()?.log("ghPost › \(endpoint) success=\(success)", category: "transport")
+    sharedGitHubTransport.logger?.log("ghPost › \(endpoint) success=\(success)", category: "transport")
     return success
 }
 
