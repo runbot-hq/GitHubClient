@@ -280,7 +280,7 @@ struct APICallCounterTests {
       let mock = MockTransport()
       let payload = makeJobsJSON()
       mock.onApiPaginated = { _, _ in payload }
-      _ = await fetchJobs(runID: 1, scope: .repo("test", "repo"), transport: mock)
+      _ = await fetchJobs(runID: 1, scope: .repo(owner: "test", name: "repo"), transport: mock)
       let snap = await apiCallCounter.snapshot()
       #expect(snap.count == 1)
     }
