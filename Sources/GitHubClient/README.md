@@ -48,7 +48,10 @@ Once extracted to its own repo the import will become:
 
 The recommended entry point is the `GitHubClient` facade. It constructs and wires
 `KeychainTokenStore`, `TokenCache`, `OAuthService`, and `GitHubTransport` in one call —
-`TokenCache.invalidate()` is called automatically after every sign-in and sign-out.
+`TokenCache.invalidate()` is called automatically after every sign-in and sign-out, and
+`sharedGitHubTransport` is pointed at the fully-wired transport instance so that
+module-level free functions (`ghPost`, `fetchStepLog`, `fetchRunners`, etc.) work
+without any additional wiring in `AppDelegate`.
 
 ```swift
 // AppDelegate or your app's composition root (@MainActor)
@@ -63,29 +66,6 @@ let github = GitHubClient(
 // Access the wired subsystems
 let oauth: any OAuthServiceProtocol = github.oauthService
 let transport: any GitHubTransportProtocol = github.transport
-```
-
-In `applicationDidFinishLaunching`, wire the transport shims and the shared logger
-so that free-function diagnostics (`ghPost`, `fetchStepLog`, etc.) are not silently
-dropped. The shim layer (`ghAPI`, `ghAPIPaginated`, `ghRaw`) is backed by a separate
-module-level singleton — without `configureGHLogger` its logger remains `nil` for the
-process lifetime even when `github.transport` has a logger.
-
-```swift
-let transport = github.transport
-// transport.logger is (any GitHubLogger)? — only wire if one was supplied at init.
-if let logger = transport.logger {
-    configureGHLogger(logger)          // wire shim-layer logger
-}
-configureGHAPI { endpoint in
-    await transport.apiAsync(endpoint)
-}
-configureGHRaw { endpoint in
-    await transport.raw(endpoint)
-}
-configureGHAPIPaginated { endpoint, timeout in
-    await transport.apiPaginated(endpoint, timeout: timeout)
-}
 ```
 
 For tests, inject protocol mocks directly — no Keychain or network involved:
@@ -263,7 +243,7 @@ extension MyLogger: GitHubLogger {
 
 ```
 Sources/GitHubClient/
-├── GitHubClient.swift                    ← facade: production + test inits
+├── GitHubClient.swift                    ← facade: production + test inits; wires sharedGitHubTransport
 ├── Protocols/
 │   ├── TokenStore.swift                  ← persist/load tokens; inject your own or use KeychainTokenStore
 │   └── GitHubLogger.swift                ← log sink; nonisolated for cross-actor transport calls
@@ -275,8 +255,7 @@ Sources/GitHubClient/
 │   ├── GitHubTransportProtocol.swift
 │   ├── GitHubURLSessionTransport.swift   ← URLSession, rate-limit backoff, ExecuteResult pipeline
 │   ├── GitHubTransport+Conformance.swift ← apiPaginated, post, put, delete, cancelRun, etc.
-│   ├── GitHubTransportShim.swift         ← TransportBox, configureGHAPI/Raw/Paginated/Logger hooks
-│   └── GitHubTransportShims.swift        ← module-level free-function shims (ghAPI, ghPost, …) + sharedGitHubTransport singleton
+│   └── GitHubTransportShims.swift        ← sharedGitHubTransport singleton + module-level free-function shims (ghAPI, ghPost, …)
 └── API/
     ├── GitHubScope.swift                 ← Scope enum: .repo(owner:name:) or .org(String)
     ├── GitHubConstants.swift
