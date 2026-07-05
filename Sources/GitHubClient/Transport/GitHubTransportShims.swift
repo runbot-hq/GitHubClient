@@ -13,6 +13,10 @@ import Foundation
 /// same once-written invariant that `TransportBox` previously enforced with
 /// `OSAllocatedUnfairLock`.
 ///
+/// The setter is `internal(set)` so that only code within the `GitHubClient`
+/// module (i.e. `GitHubClient.init`) can write it. External consumers get
+/// read-only access, enforcing the once-written invariant structurally.
+///
 /// - Note: The initial `GitHubTransport()` value has `tokenProvider: nil`
 ///   and will silently return `.noToken` for any call made before
 ///   `GitHubClient.init` runs. This is intentional: it matches the previous
@@ -21,7 +25,7 @@ import Foundation
 /// - Warning: Do **not** reassign this after `GitHubClient.init` has run.
 ///   Tests should always pass `transport:` explicitly at the call site and
 ///   never rely on this global.
-nonisolated(unsafe) public var sharedGitHubTransport: GitHubTransport = GitHubTransport()
+nonisolated(unsafe) public internal(set) var sharedGitHubTransport: GitHubTransport = GitHubTransport()
 
 // MARK: - HTTP verb shims
 //
@@ -74,9 +78,10 @@ public func ghAPI(_ endpoint: String, timeout: TimeInterval = 20) async -> Data?
 @concurrent
 @discardableResult
 public func ghPost(_ endpoint: String) async -> Bool {
-    let result = await sharedGitHubTransport.post(endpoint)
+    let transport = sharedGitHubTransport
+    let result = await transport.post(endpoint)
     let success = result != nil
-    sharedGitHubTransport.logger?.log("ghPost › \(endpoint) success=\(success)", category: "transport")
+    transport.logger?.log("ghPost › \(endpoint) success=\(success)", category: "transport")
     return success
 }
 

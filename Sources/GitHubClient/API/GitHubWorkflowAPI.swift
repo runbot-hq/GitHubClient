@@ -268,6 +268,10 @@ public enum GitHubRunsFetchResult: Sendable {
 
 /// Fetches active (queued + in_progress) workflow runs for a scope.
 ///
+/// Counts as one logical API operation regardless of how many status queries
+/// are issued internally — `apiCallCounter.record()` is called once on the
+/// `.success` path only.
+///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
 ///   - transport: The network transport to use. Defaults to `sharedGitHubTransport`
@@ -299,7 +303,6 @@ public func fetchActiveRuns(
             // properly. Tracked in #1950.
             if allRuns.isEmpty { return .noToken } else { return .rateLimited(allRuns) }
         }
-        await apiCallCounter.record()
         struct Response: Decodable {
             let workflowRuns: [GitHubWorkflowRun]
             enum CodingKeys: String, CodingKey { case workflowRuns = "workflow_runs" }
@@ -310,6 +313,9 @@ public func fetchActiveRuns(
             }
         }
     }
+    // Record once per logical invocation — the two-status fan-out is an
+    // implementation detail, same as pagination pages being invisible to the counter.
+    await apiCallCounter.record()
     return .success(allRuns)
 }
 
