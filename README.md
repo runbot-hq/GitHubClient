@@ -2,6 +2,19 @@
 
 A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls over `URLSession`, zero external dependencies, Swift 6.2 strict concurrency throughout.
 
+**Platform & Stack**
+
+![macOS 15+](https://img.shields.io/badge/macOS-15%2B-black?logo=apple&logoColor=white)
+![Swift 6.2](https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white)
+![SPM](https://img.shields.io/badge/SPM-compatible-F05138?logo=swift&logoColor=white)
+
+**CI Checks & Review**
+
+![Unit Tests](https://github.com/runbot-hq/GitHubClient/actions/workflows/swift-test.yml/badge.svg)
+![SwiftLint](https://github.com/runbot-hq/GitHubClient/actions/workflows/swiftlint.yml/badge.svg)
+![Periphery](https://github.com/runbot-hq/GitHubClient/actions/workflows/periphery.yml/badge.svg)
+[![Greptile](https://img.shields.io/badge/🦎%20AI%20Review-Greptile-6C47FF?logoColor=white)](https://greptile.com)
+
 ## Features
 
 - **Dual authentication** — OAuth Authorization Code flow for interactive users; `GH_TOKEN` / `GITHUB_TOKEN` env var for CI and automation. Same call site, no branching
@@ -16,7 +29,7 @@ A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls 
 ## Requirements
 
 - Swift 6.2+
-- macOS 13+
+- macOS 15+
 
 ## Installation
 
