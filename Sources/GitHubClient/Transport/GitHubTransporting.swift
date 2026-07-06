@@ -1,4 +1,4 @@
-// GitHubTransportProtocol.swift
+// GitHubTransporting.swift
 // GitHubClient
 
 import Foundation

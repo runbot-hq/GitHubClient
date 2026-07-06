@@ -1,4 +1,4 @@
-// OAuthServiceProtocol.swift
+// OAuthServicing.swift
 // GitHubClient
 import Foundation
 

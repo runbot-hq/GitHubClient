@@ -1,4 +1,4 @@
-// GitHubScope.swift
+// Scope.swift
 // GitHubClient
 
 import Foundation
