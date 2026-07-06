@@ -11,21 +11,16 @@ import os
 
 /// Returns the login names of all GitHub organisations the authenticated user belongs to.
 ///
-/// - Parameter transport: The network transport to use. Defaults to `sharedGitHubTransport`
-///   (wired at launch by `GitHubClient.init`). Pass a `MockGitHubTransport` in tests.
+/// - Parameter transport: The network transport to use. Defaults to `currentTransport`
+///   (wired at launch by `GitHubClient.init`). Pass a mock in tests.
 @concurrent
 public func fetchUserOrgs(
-    transport: any GitHubTransportProtocol = sharedGitHubTransport
+    transport: any GitHubTransportProtocol = currentTransport
 ) async -> [String] {
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
-    // guard above ensures this is only reached on non-nil data.
-    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
-    await apiCallCounter.record()
-    /// Minimal org payload — only the login name is needed.
     struct Org: Decodable {
-        /// The organisation's GitHub login name.
         let login: String
     }
     guard let orgs = try? JSONDecoder().decode([Org].self, from: data) else { return [] }
@@ -34,25 +29,18 @@ public func fetchUserOrgs(
 
 /// Returns the `owner/repo` full names of all repositories visible to the authenticated user.
 ///
-/// - Parameter transport: The network transport to use. Defaults to `sharedGitHubTransport`
-///   (wired at launch by `GitHubClient.init`). Pass a `MockGitHubTransport` in tests.
+/// - Parameter transport: The network transport to use. Defaults to `currentTransport`
+///   (wired at launch by `GitHubClient.init`). Pass a mock in tests.
 @concurrent
 public func fetchUserRepos(
-    transport: any GitHubTransportProtocol = sharedGitHubTransport
+    transport: any GitHubTransportProtocol = currentTransport
 ) async -> [String] {
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userReposPath)?sort=updated&per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
-    // guard above ensures this is only reached on non-nil data.
-    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
-    await apiCallCounter.record()
-    /// Minimal repo payload — only the full name is needed.
     struct Repo: Decodable {
-        /// The repository's full name in `owner/repo` format.
         let fullName: String
-        /// Maps the snake_case `full_name` key to the camelCase Swift property.
         enum CodingKeys: String, CodingKey {
-            /// Maps `full_name` JSON key to `fullName`.
             case fullName = "full_name"
         }
     }
@@ -69,23 +57,18 @@ private let ansiRegex: NSRegularExpression? = try? NSRegularExpression(
 )
 
 /// Fetches the log for a single step via the transport layer's `raw()` method.
-/// `raw` uses `application/vnd.github.v3.raw` and lets URLSession follow
-/// the GitHub 302→S3 redirect automatically, eliminating the need for a manual
-/// two-step redirect implementation.
 ///
 /// - Parameters:
 ///   - jobID: The numeric GitHub job ID.
 ///   - stepNumber: The 1-based step index within the job.
 ///   - scopeString: A scope string such as `"repos/acme/my-repo"`.
-///   - transport: The network transport to use. Defaults to `sharedGitHubTransport`.
-///
-/// Complexity: 3 (two guard branches).
+///   - transport: The network transport to use. Defaults to `currentTransport`.
 @concurrent
 public func fetchStepLog(
     jobID: Int,
     stepNumber: Int,
     scope scopeString: String,
-    transport: any GitHubTransportProtocol = sharedGitHubTransport
+    transport: any GitHubTransportProtocol = currentTransport
 ) async -> String? {
     guard let scope = Scope.parse(scopeString) else {
         transport.logger?.log("fetchStepLog › invalid scope: \(scopeString)", category: "transport")
@@ -104,10 +87,6 @@ public func fetchStepLog(
 }
 
 /// Fetches raw log data from `endpoint`, decodes it as UTF-8, and validates the response.
-/// Returns `nil` if the network call fails, the body is not valid UTF-8, the body is
-/// empty, or the body looks like a GitHub error JSON object.
-///
-/// Complexity: 4 (four guard/if branches).
 @concurrent
 private func fetchAndDecodeStepLog(
     endpoint: String,
@@ -135,11 +114,7 @@ private func fetchAndDecodeStepLog(
     return raw
 }
 
-/// Parses a raw log string into sections delimited by `##[group]` markers
-/// and returns the section matching `stepNumber` (1-based).
-/// Falls back to the full log if sections cannot be parsed or the index is out of range.
-///
-/// Complexity: 3 (two guard/if branches).
+/// Parses a raw log string into sections delimited by `##[group]` markers.
 private func parseStepLog(
     _ raw: String,
     stepNumber: Int,
@@ -166,9 +141,6 @@ private func parseStepLog(
 }
 
 /// Splits a cleaned log string into sections delimited by `##[group]` markers.
-/// Lines before the first marker are preamble and are intentionally skipped.
-///
-/// Complexity: 4 (for loop + two if branches).
 private func buildLogSections(from cleaned: String) -> [String] {
     let lines = cleaned.components(separatedBy: "\n")
     var sections: [String] = []
@@ -188,7 +160,6 @@ private func buildLogSections(from cleaned: String) -> [String] {
 }
 
 /// Strips ANSI escape sequences from a string using the pre-compiled `ansiRegex`.
-/// Returns the original string unchanged if the regex is unavailable.
 private func stripAnsi(_ input: String) -> String {
     guard let ansiRegex else { return input }
     let range = NSRange(input.startIndex..., in: input)
