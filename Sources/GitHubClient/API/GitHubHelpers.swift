@@ -13,6 +13,11 @@ import os
 ///
 /// - Parameter transport: The network transport to use. Defaults to `currentTransport`
 ///   (wired at launch by `GitHubClient.init`). Pass a mock in tests.
+///
+/// - Note: `= currentTransport` is evaluated at each call site, not at declaration time.
+///   Swift evaluates default parameter expressions when the function is called, so this
+///   always picks up the live `@TaskLocal` value — including any `withTransport` override
+///   in scope at the moment of the call.
 @concurrent
 public func fetchUserOrgs(
     transport: any GitHubTransportProtocol = currentTransport
@@ -34,6 +39,11 @@ public func fetchUserOrgs(
 ///
 /// - Parameter transport: The network transport to use. Defaults to `currentTransport`
 ///   (wired at launch by `GitHubClient.init`). Pass a mock in tests.
+///
+/// - Note: `= currentTransport` is evaluated at each call site, not at declaration time.
+///   Swift evaluates default parameter expressions when the function is called, so this
+///   always picks up the live `@TaskLocal` value — including any `withTransport` override
+///   in scope at the moment of the call.
 @concurrent
 public func fetchUserRepos(
     transport: any GitHubTransportProtocol = currentTransport
@@ -69,6 +79,11 @@ private let ansiRegex: NSRegularExpression? = try? NSRegularExpression(
 ///   - stepNumber: The 1-based step index within the job.
 ///   - scopeString: A scope string such as `"repos/acme/my-repo"`.
 ///   - transport: The network transport to use. Defaults to `currentTransport`.
+///
+/// - Note: `= currentTransport` is evaluated at each call site, not at declaration time.
+///   Swift evaluates default parameter expressions when the function is called, so this
+///   always picks up the live `@TaskLocal` value — including any `withTransport` override
+///   in scope at the moment of the call.
 @concurrent
 public func fetchStepLog(
     jobID: Int,
