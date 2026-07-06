@@ -36,6 +36,10 @@ nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTr
 ///
 /// All shims and domain helpers in this module read `currentTransport`
 /// directly and require no changes.
+///
+/// - Note: Declared as `var` because Swift requires `var` for computed properties;
+///   `let` is not valid for a computed getter. This property has no setter and
+///   is immutable from any call site — the compiler enforces this.
 public var currentTransport: any GitHubTransportProtocol {
     _taskLocalTransport ?? sharedGitHubTransport
 }
@@ -49,9 +53,10 @@ public var currentTransport: any GitHubTransportProtocol {
 /// }
 /// ```
 ///
-/// Declared `nonisolated` so it can be called from any actor context —
-/// including `@MainActor`-isolated `AppDelegate` — without an isolation
-/// mismatch. Task-local storage is task-scoped, not actor-scoped.
+/// - Note: Declared `nonisolated` so it can be called from any actor context —
+///   including `@MainActor`-isolated `AppDelegate` — without an isolation
+///   mismatch. Task-local storage is task-scoped, not actor-scoped, so no
+///   actor hop is needed and no isolation warning is produced.
 ///
 /// The `@Sendable` closure and `T: Sendable` bound are required because
 /// `$_taskLocalTransport.withValue` crosses task boundaries under strict

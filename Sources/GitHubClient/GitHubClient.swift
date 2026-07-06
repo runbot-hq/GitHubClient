@@ -107,8 +107,10 @@ public final class GitHubClient {
             logger: logger
         )
         // Temporarily writes via the deprecated sharedGitHubTransport alias.
-        // currentTransport picks this up automatically at the next access via
-        // its computed `_taskLocalTransport ?? sharedGitHubTransport` fallback.
+        // There is no didSet on sharedGitHubTransport — write-through is implicit.
+        // currentTransport is a computed property: `_taskLocalTransport ?? sharedGitHubTransport`.
+        // Assigning here makes the new transport immediately visible at the next
+        // currentTransport access, with no observer or side-effect involved.
         // Replace with withTransport(transport) { ... } in AppDelegate
         // once RunBotCore is ready (see #25).
         sharedGitHubTransport = transport
