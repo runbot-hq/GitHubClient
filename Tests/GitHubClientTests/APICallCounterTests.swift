@@ -210,19 +210,32 @@ struct APICallCounterTests {
   // injected callCounter on every 2xx response, using StubURLProtocol
   // (defined in GitHubTransportPaginatedTests.swift) as the network shim.
   //
+  // URLProtocol lifecycle
+  // ---------------------
+  // GitHubTransportPaginatedTests owns the URLProtocol.registerClass /
+  // unregisterClass lifecycle for StubURLProtocol on URLSession.shared.
+  // TransportIncrementGuard must NOT call registerClass or unregisterClass:
+  // the two suites run concurrently, so a spurious unregisterClass from
+  // TransportIncrementGuard.deinit would silently remove StubURLProtocol
+  // mid-run of GitHubTransportPaginatedTests, causing those tests to fall
+  // through to real network and fail.
+  //
   // URL namespace isolation
   // -----------------------
   // StubURLProtocol's registry is process-global. GitHubTransportPaginatedTests
-  // registers stubs keyed on "orgs/test/…" paths. To prevent cross-suite
-  // stub collisions under parallel test execution (the two suites are each
-  // .serialized internally but run concurrently with each other), every stub
-  // in TransportIncrementGuard uses the org name "counter-test" — a name
-  // that never appears in GitHubTransportPaginatedTests.
+  // registers stubs keyed on "orgs/test/…" paths. Every stub in
+  // TransportIncrementGuard uses the org name "counter-test" — a name that
+  // never appears in GitHubTransportPaginatedTests — so the two suites can
+  // never collide on stub keys even when running in parallel.
   //
   // .serialized is required because StubURLProtocol.reset() mutates the
-  // shared stub registry also used by GitHubTransportPaginatedTests.
-  // final class (not struct) is required so init/deinit compile for
-  // URLProtocol.registerClass / unregisterClass.
+  // shared stub registry and the tests within this suite must not race
+  // with each other on that registry.
+  //
+  // final class (not struct) is required by Swift Testing for suites that
+  // need instance storage (the `org` constant). Struct suites re-create
+  // the instance per test, which is also fine, but class makes the intent
+  // explicit and matches the pattern used by GitHubTransportPaginatedTests.
 
   @Suite("TransportIncrementGuard", .serialized)
   final class TransportIncrementGuard {
@@ -231,8 +244,9 @@ struct APICallCounterTests {
     // "test" org used by GitHubTransportPaginatedTests.
     private let org = "counter-test"
 
-    init() { URLProtocol.registerClass(StubURLProtocol.self) }
-    deinit { URLProtocol.unregisterClass(StubURLProtocol.self) }
+    // No init/deinit: URLProtocol registration is owned by
+    // GitHubTransportPaginatedTests. Adding register/unregister here
+    // causes cross-suite unregister races. See suite-level comment above.
 
     /// Builds a GitHubTransport backed by URLSession.shared (intercepted by
     /// StubURLProtocol) with the given spy injected as the call counter.
@@ -255,9 +269,6 @@ struct APICallCounterTests {
 
     // MARK: fetchRunners
 
-    /// fetchRunners(scope:) → one apiPaginated call → one HTTP hit → count == 1.
-    ///
-    /// Endpoint: "orgs/counter-test/actions/runners?per_page=100"
     @Test("fetchRunners() increments counter once per successful HTTP response")
     func fetchRunnersIncrementsCounter() async {
       StubURLProtocol.reset()
@@ -272,11 +283,6 @@ struct APICallCounterTests {
 
     // MARK: fetchActiveRuns
 
-    /// fetchActiveRuns loops over ["in_progress", "queued"] → two HTTP hits → count == 2.
-    ///
-    /// Endpoints:
-    ///   "orgs/counter-test/actions/runs?status=in_progress&per_page=50"
-    ///   "orgs/counter-test/actions/runs?status=queued&per_page=50"
     @Test("fetchActiveRuns() increments counter once per status query (2 total)")
     func fetchActiveRunsIncrementsTwice() async {
       StubURLProtocol.reset()
@@ -295,9 +301,6 @@ struct APICallCounterTests {
 
     // MARK: fetchJobs
 
-    /// fetchJobs(runID:scope:) → one apiPaginated call → one HTTP hit → count == 1.
-    ///
-    /// Endpoint: "repos/counter-test/myrepo/actions/runs/1/jobs?per_page=100"
     @Test("fetchJobs() increments counter once per successful HTTP response")
     func fetchJobsIncrementsCounter() async {
       StubURLProtocol.reset()
@@ -314,9 +317,6 @@ struct APICallCounterTests {
 
     // MARK: fetchUserOrgs
 
-    /// fetchUserOrgs() → one apiPaginated call → one HTTP hit → count == 1.
-    ///
-    /// Endpoint: "/user/orgs?per_page=100"  (path is fixed, no org in URL)
     @Test("fetchUserOrgs() increments counter once per successful HTTP response")
     func fetchUserOrgsIncrementsCounter() async {
       StubURLProtocol.reset()
@@ -332,9 +332,6 @@ struct APICallCounterTests {
 
     // MARK: fetchUserRepos
 
-    /// fetchUserRepos() → one apiPaginated call → one HTTP hit → count == 1.
-    ///
-    /// Endpoint: "/user/repos?sort=updated&per_page=100"  (path is fixed, no org in URL)
     @Test("fetchUserRepos() increments counter once per successful HTTP response")
     func fetchUserReposIncrementsCounter() async {
       StubURLProtocol.reset()
@@ -350,8 +347,6 @@ struct APICallCounterTests {
 
     // MARK: non-2xx does not increment
 
-    /// A 404 response must not increment the counter — record() is only
-    /// called inside the (200..<300) branch of interpretHTTPResponse.
     @Test("counter is not incremented on non-2xx response")
     func counterNotIncrementedOnHttpError() async {
       StubURLProtocol.reset()
@@ -368,10 +363,6 @@ struct APICallCounterTests {
 
     // MARK: multi-page paginated response
 
-    /// A 2-page paginated response must increment the counter twice — once
-    /// per HTTP page. The Link header on page 1 carries the absolute page 2
-    /// URL; apiPaginated passes it directly to resolveURL (already absolute,
-    /// returned unchanged), so the page 2 stub must be the full absolute URL.
     @Test("counter increments once per page for multi-page paginated responses")
     func counterIncrementsPerPage() async {
       StubURLProtocol.reset()
