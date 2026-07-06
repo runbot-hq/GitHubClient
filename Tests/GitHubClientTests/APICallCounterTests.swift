@@ -226,10 +226,10 @@ struct APICallCounterTests {
   // The dict wrapper is what fetchActiveRuns decodes from the *accumulated*
   // result returned by apiPaginated, not from the raw HTTP body.
   //
-  // fetchRunners  — apiPaginated — stub: []
+  // fetchRunners   — apiPaginated — stub: []
   // fetchActiveRuns — apiPaginated — stub: [] (per status)
-  // fetchJobs     — apiPaginated — stub: []
-  // fetchUserOrgs — apiPaginated — stub: []
+  // fetchJobs      — apiPaginated — stub: []
+  // fetchUserOrgs  — apiPaginated — stub: []
   // fetchUserRepos — apiPaginated — stub: []
   //
   // .serialized prevents tests within this suite from racing on the
@@ -261,6 +261,12 @@ struct APICallCounterTests {
     // Stub a 200 response returning a bare JSON array — required by apiPaginated.
     private func stub200array(_ url: String) {
       StubURLProtocol.register(.init(data: Data("[]".utf8), statusCode: 200, headers: [:]), for: url)
+    }
+
+    private func stubError(_ url: String, statusCode: Int) {
+      StubURLProtocol.register(
+        .init(data: Data("{\"message\":\"error\"}".utf8), statusCode: statusCode, headers: [:]),
+        for: url)
     }
 
     private var base: String { GitHubConstants.apiBase + "/" }
@@ -328,13 +334,29 @@ struct APICallCounterTests {
 
     // MARK: non-2xx does not increment
 
-    @Test("counter is not incremented on non-2xx response")
-    func counterNotIncrementedOnHttpError() async {
+    @Test("counter is not incremented on 404 response")
+    func counterNotIncrementedOn404() async {
       let counter = MockAPICallCounter()
       let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
-      StubURLProtocol.register(
-        .init(data: Data("{\"message\":\"Not Found\"}".utf8), statusCode: 404, headers: [:]),
-        for: url)
+      stubError(url, statusCode: 404)
+      _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 0)
+    }
+
+    @Test("counter is not incremented on 403 response (GitHub primary rate-limit signal)")
+    func counterNotIncrementedOn403() async {
+      let counter = MockAPICallCounter()
+      let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
+      stubError(url, statusCode: 403)
+      _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 0)
+    }
+
+    @Test("counter is not incremented on 429 response (secondary rate-limit signal)")
+    func counterNotIncrementedOn429() async {
+      let counter = MockAPICallCounter()
+      let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
+      stubError(url, statusCode: 429)
       _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 0)
     }
