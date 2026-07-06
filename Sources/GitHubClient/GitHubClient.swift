@@ -63,11 +63,15 @@ public final class GitHubClient {
     /// path. `TokenCache.invalidate()` is called automatically after every
     /// successful sign-in and sign-out.
     ///
-    /// Currently wires the transport via `sharedGitHubTransport` (deprecated),
-    /// which propagates to `currentTransport` via `didSet`. The final migration
-    /// step — replacing this with `$currentTransport.withValue(transport) { ... }`
-    /// scoping in `AppDelegate` — is tracked in #25 and requires a coordinated
-    /// change in `RunBotCore`.
+    /// Currently wires the transport via the deprecated `sharedGitHubTransport`
+    /// alias. There is no `didSet` — the write-through is implicit: `currentTransport`
+    /// is a computed property that reads `_taskLocalTransport ?? sharedGitHubTransport`
+    /// at call time, so assigning `sharedGitHubTransport` here is immediately
+    /// visible at every subsequent `currentTransport` access.
+    ///
+    /// The final migration step — replacing this assignment with
+    /// `withTransport(transport) { ... }` scoping in `AppDelegate` — is
+    /// tracked in #25 and requires a coordinated change in `RunBotCore`.
     ///
     /// Must be called on the main actor because `OAuthService.init` is
     /// `@MainActor`-isolated. `AppDelegate` — the only production call site —
@@ -102,9 +106,10 @@ public final class GitHubClient {
             tokenProvider: { cache.token() },
             logger: logger
         )
-        // Temporarily writes via the deprecated sharedGitHubTransport alias,
-        // which propagates to currentTransport via didSet.
-        // Replace with $currentTransport.withValue(transport) { ... } in AppDelegate
+        // Temporarily writes via the deprecated sharedGitHubTransport alias.
+        // currentTransport picks this up automatically at the next access via
+        // its computed `_taskLocalTransport ?? sharedGitHubTransport` fallback.
+        // Replace with withTransport(transport) { ... } in AppDelegate
         // once RunBotCore is ready (see #25).
         sharedGitHubTransport = transport
         self.oauthService = oauth

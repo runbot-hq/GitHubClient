@@ -34,7 +34,7 @@ nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTr
 /// otherwise falls back to `sharedGitHubTransport` — the live authenticated
 /// instance wired by `GitHubClient.init` — evaluated at call time.
 ///
-/// All 9 shims and 3 domain helpers in this module read `currentTransport`
+/// All shims and domain helpers in this module read `currentTransport`
 /// directly and require no changes.
 public var currentTransport: any GitHubTransportProtocol {
     _taskLocalTransport ?? sharedGitHubTransport
@@ -49,6 +49,10 @@ public var currentTransport: any GitHubTransportProtocol {
 /// }
 /// ```
 ///
+/// Declared `nonisolated` so it can be called from any actor context —
+/// including `@MainActor`-isolated `AppDelegate` — without an isolation
+/// mismatch. Task-local storage is task-scoped, not actor-scoped.
+///
 /// The `@Sendable` closure and `T: Sendable` bound are required because
 /// `$_taskLocalTransport.withValue` crosses task boundaries under strict
 /// concurrency checking.
@@ -57,7 +61,7 @@ public var currentTransport: any GitHubTransportProtocol {
 ///   fires even when a mock transport is injected here. This is a known latent
 ///   test-isolation concern that will be resolved when counting moves to the
 ///   transport layer in #26.
-public func withTransport<T: Sendable>(
+nonisolated public func withTransport<T: Sendable>(
     _ transport: any GitHubTransportProtocol,
     operation: @Sendable () async throws -> T
 ) async rethrows -> T {
