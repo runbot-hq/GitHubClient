@@ -3,92 +3,72 @@
 
 import Foundation
 
-// MARK: - Shared default instance
+// MARK: - @TaskLocal transport
 
-/// The process-wide default `GitHubTransport` instance.
+/// The task-local default transport used by all API free functions.
 ///
-/// Set once by `GitHubClient.init` to a fully token-wired instance before any
-/// API calls are made. Declared `nonisolated(unsafe)` because it is written
-/// exactly once at app launch — before any concurrent reads — satisfying the
-/// same once-written invariant that `TransportBox` previously enforced with
-/// `OSAllocatedUnfairLock`.
+/// In production, `GitHubClient.init` sets this via `sharedGitHubTransport` (deprecated
+/// alias below) until the host app is migrated to scope it via
+/// `$currentTransport.withValue(transport) { ... }` at the root task.
 ///
-/// The setter is `internal(set)` to reduce the write surface to module-internal
-/// code (i.e. `GitHubClient.init`). External consumers get read-only access.
-/// Note that `internal(set)` is a convention boundary, not a compile-time
-/// structural guarantee — any code inside the `GitHubClient` module can still
-/// write to this variable. The once-written invariant is enforced by convention:
-/// only `GitHubClient.init` should ever assign it.
+/// In tests, override per-task without touching any global:
+/// ```swift
+/// await $currentTransport.withValue(MockTransport()) {
+///     let orgs = await fetchUserOrgs()
+/// }
+/// ```
+@TaskLocal public var currentTransport: any GitHubTransportProtocol = GitHubTransport()
+
+// MARK: - Deprecated global alias
+
+/// Deprecated. Use `currentTransport` instead.
 ///
-/// - Note: The initial `GitHubTransport()` value has `tokenProvider: nil`
-///   and will silently return `.noToken` for any call made before
-///   `GitHubClient.init` runs. This is intentional: it matches the previous
-///   behaviour and is the correct degraded path before auth is wired.
-///
-/// - Warning: Do **not** reassign this after `GitHubClient.init` has run.
-///   Tests should always pass `transport:` explicitly at the call site and
-///   never rely on this global.
-///
-/// - Note: Swift attribute ordering requires `nonisolated` before access
-///   modifiers; `nonisolated(unsafe) public internal(set)` is correct.
-nonisolated(unsafe) public internal(set) var sharedGitHubTransport: GitHubTransport = GitHubTransport()
+/// Kept temporarily so `GitHubClient.init` and host app call sites continue
+/// to compile while the migration to `$currentTransport.withValue` is in progress.
+/// Will be removed once `AppDelegate` is updated (see #25).
+@available(*, deprecated, renamed: "currentTransport")
+nonisolated(unsafe) public internal(set) var sharedGitHubTransport: GitHubTransport = GitHubTransport() {
+    didSet { currentTransport = sharedGitHubTransport }
+}
 
 // MARK: - HTTP verb shims
 //
-// Call-site-compatible free functions delegating to `sharedGitHubTransport`.
+// Call-site-compatible free functions delegating to `currentTransport`.
 // TODO(#1513-cleanup): remove each shim as its callers are migrated.
 
 /// Sends a POST to `endpoint`. Returns response `Data` or `nil`.
-/// - SeeAlso: ``GitHubTransport/post(_:body:timeout:)``
 @concurrent
 @discardableResult
 public func urlSessionPost(_ endpoint: String, body: Data? = nil, timeout: TimeInterval = 30) async -> Data? {
-    await sharedGitHubTransport.post(endpoint, body: body, timeout: timeout)
+    await currentTransport.post(endpoint, body: body, timeout: timeout)
 }
 
 /// Sends a PUT with `body` to `endpoint`. Returns response `Data` or `nil`.
-/// - SeeAlso: ``GitHubTransport/put(_:body:timeout:)``
 @concurrent
 public func urlSessionPut(_ endpoint: String, body: Data, timeout: TimeInterval = 30) async -> Data? {
-    await sharedGitHubTransport.put(endpoint, body: body, timeout: timeout)
+    await currentTransport.put(endpoint, body: body, timeout: timeout)
 }
 
 /// Sends a DELETE to `endpoint`. Returns `true` on 2xx.
-/// - SeeAlso: ``GitHubTransport/delete(_:timeout:)``
 @concurrent
 @discardableResult
 public func urlSessionDelete(_ endpoint: String, timeout: TimeInterval = 30) async -> Bool {
-    await sharedGitHubTransport.delete(endpoint, timeout: timeout)
+    await currentTransport.delete(endpoint, timeout: timeout)
 }
 
 // MARK: - Domain shims
 
 /// Thin GET alias used widely across the module.
-/// - SeeAlso: ``GitHubTransport/apiAsync(_:timeout:)``
-///
-/// Uses `@concurrent` (not `nonisolated(nonsending)`) because this calls
-/// `sharedGitHubTransport.apiAsync` directly rather than a shim.
-/// Consistent with all other domain shims in this file.
 @concurrent
 public func ghAPI(_ endpoint: String, timeout: TimeInterval = 20) async -> Data? {
-    await sharedGitHubTransport.apiAsync(endpoint, timeout: timeout)
+    await currentTransport.apiAsync(endpoint, timeout: timeout)
 }
 
 /// Fire-and-forget POST alias. Returns `true` on 2xx.
-/// - SeeAlso: ``GitHubTransport/post(_:body:timeout:)``
-/// - Note: Intentionally discards response body (converts `Data?` → `Bool`).
-///   Use the transport method directly if the body is needed.
-/// - Note: Returns `Bool` (success/failure) rather than `Data?`. This is an intentional
-///   lossy conversion — existing callers only care whether the POST succeeded. If the
-///   response body ever becomes relevant, call `sharedGitHubTransport.post(_:)` directly.
 @concurrent
 @discardableResult
 public func ghPost(_ endpoint: String) async -> Bool {
-    // Snapshot to a local let before the await so that transport.logger (read after
-    // the suspension point) refers to the same instance that issued the request.
-    // Other shims in this file access sharedGitHubTransport inline because they
-    // don't use the transport reference after their await.
-    let transport = sharedGitHubTransport
+    let transport = currentTransport
     let result = await transport.post(endpoint)
     let success = result != nil
     transport.logger?.log("ghPost › \(endpoint) success=\(success)", category: "transport")
@@ -96,39 +76,34 @@ public func ghPost(_ endpoint: String) async -> Bool {
 }
 
 /// Deregisters a runner from GitHub via DELETE.
-/// - SeeAlso: ``GitHubTransport/deleteRunnerByID(scope:runnerID:)``
 @concurrent
 @discardableResult
 public func deleteRunnerByID(scope scopeString: String, runnerID: Int) async -> Bool {
-    await sharedGitHubTransport.deleteRunnerByID(scope: scopeString, runnerID: runnerID)
+    await currentTransport.deleteRunnerByID(scope: scopeString, runnerID: runnerID)
 }
 
 /// Replaces all custom labels on a runner.
-/// - SeeAlso: ``GitHubTransport/patchRunnerLabels(scope:runnerID:labels:)``
 @concurrent
 @discardableResult
 public func patchRunnerLabels(scope scopeString: String, runnerID: Int, labels: [String]) async -> [String]? {
-    await sharedGitHubTransport.patchRunnerLabels(scope: scopeString, runnerID: runnerID, labels: labels)
+    await currentTransport.patchRunnerLabels(scope: scopeString, runnerID: runnerID, labels: labels)
 }
 
 /// Fetches a runner registration token.
-/// - SeeAlso: ``GitHubTransport/fetchRegistrationToken(scope:)``
 @concurrent
 public func fetchRegistrationToken(scope scopeString: String) async -> String? {
-    await sharedGitHubTransport.fetchRegistrationToken(scope: scopeString)
+    await currentTransport.fetchRegistrationToken(scope: scopeString)
 }
 
 /// Fetches a runner removal token.
-/// - SeeAlso: ``GitHubTransport/fetchRemovalToken(scope:)``
 @concurrent
 public func fetchRemovalToken(scope scopeString: String) async -> String? {
-    await sharedGitHubTransport.fetchRemovalToken(scope: scopeString)
+    await currentTransport.fetchRemovalToken(scope: scopeString)
 }
 
 /// Cancels a workflow run.
-/// - SeeAlso: ``GitHubTransport/cancelRun(runID:scope:)``
 @concurrent
 @discardableResult
 public func cancelRun(runID: Int, scope scopeString: String) async -> Bool {
-    await sharedGitHubTransport.cancelRun(runID: runID, scope: scopeString)
+    await currentTransport.cancelRun(runID: runID, scope: scopeString)
 }
