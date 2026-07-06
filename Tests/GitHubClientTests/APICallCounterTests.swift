@@ -210,184 +210,152 @@ struct APICallCounterTests {
   // injected callCounter on every 2xx response, using StubURLProtocol
   // (defined in GitHubTransportPaginatedTests.swift) as the network shim.
   //
-  // URLProtocol lifecycle
-  // ---------------------
+  // Concurrency model
+  // -----------------
   // GitHubTransportPaginatedTests owns the URLProtocol.registerClass /
-  // unregisterClass lifecycle for StubURLProtocol on URLSession.shared.
-  // TransportIncrementGuard must NOT call registerClass or unregisterClass:
-  // the two suites run concurrently, so a spurious unregisterClass from
-  // TransportIncrementGuard.deinit would silently remove StubURLProtocol
-  // mid-run of GitHubTransportPaginatedTests, causing those tests to fall
-  // through to real network and fail.
+  // unregisterClass lifecycle for StubURLProtocol. The two suites run
+  // concurrently; TransportIncrementGuard must NOT call registerClass,
+  // unregisterClass, or StubURLProtocol.reset():
+  //
+  //   • registerClass / unregisterClass — a spurious unregisterClass from
+  //     deinit would silently disable stub interception mid-run of
+  //     GitHubTransportPaginatedTests.
+  //
+  //   • reset() — wipes the entire process-global stub registry; calling it
+  //     concurrently with GitHubTransportPaginatedTests races on that registry
+  //     and can wipe stubs that those tests depend on.
   //
   // URL namespace isolation
   // -----------------------
-  // StubURLProtocol's registry is process-global. GitHubTransportPaginatedTests
-  // registers stubs keyed on "orgs/test/…" paths. Every stub in
-  // TransportIncrementGuard uses the org name "counter-test" — a name that
-  // never appears in GitHubTransportPaginatedTests — so the two suites can
-  // never collide on stub keys even when running in parallel.
+  // Every stub in TransportIncrementGuard uses the org "counter-test", which
+  // never appears in GitHubTransportPaginatedTests. This guarantees zero key
+  // collisions even under concurrent execution, making reset() unnecessary.
   //
-  // .serialized is required because StubURLProtocol.reset() mutates the
-  // shared stub registry and the tests within this suite must not race
-  // with each other on that registry.
+  // .serialized is required so that tests within THIS suite do not race with
+  // each other (each test registers new stubs under the same org namespace).
   //
-  // final class (not struct) is required by Swift Testing for suites that
-  // need instance storage (the `org` constant). Struct suites re-create
-  // the instance per test, which is also fine, but class makes the intent
-  // explicit and matches the pattern used by GitHubTransportPaginatedTests.
+  // final class is required for instance storage (the `org` constant).
 
   @Suite("TransportIncrementGuard", .serialized)
   final class TransportIncrementGuard {
 
-    // Distinct org used in every stub URL to avoid collisions with the
-    // "test" org used by GitHubTransportPaginatedTests.
+    // Distinct org — never appears in GitHubTransportPaginatedTests.
     private let org = "counter-test"
 
-    // No init/deinit: URLProtocol registration is owned by
-    // GitHubTransportPaginatedTests. Adding register/unregister here
-    // causes cross-suite unregister races. See suite-level comment above.
+    // No init/deinit, no reset() calls. See suite-level comment above.
 
-    /// Builds a GitHubTransport backed by URLSession.shared (intercepted by
-    /// StubURLProtocol) with the given spy injected as the call counter.
     private func makeTransport(counter: MockAPICallCounter) -> GitHubTransport {
-      GitHubTransport(
-        tokenProvider: { "test-token" },
-        callCounter: counter
-      )
+      GitHubTransport(tokenProvider: { "test-token" }, callCounter: counter)
     }
 
-    /// Registers a single 200 response with no Link header for `url`.
     private func stub200(_ url: String, data: Data) {
-      StubURLProtocol.register(
-        .init(data: data, statusCode: 200, headers: [:]),
-        for: url)
+      StubURLProtocol.register(.init(data: data, statusCode: 200, headers: [:]), for: url)
     }
 
-    // resolveURL(relPath) = apiBase + "/" + relPath (leading slashes trimmed).
     private var base: String { GitHubConstants.apiBase + "/" }
 
     // MARK: fetchRunners
 
     @Test("fetchRunners() increments counter once per successful HTTP response")
     func fetchRunnersIncrementsCounter() async {
-      StubURLProtocol.reset()
       let counter = MockAPICallCounter()
-      let transport = makeTransport(counter: counter)
       let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
       stub200(url, data: Data("{\"runners\":[]}".utf8))
-      _ = await fetchRunners(scope: .org(org), transport: transport)
-      let count = await counter.recordedCount
-      #expect(count == 1)
+      _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 1)
     }
 
     // MARK: fetchActiveRuns
 
     @Test("fetchActiveRuns() increments counter once per status query (2 total)")
     func fetchActiveRunsIncrementsTwice() async {
-      StubURLProtocol.reset()
       let counter = MockAPICallCounter()
-      let transport = makeTransport(counter: counter)
       let ps = GitHubConstants.activeRunsPageSize
-      let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
-      let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
-      let empty = Data("{\"workflow_runs\":[]}".utf8)
-      stub200(inProgressURL, data: empty)
-      stub200(queuedURL, data: empty)
-      _ = await fetchActiveRuns(scope: .org(org), transport: transport)
-      let count = await counter.recordedCount
-      #expect(count == 2)
+      stub200(
+        "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)",
+        data: Data("{\"workflow_runs\":[]}".utf8))
+      stub200(
+        "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)",
+        data: Data("{\"workflow_runs\":[]}".utf8))
+      _ = await fetchActiveRuns(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 2)
     }
 
     // MARK: fetchJobs
 
     @Test("fetchJobs() increments counter once per successful HTTP response")
     func fetchJobsIncrementsCounter() async {
-      StubURLProtocol.reset()
       let counter = MockAPICallCounter()
-      let transport = makeTransport(counter: counter)
       let url =
         "\(base)repos/\(org)/myrepo/actions/runs/1/jobs?per_page=\(GitHubConstants.maxPageSize)"
       stub200(url, data: Data("{\"jobs\":[]}".utf8))
       _ = await fetchJobs(
-        runID: 1, scope: .repo(owner: org, name: "myrepo"), transport: transport)
-      let count = await counter.recordedCount
-      #expect(count == 1)
+        runID: 1, scope: .repo(owner: org, name: "myrepo"),
+        transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 1)
     }
 
     // MARK: fetchUserOrgs
 
     @Test("fetchUserOrgs() increments counter once per successful HTTP response")
     func fetchUserOrgsIncrementsCounter() async {
-      StubURLProtocol.reset()
       let counter = MockAPICallCounter()
-      let transport = makeTransport(counter: counter)
       let path = GitHubConstants.userOrgsPath.trimmingCharacters(in: .init(charactersIn: "/"))
-      let url = "\(base)\(path)?per_page=\(GitHubConstants.maxPageSize)"
-      stub200(url, data: Data("[]".utf8))
-      _ = await fetchUserOrgs(transport: transport)
-      let count = await counter.recordedCount
-      #expect(count == 1)
+      stub200("\(base)\(path)?per_page=\(GitHubConstants.maxPageSize)", data: Data("[]".utf8))
+      _ = await fetchUserOrgs(transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 1)
     }
 
     // MARK: fetchUserRepos
 
     @Test("fetchUserRepos() increments counter once per successful HTTP response")
     func fetchUserReposIncrementsCounter() async {
-      StubURLProtocol.reset()
       let counter = MockAPICallCounter()
-      let transport = makeTransport(counter: counter)
       let path = GitHubConstants.userReposPath.trimmingCharacters(in: .init(charactersIn: "/"))
-      let url = "\(base)\(path)?sort=updated&per_page=\(GitHubConstants.maxPageSize)"
-      stub200(url, data: Data("[]".utf8))
-      _ = await fetchUserRepos(transport: transport)
-      let count = await counter.recordedCount
-      #expect(count == 1)
+      stub200(
+        "\(base)\(path)?sort=updated&per_page=\(GitHubConstants.maxPageSize)",
+        data: Data("[]".utf8))
+      _ = await fetchUserRepos(transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 1)
     }
 
     // MARK: non-2xx does not increment
 
     @Test("counter is not incremented on non-2xx response")
     func counterNotIncrementedOnHttpError() async {
-      StubURLProtocol.reset()
       let counter = MockAPICallCounter()
-      let transport = makeTransport(counter: counter)
       let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
       StubURLProtocol.register(
         .init(data: Data("{\"message\":\"Not Found\"}".utf8), statusCode: 404, headers: [:]),
         for: url)
-      _ = await fetchRunners(scope: .org(org), transport: transport)
-      let count = await counter.recordedCount
-      #expect(count == 0)
+      _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 0)
     }
 
-    // MARK: multi-page paginated response
+    // MARK: multi-page
 
     @Test("counter increments once per page for multi-page paginated responses")
     func counterIncrementsPerPage() async {
-      StubURLProtocol.reset()
       let counter = MockAPICallCounter()
-      let transport = makeTransport(counter: counter)
       let page1URL = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
       let page2URL =
         "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)&page=2"
-      let runner1 = Data(
-        "[{\"id\":1,\"name\":\"r1\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8)
-      let runner2 = Data(
-        "[{\"id\":2,\"name\":\"r2\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8)
       StubURLProtocol.register(
         .init(
-          data: runner1,
+          data: Data(
+            "[{\"id\":1,\"name\":\"r1\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
           statusCode: 200,
           headers: ["Link": "<\(page2URL)>; rel=\"next\""]),
         for: page1URL)
       StubURLProtocol.register(
-        .init(data: runner2, statusCode: 200, headers: [:]),
+        .init(
+          data: Data(
+            "[{\"id\":2,\"name\":\"r2\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
+          statusCode: 200, headers: [:]),
         for: page2URL)
-      _ = await transport.apiPaginated(
+      _ = await makeTransport(counter: counter).apiPaginated(
         "orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)")
-      let count = await counter.recordedCount
-      #expect(count == 2)
+      #expect(await counter.recordedCount == 2)
     }
   }
 }
