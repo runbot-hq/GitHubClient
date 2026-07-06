@@ -445,11 +445,15 @@ private func makeJobsJSON() -> Data {
 }
 
 /// Minimal valid orgs list JSON for `fetchUserOrgs` decode path.
+/// The GitHub /user/orgs endpoint returns a top-level JSON array (not a keyed wrapper
+/// like /actions/runners). This bare `[]` is intentional and matches the real API shape.
 private func makeOrgsJSON() -> Data {
   Data("[]".utf8)
 }
 
 /// Minimal valid repos list JSON for `fetchUserRepos` decode path.
+/// The GitHub /user/repos endpoint returns a top-level JSON array (not a keyed wrapper
+/// like /actions/runners). This bare `[]` is intentional and matches the real API shape.
 private func makeReposJSON() -> Data {
   Data("[]".utf8)
 }
