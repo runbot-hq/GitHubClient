@@ -1,4 +1,4 @@
-<img width="120" alt="img" src="icon2_masked.png">
+<img width="240" alt="img" src="icon2_masked.png">
 
 # GitHubClient
 
