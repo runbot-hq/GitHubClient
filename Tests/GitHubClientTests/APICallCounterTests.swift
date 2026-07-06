@@ -210,29 +210,22 @@ struct APICallCounterTests {
   // injected callCounter on every 2xx response, using StubURLProtocol
   // (defined in GitHubTransportPaginatedTests.swift) as the network shim.
   //
-  // Concurrency model
-  // -----------------
-  // GitHubTransportPaginatedTests owns the URLProtocol.registerClass /
-  // unregisterClass lifecycle for StubURLProtocol. The two suites run
-  // concurrently; TransportIncrementGuard must NOT call registerClass,
-  // unregisterClass, or StubURLProtocol.reset():
+  // URLSession isolation
+  // --------------------
+  // GitHubTransportPaginatedTests registers StubURLProtocol on
+  // URLSession.shared via URLProtocol.registerClass in its init/deinit.
+  // TransportIncrementGuard must NOT rely on that lifecycle, because the
+  // two suites run concurrently and GitHubTransportPaginatedTests may
+  // not have called registerClass yet (or may have already called
+  // unregisterClass) when TransportIncrementGuard tests execute.
   //
-  //   • registerClass / unregisterClass — a spurious unregisterClass from
-  //     deinit would silently disable stub interception mid-run of
-  //     GitHubTransportPaginatedTests.
+  // Fix: each test builds a private URLSession using
+  // URLSessionConfiguration.ephemeral with protocolClasses injected
+  // directly. This session is fully self-contained and never touches
+  // URLSession.shared or the registerClass/unregisterClass lifecycle.
   //
-  //   • reset() — wipes the entire process-global stub registry; calling it
-  //     concurrently with GitHubTransportPaginatedTests races on that registry
-  //     and can wipe stubs that those tests depend on.
-  //
-  // URL namespace isolation
-  // -----------------------
-  // Every stub in TransportIncrementGuard uses the org "counter-test", which
-  // never appears in GitHubTransportPaginatedTests. This guarantees zero key
-  // collisions even under concurrent execution, making reset() unnecessary.
-  //
-  // .serialized is required so that tests within THIS suite do not race with
-  // each other (each test registers new stubs under the same org namespace).
+  // .serialized is required so tests within THIS suite do not race on
+  // the shared stub registry (each test registers new stubs).
   //
   // final class is required for instance storage (the `org` constant).
 
@@ -242,10 +235,21 @@ struct APICallCounterTests {
     // Distinct org — never appears in GitHubTransportPaginatedTests.
     private let org = "counter-test"
 
-    // No init/deinit, no reset() calls. See suite-level comment above.
+    // Private URLSession with StubURLProtocol injected via protocolClasses.
+    // Fully self-contained: does not depend on URLProtocol.registerClass /
+    // unregisterClass. Safe to use regardless of GitHubTransportPaginatedTests
+    // registration lifecycle.
+    private let stubSession: URLSession = {
+      let config = URLSessionConfiguration.ephemeral
+      config.protocolClasses = [StubURLProtocol.self]
+      return URLSession(configuration: config)
+    }()
 
     private func makeTransport(counter: MockAPICallCounter) -> GitHubTransport {
-      GitHubTransport(tokenProvider: { "test-token" }, callCounter: counter)
+      GitHubTransport(
+        session: stubSession,
+        tokenProvider: { "test-token" },
+        callCounter: counter)
     }
 
     private func stub200(_ url: String, data: Data) {
