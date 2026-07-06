@@ -36,18 +36,15 @@ public struct GitHubRunnerLabel: Codable, Sendable, Equatable {
 ///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
-///   - transport: The network transport to use. Defaults to `sharedGitHubTransport`
-///     (wired at launch by `GitHubClient.init`). Pass a `MockGitHubTransport` in tests.
+///   - transport: The network transport to use. Defaults to `currentTransport`
+///     (wired at launch by `GitHubClient.init`). Pass a mock in tests.
 @concurrent
 public func fetchRunners(
     scope: Scope,
-    transport: any GitHubTransportProtocol = sharedGitHubTransport
+    transport: any GitHubTransportProtocol = currentTransport
 ) async -> [GitHubRunner] {
     let endpoint = "\(scope.apiPrefix)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
-    // guard above ensures this is only reached on non-nil data.
-    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
-    await apiCallCounter.record()
     struct Response: Decodable { let runners: [GitHubRunner] }
     return (try? JSONDecoder().decode(Response.self, from: data))?.runners ?? []
 }
@@ -56,12 +53,11 @@ public func fetchRunners(
 ///
 /// - Parameters:
 ///   - scopeString: A scope string such as `"orgs/acme"` or `"repos/acme/my-repo"`.
-///   - transport: The network transport to use. Defaults to `sharedGitHubTransport`.
-///     Threaded through to `fetchRunners(scope:transport:)`.
+///   - transport: The network transport to use. Defaults to `currentTransport`.
 @concurrent
 public func fetchRunners(
     scopeString: String,
-    transport: any GitHubTransportProtocol = sharedGitHubTransport
+    transport: any GitHubTransportProtocol = currentTransport
 ) async -> [GitHubRunner]? {
     guard let scope = Scope.parse(scopeString) else { return nil }
     return await fetchRunners(scope: scope, transport: transport)
