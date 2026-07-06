@@ -3,13 +3,26 @@
 
 import Foundation
 
+// MARK: - Process-wide transport instance
+
+/// The process-wide default transport instance.
+///
+/// Set once by `GitHubClient.init` at app launch before any API calls are made.
+/// Declared `nonisolated(unsafe)` because it is written exactly once — before
+/// any concurrent reads — satisfying the once-written invariant.
+///
+/// Deprecated in favour of `currentTransport`. Will be removed once
+/// `AppDelegate` is migrated to scope via `$currentTransport.withValue` (see #25).
+@available(*, deprecated, renamed: "currentTransport")
+nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTransportProtocol = GitHubTransport()
+
 // MARK: - @TaskLocal transport
 
 /// The task-local default transport used by all API free functions.
 ///
-/// In production, `GitHubClient.init` sets this via `sharedGitHubTransport` (deprecated
-/// alias below) until the host app is migrated to scope it via
-/// `$currentTransport.withValue(transport) { ... }` at the root task.
+/// Defaults to `sharedGitHubTransport` (evaluated at access time), so all
+/// unoverridden call sites automatically pick up the live transport wired by
+/// `GitHubClient.init` — with no behaviour change in production.
 ///
 /// In tests, override per-task without touching any global:
 /// ```swift
@@ -17,19 +30,11 @@ import Foundation
 ///     let orgs = await fetchUserOrgs()
 /// }
 /// ```
-@TaskLocal public var currentTransport: any GitHubTransportProtocol = GitHubTransport()
-
-// MARK: - Deprecated global alias
-
-/// Deprecated. Use `currentTransport` instead.
 ///
-/// Kept temporarily so `GitHubClient.init` and host app call sites continue
-/// to compile while the migration to `$currentTransport.withValue` is in progress.
-/// Will be removed once `AppDelegate` is updated (see #25).
-@available(*, deprecated, renamed: "currentTransport")
-nonisolated(unsafe) public internal(set) var sharedGitHubTransport: GitHubTransport = GitHubTransport() {
-    didSet { currentTransport = sharedGitHubTransport }
-}
+/// The final migration step — replacing the `sharedGitHubTransport` write in
+/// `GitHubClient.init` with `$currentTransport.withValue` scoping in `AppDelegate`
+/// — is tracked in #25.
+@TaskLocal public var currentTransport: any GitHubTransportProtocol = sharedGitHubTransport
 
 // MARK: - HTTP verb shims
 //
