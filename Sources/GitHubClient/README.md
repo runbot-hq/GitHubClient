@@ -48,10 +48,11 @@ Once extracted to its own repo the import will become:
 
 The recommended entry point is the `GitHubClient` facade. It constructs and wires
 `KeychainTokenStore`, `TokenCache`, `OAuthService`, and `GitHubTransport` in one call —
-`TokenCache.invalidate()` is called automatically after every sign-in and sign-out, and
-`sharedGitHubTransport` is pointed at the fully-wired transport instance so that
-module-level free functions (`ghPost`, `fetchStepLog`, `fetchRunners`, etc.) work
-without any additional wiring in `AppDelegate`.
+`TokenCache.invalidate()` is called automatically after every sign-in and sign-out.
+Module-level free functions (`ghPost`, `fetchStepLog`, `fetchRunners`, etc.) resolve
+their transport via `currentTransport` — a computed property that returns the active
+`@TaskLocal` override if one is in scope, or falls back to the instance wired by
+`GitHubClient.init`. No additional wiring in `AppDelegate` is required.
 
 ```swift
 // AppDelegate or your app's composition root (@MainActor)
@@ -75,6 +76,15 @@ let github = GitHubClient(
     oauthService: MockOAuthService(),
     transport: MockTransport()
 )
+```
+
+To scope a transport override to a task (e.g. in tests or background operations),
+use `withTransport(_:operation:)`:
+
+```swift
+await withTransport(MockTransport()) {
+    let orgs = await fetchUserOrgs()   // picks up MockTransport via @TaskLocal
+}
 ```
 
 ## Authentication
@@ -243,7 +253,7 @@ extension MyLogger: GitHubLogger {
 
 ```
 Sources/GitHubClient/
-├── GitHubClient.swift                    ← facade: production + test inits; wires sharedGitHubTransport
+├── GitHubClient.swift                    ← facade: production + test inits; wires currentTransport fallback
 ├── Protocols/
 │   ├── TokenStore.swift                  ← persist/load tokens; inject your own or use KeychainTokenStore
 │   └── GitHubLogger.swift                ← log sink; nonisolated for cross-actor transport calls
@@ -255,7 +265,7 @@ Sources/GitHubClient/
 │   ├── GitHubTransportProtocol.swift
 │   ├── GitHubURLSessionTransport.swift   ← URLSession, rate-limit backoff, ExecuteResult pipeline
 │   ├── GitHubTransport+Conformance.swift ← apiPaginated, post, put, delete, cancelRun, etc.
-│   └── GitHubTransportShims.swift        ← sharedGitHubTransport singleton + module-level free-function shims (ghAPI, ghPost, …)
+│   └── GitHubTransportShims.swift        ← currentTransport (@TaskLocal read path) + withTransport(_:operation:) + module-level free-function shims (ghAPI, ghPost, …)
 └── API/
     ├── GitHubScope.swift                 ← Scope enum: .repo(owner:name:) or .org(String)
     ├── GitHubConstants.swift
