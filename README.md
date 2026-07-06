@@ -27,6 +27,9 @@ A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls 
 - 🔑 **`KeychainTokenStore` built in** — ready-made Keychain integration via `Security.framework`; swap in a mock for tests via the `TokenStore` protocol
 - ⚡ **Swift 6.2 strict concurrency** — no `@unchecked Sendable`, compiler-enforced boundaries throughout
 - 🧪 **Testable by design** — every concrete type hidden behind a protocol; inject a fake transport or token store in tests with no Keychain involvement
+- 🤖 **Self-hosted runner queries** — fetch all runners for an org or repo scope via `fetchRunners(scope:)` / `fetchRunners(scopeString:)`; returns `[GitHubRunner]` with name, status, busy flag, and labels. Pagination handled automatically
+- ⚙️ **Workflow run & job inspection** — `fetchActiveRuns(scope:)` returns a typed `GitHubRunsFetchResult` distinguishing `.success`, `.rateLimited(partial)`, and `.noToken`; `fetchJobs(runID:scope:)` returns full `[GitHubJob]` trees with steps, runner name, and timestamps; `fetchStepLog(jobID:stepNumber:scope:)` fetches and parses raw CI logs per step, stripping ANSI codes automatically
+- 👤 **User context helpers** — `fetchUserOrgs()` and `fetchUserRepos()` return the authenticated user's org login names and `owner/repo` full names; useful for building scope-picker UIs
 
 ## Requirements
 
@@ -76,6 +79,78 @@ let github = GitHubClient(
     oauthService: MockOAuthService(),
     transport: MockTransport()
 )
+```
+
+## Usage Examples
+
+### Fetch self-hosted runners for an org
+
+```swift
+import GitHubClient
+
+// CI / automation — token picked up from GH_TOKEN / GITHUB_TOKEN automatically
+let runners = await fetchRunners(scopeString: "orgs/acme")
+for runner in runners ?? [] {
+    print("\(runner.name) — \(runner.status) (busy: \(runner.busy))")
+}
+```
+
+### Fetch active workflow runs for a repo
+
+```swift
+let scope = Scope.parse("repos/acme/my-repo")!
+
+switch await fetchActiveRuns(scope: scope) {
+case .success(let runs):
+    for run in runs {
+        print("[\(run.status)] \(run.name ?? "unnamed") — \(run.htmlUrl)")
+    }
+case .rateLimited(let partial):
+    print("Rate-limited; \(partial.count) partial results returned")
+case .noToken:
+    print("No GitHub token configured — trigger OAuth sign-in")
+case .authFailure:
+    print("Token rejected by GitHub")
+}
+```
+
+### Fetch jobs for a specific run
+
+```swift
+let jobs = await fetchJobs(runID: 12345678, scope: scope)
+for job in jobs {
+    let conclusion = job.conclusion ?? "in progress"
+    print("  \(job.name): \(conclusion) (\(job.steps.count) steps)")
+}
+```
+
+### Fetch a step log
+
+```swift
+if let log = await fetchStepLog(jobID: 987654, stepNumber: 2, scope: "repos/acme/my-repo") {
+    print(log)
+}
+```
+
+### Fetch user orgs and repos
+
+```swift
+let orgs = await fetchUserOrgs()
+let repos = await fetchUserRepos()
+print("Orgs: \(orgs)")
+print("Repos: \(repos)")
+```
+
+### Testing with mock transport
+
+```swift
+// Inject a MockTransport — no Keychain, no network
+let client = GitHubClient(
+    oauthService: MockOAuthService(),
+    transport: MockTransport()
+)
+let jobs = await fetchJobs(runID: 1, scope: .org("acme"), transport: client.transport)
+XCTAssertEqual(jobs.count, 2)
 ```
 
 ## Authentication
