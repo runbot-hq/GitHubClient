@@ -20,6 +20,9 @@ public func fetchUserOrgs(
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
+    // guard above ensures this is only reached on non-nil data.
+    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
+    await apiCallCounter.record()
     struct Org: Decodable {
         let login: String
     }
@@ -38,6 +41,9 @@ public func fetchUserRepos(
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userReposPath)?sort=updated&per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
+    // guard above ensures this is only reached on non-nil data.
+    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
+    await apiCallCounter.record()
     struct Repo: Decodable {
         let fullName: String
         enum CodingKeys: String, CodingKey {
