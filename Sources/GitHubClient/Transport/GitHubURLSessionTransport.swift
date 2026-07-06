@@ -7,10 +7,10 @@ import Foundation
 
 /// The concrete `URLSession`-backed implementation of `GitHubTransportProtocol`.
 ///
-/// `GitHubTransport` owns the decoder, encoder, session, rate-limiter, and token-provider.
-/// Callers that need a real network transport use `sharedGitHubTransport`; tests
-/// inject a mock conformer or construct a custom instance via
-/// `init(decoder:encoder:session:rateLimiter:tokenProvider:)`.
+/// `GitHubTransport` owns the decoder, encoder, session, rate-limiter, token-provider,
+/// and call counter. Callers that need a real network transport use `currentTransport`;
+/// tests inject a mock conformer or construct a custom instance via
+/// `init(decoder:encoder:session:rateLimiter:tokenProvider:logger:callCounter:)`.
 ///
 /// **Thread safety:** `GitHubTransport` is a value type whose `let` properties are either
 /// value types or `Sendable` reference types. `JSONDecoder`/`JSONEncoder` are reference types
@@ -43,6 +43,15 @@ public struct GitHubTransport: GitHubTransportProtocol {
   /// downcasting to the concrete `GitHubTransport` type.
   public let logger: (any GitHubLogger)?
 
+  /// Call counter incremented once per successful HTTP round-trip (2xx response).
+  ///
+  /// Injected at init so tests can pass a mock conformer and assert call counts
+  /// without touching the shared singleton. Defaults to `APICallCounter.shared`.
+  ///
+  /// Recorded inside `interpretHTTPResponse` — the single path every successful
+  /// `execute(_:)` call flows through, regardless of HTTP verb or pagination.
+  private let callCounter: any APICallCounterProtocol
+
   // MARK: - Init
 
   /// Creates a `GitHubTransport` with the given dependencies. All parameters have defaults
@@ -58,7 +67,8 @@ public struct GitHubTransport: GitHubTransportProtocol {
     session: URLSession = .shared,
     rateLimiter: some RateLimitActorProtocol = rateLimitActor,
     tokenProvider: (@Sendable () -> String?)? = nil,
-    logger: (any GitHubLogger)? = nil
+    logger: (any GitHubLogger)? = nil,
+    callCounter: any APICallCounterProtocol = APICallCounter.shared
   ) {
     self.decoder = decoder
     self.encoder = encoder
@@ -66,6 +76,7 @@ public struct GitHubTransport: GitHubTransportProtocol {
     self.rateLimiter = rateLimiter
     self.tokenProvider = tokenProvider ?? { nil }
     self.logger = logger
+    self.callCounter = callCounter
   }
 
   // MARK: - Core execution
@@ -137,6 +148,9 @@ public struct GitHubTransport: GitHubTransportProtocol {
   // MARK: - HTTP response interpretation
 
   /// Maps an HTTP response + body into an `ExecuteResult`, arming rate-limit back-off as needed.
+  ///
+  /// Records one call-counter hit on every 2xx response — the single point all successful
+  /// HTTP round-trips flow through regardless of verb or pagination depth.
   private func interpretHTTPResponse(
     _ response: URLResponse,
     data: Data,
@@ -161,6 +175,7 @@ public struct GitHubTransport: GitHubTransportProtocol {
       return .httpError(http.statusCode)
     }
     await rateLimiter.clearIfNotLimited()
+    await callCounter.record()
     let linkHeader = http.value(forHTTPHeaderField: "Link")
     return .success(data, statusCode: http.statusCode, linkHeader: linkHeader)
   }
