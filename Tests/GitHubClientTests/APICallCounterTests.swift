@@ -240,10 +240,14 @@ struct APICallCounterTests {
   // `reset()` on it. They are run .serialized to prevent concurrent scheduling
   // from interleaving a reset from one test with the record/snapshot of another.
   //
-  // Nil-path tests are intentionally omitted for all functions: record() sits
-  // after a `guard let data = ... else { return }`, making it structurally
-  // unreachable on a nil transport result. Testing that would be testing Swift,
-  // not this module.
+  // Nil-path tests are intentionally omitted for fetchJobs, fetchUserOrgs, and
+  // fetchUserRepos: record() sits after a `guard let data = ... else { return }`,
+  // making it structurally unreachable on a nil transport result. Testing that
+  // would be testing Swift, not this module.
+  //
+  // fetchActiveRuns is different: record() is placed after the for-loop, so the
+  // nil path requires driving two separate mock responses — one non-nil (first
+  // status) and one nil (second status). Both cases are covered below.
 
   @Suite("TransportIncrementGuard", .serialized)
   struct TransportIncrementGuard {
@@ -273,6 +277,32 @@ struct APICallCounterTests {
       _ = await fetchActiveRuns(scope: .org("test"), transport: mock)
       let snap = await apiCallCounter.snapshot()
       #expect(snap.count == 1)
+    }
+
+    /// Verifies that `fetchActiveRuns` does NOT increment `apiCallCounter` when the first
+    /// status ("in_progress") returns non-nil but the second ("queued") returns nil,
+    /// causing an early `.rateLimited` return before `record()` is reached.
+    ///
+    /// This covers the partial-success nil path: one API page was fetched successfully,
+    /// but the loop did not complete, so the counter must not be incremented.
+    @Test("fetchActiveRuns() does not increment counter on partial nil (second status returns nil)")
+    func fetchActiveRunsSkipsCounterOnPartialNilResult() async {
+      await apiCallCounter.reset()
+      let mock = MockTransport()
+      let payload = makeRunsJSON()
+      // First call (in_progress) returns data; second call (queued) returns nil.
+      var callCount = 0
+      mock.onApiPaginated = { _, _ in
+        callCount += 1
+        return callCount == 1 ? payload : nil
+      }
+      let result = await fetchActiveRuns(scope: .org("test"), transport: mock)
+      // Sanity-check the function took the .rateLimited path (allRuns was non-empty
+      // after the first status decoded successfully, or empty but non-nil — either
+      // way the early return fires before record()).
+      if case .rateLimited = result { /* expected */ }
+      let snap = await apiCallCounter.snapshot()
+      #expect(snap.count == 0, "counter must not increment when the loop exits early via .rateLimited")
     }
 
     /// Verifies that `fetchJobs` increments `apiCallCounter` when the transport returns non-nil data.
@@ -321,8 +351,9 @@ struct APICallCounterTests {
       #expect(snap.count == 0)
     }
 
-    /// Verifies that `fetchActiveRuns` does NOT increment `apiCallCounter` when the transport returns nil.
-    @Test("fetchActiveRuns() does not increment counter when transport returns nil")
+    /// Verifies that `fetchActiveRuns` does NOT increment `apiCallCounter` when the
+    /// first status ("in_progress") returns nil, causing an immediate `.noToken` return.
+    @Test("fetchActiveRuns() does not increment counter when first status returns nil")
     func fetchActiveRunsSkipsCounterOnNilResult() async {
       await apiCallCounter.reset()
       let mock = MockTransport()

@@ -13,9 +13,12 @@ import Foundation
 /// same once-written invariant that `TransportBox` previously enforced with
 /// `OSAllocatedUnfairLock`.
 ///
-/// The setter is `internal(set)` so that only code within the `GitHubClient`
-/// module (i.e. `GitHubClient.init`) can write it. External consumers get
-/// read-only access, enforcing the once-written invariant structurally.
+/// The setter is `internal(set)` to reduce the write surface to module-internal
+/// code (i.e. `GitHubClient.init`). External consumers get read-only access.
+/// Note that `internal(set)` is a convention boundary, not a compile-time
+/// structural guarantee — any code inside the `GitHubClient` module can still
+/// write to this variable. The once-written invariant is enforced by convention:
+/// only `GitHubClient.init` should ever assign it.
 ///
 /// - Note: The initial `GitHubTransport()` value has `tokenProvider: nil`
 ///   and will silently return `.noToken` for any call made before
