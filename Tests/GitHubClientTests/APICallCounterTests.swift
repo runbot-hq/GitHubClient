@@ -247,7 +247,18 @@ struct APICallCounterTests {
   //
   // fetchActiveRuns is different: record() is placed after the for-loop, so the
   // nil path requires driving two separate mock responses — one non-nil (first
-  // status) and one nil (second status). Both cases are covered below.
+  // status) and one nil (second status). Two nil-path variants are covered:
+  //
+  //   • fetchActiveRunsSkipsCounterOnPartialNilResult — first call returns a
+  //     non-empty run list (allRuns becomes non-empty), second returns nil →
+  //     .rateLimited(partialRuns). Counter must NOT increment.
+  //
+  //   • fetchActiveRunsReturnsNoTokenWhenFirstStatusReturnsEmptyThenNil — first
+  //     call returns valid but empty JSON (allRuns stays empty), second returns
+  //     nil → .noToken. Counter must NOT increment.
+  //
+  // These two variants are distinct code paths inside the same guard branch
+  // and must be tested separately.
 
   @Suite("TransportIncrementGuard", .serialized)
   struct TransportIncrementGuard {
@@ -280,29 +291,61 @@ struct APICallCounterTests {
     }
 
     /// Verifies that `fetchActiveRuns` does NOT increment `apiCallCounter` when the first
-    /// status ("in_progress") returns non-nil but the second ("queued") returns nil,
-    /// causing an early `.rateLimited` return before `record()` is reached.
+    /// status ("in_progress") returns a non-empty run list and the second ("queued") returns nil.
     ///
-    /// This covers the partial-success nil path: one API page was fetched successfully,
-    /// but the loop did not complete, so the counter must not be incremented.
-    @Test("fetchActiveRuns() does not increment counter on partial nil (second status returns nil)")
+    /// Because `allRuns` is non-empty when the nil guard fires, the function returns
+    /// `.rateLimited(partialRuns)` — not `.noToken`. This is the genuine partial-success
+    /// path. The counter must NOT be incremented because `record()` is only reached after
+    /// the loop completes normally.
+    ///
+    /// - Note: `makeRunsJSONWithRun()` is used (not `makeRunsJSON()`) to ensure `allRuns`
+    ///   is non-empty after decoding the first response. Using the empty-array fixture here
+    ///   would leave `allRuns` empty and produce `.noToken` instead — that path is covered
+    ///   by `fetchActiveRunsReturnsNoTokenWhenFirstStatusReturnsEmptyThenNil` below.
+    @Test("fetchActiveRuns() does not increment counter on partial nil (second status returns nil, allRuns non-empty → .rateLimited)")
     func fetchActiveRunsSkipsCounterOnPartialNilResult() async {
       await apiCallCounter.reset()
       let mock = MockTransport()
-      let payload = makeRunsJSON()
-      // First call (in_progress) returns data; second call (queued) returns nil.
+      // First call (in_progress): non-empty run list so allRuns is non-empty.
+      // Second call (queued): nil → guard fires → .rateLimited(partialRuns).
       var callCount = 0
       mock.onApiPaginated = { _, _ in
         callCount += 1
-        return callCount == 1 ? payload : nil
+        return callCount == 1 ? makeRunsJSONWithRun() : nil
       }
       let result = await fetchActiveRuns(scope: .org("test"), transport: mock)
-      // Sanity-check the function took the .rateLimited path (allRuns was non-empty
-      // after the first status decoded successfully, or empty but non-nil — either
-      // way the early return fires before record()).
-      if case .rateLimited = result { /* expected */ }
+      guard case .rateLimited = result else {
+        Issue.record("expected .rateLimited, got \(result)")
+        return
+      }
       let snap = await apiCallCounter.snapshot()
       #expect(snap.count == 0, "counter must not increment when the loop exits early via .rateLimited")
+    }
+
+    /// Verifies that `fetchActiveRuns` returns `.noToken` and does NOT increment
+    /// `apiCallCounter` when the first status returns valid but empty JSON (so `allRuns`
+    /// stays empty) and the second status returns nil.
+    ///
+    /// Because `allRuns.isEmpty` is true when the nil guard fires, the function takes
+    /// the `return .noToken` branch. This is distinct from the `.rateLimited` path above.
+    @Test("fetchActiveRuns() returns .noToken and skips counter when first status returns empty JSON then second returns nil")
+    func fetchActiveRunsReturnsNoTokenWhenFirstStatusReturnsEmptyThenNil() async {
+      await apiCallCounter.reset()
+      let mock = MockTransport()
+      // First call: valid but empty run list (allRuns stays empty).
+      // Second call: nil → guard fires → allRuns.isEmpty → .noToken.
+      var callCount = 0
+      mock.onApiPaginated = { _, _ in
+        callCount += 1
+        return callCount == 1 ? makeRunsJSON() : nil
+      }
+      let result = await fetchActiveRuns(scope: .org("test"), transport: mock)
+      guard case .noToken = result else {
+        Issue.record("expected .noToken, got \(result)")
+        return
+      }
+      let snap = await apiCallCounter.snapshot()
+      #expect(snap.count == 0, "counter must not increment when the loop exits early via .noToken")
     }
 
     /// Verifies that `fetchJobs` increments `apiCallCounter` when the transport returns non-nil data.
@@ -371,9 +414,29 @@ private func makeRunnersJSON() -> Data {
   Data("{\"runners\":[]}".utf8)
 }
 
-/// Minimal valid workflow runs list JSON for `fetchActiveRuns` decode path.
+/// Minimal valid workflow runs list JSON for `fetchActiveRuns` decode path — empty array.
+/// Produces an `allRuns`-empty result after decoding.
 private func makeRunsJSON() -> Data {
   Data("{\"workflow_runs\":[]}".utf8)
+}
+
+/// Minimal valid workflow runs list JSON containing one run, for `fetchActiveRuns` tests
+/// that need `allRuns` to be non-empty after decoding the first status response.
+/// All required fields are present; optional fields are omitted.
+private func makeRunsJSONWithRun() -> Data {
+  Data("""
+  {"workflow_runs":[{
+    "id":1,
+    "name":"CI",
+    "status":"in_progress",
+    "conclusion":null,
+    "head_branch":"main",
+    "head_sha":"abc123",
+    "html_url":"https://github.com/test/repo/actions/runs/1",
+    "created_at":"2026-07-06T00:00:00Z",
+    "updated_at":"2026-07-06T00:00:00Z"
+  }]}
+  """.utf8)
 }
 
 /// Minimal valid jobs list JSON for `fetchJobs` decode path.
