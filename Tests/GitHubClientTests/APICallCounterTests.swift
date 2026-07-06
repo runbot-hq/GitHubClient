@@ -212,22 +212,29 @@ struct APICallCounterTests {
   //
   // URLSession isolation
   // --------------------
-  // GitHubTransportPaginatedTests registers StubURLProtocol on
-  // URLSession.shared via URLProtocol.registerClass in its init/deinit.
-  // TransportIncrementGuard must NOT rely on that lifecycle, because the
-  // two suites run concurrently and GitHubTransportPaginatedTests may
-  // not have called registerClass yet (or may have already called
-  // unregisterClass) when TransportIncrementGuard tests execute.
+  // Each test builds a private URLSession using
+  // URLSessionConfiguration.ephemeral with protocolClasses = [StubURLProtocol]
+  // injected directly. This session is fully self-contained and never touches
+  // URLSession.shared or the registerClass/unregisterClass lifecycle owned by
+  // GitHubTransportPaginatedTests.
   //
-  // Fix: each test builds a private URLSession using
-  // URLSessionConfiguration.ephemeral with protocolClasses injected
-  // directly. This session is fully self-contained and never touches
-  // URLSession.shared or the registerClass/unregisterClass lifecycle.
+  // Stub data shapes
+  // ----------------
+  // apiPaginated decodes each HTTP response body as [AnyJSON] (a flat JSON
+  // array). Stubs for endpoints that go through apiPaginated must return a
+  // bare JSON array (e.g. []) — NOT a dict wrapper like {"workflow_runs":[]}.
+  // The dict wrapper is what fetchActiveRuns decodes from the *accumulated*
+  // result returned by apiPaginated, not from the raw HTTP body.
   //
-  // .serialized is required so tests within THIS suite do not race on
-  // the shared stub registry (each test registers new stubs).
+  // fetchRunners  — apiPaginated — stub: []
+  // fetchActiveRuns — apiPaginated — stub: [] (per status)
+  // fetchJobs     — apiPaginated — stub: []
+  // fetchUserOrgs — apiPaginated — stub: []
+  // fetchUserRepos — apiPaginated — stub: []
   //
-  // final class is required for instance storage (the `org` constant).
+  // .serialized prevents tests within this suite from racing on the
+  // shared stub registry.
+  // final class is required for stored properties.
 
   @Suite("TransportIncrementGuard", .serialized)
   final class TransportIncrementGuard {
@@ -236,9 +243,8 @@ struct APICallCounterTests {
     private let org = "counter-test"
 
     // Private URLSession with StubURLProtocol injected via protocolClasses.
-    // Fully self-contained: does not depend on URLProtocol.registerClass /
-    // unregisterClass. Safe to use regardless of GitHubTransportPaginatedTests
-    // registration lifecycle.
+    // Fully self-contained; does not depend on URLProtocol.registerClass /
+    // unregisterClass.
     private let stubSession: URLSession = {
       let config = URLSessionConfiguration.ephemeral
       config.protocolClasses = [StubURLProtocol.self]
@@ -252,8 +258,9 @@ struct APICallCounterTests {
         callCounter: counter)
     }
 
-    private func stub200(_ url: String, data: Data) {
-      StubURLProtocol.register(.init(data: data, statusCode: 200, headers: [:]), for: url)
+    // Stub a 200 response returning a bare JSON array — required by apiPaginated.
+    private func stub200array(_ url: String) {
+      StubURLProtocol.register(.init(data: Data("[]".utf8), statusCode: 200, headers: [:]), for: url)
     }
 
     private var base: String { GitHubConstants.apiBase + "/" }
@@ -264,7 +271,7 @@ struct APICallCounterTests {
     func fetchRunnersIncrementsCounter() async {
       let counter = MockAPICallCounter()
       let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
-      stub200(url, data: Data("{\"runners\":[]}".utf8))
+      stub200array(url)
       _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
     }
@@ -275,12 +282,9 @@ struct APICallCounterTests {
     func fetchActiveRunsIncrementsTwice() async {
       let counter = MockAPICallCounter()
       let ps = GitHubConstants.activeRunsPageSize
-      stub200(
-        "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)",
-        data: Data("{\"workflow_runs\":[]}".utf8))
-      stub200(
-        "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)",
-        data: Data("{\"workflow_runs\":[]}".utf8))
+      // Must be bare [] arrays — apiPaginated rejects dict bodies.
+      stub200array("\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)")
+      stub200array("\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)")
       _ = await fetchActiveRuns(scope: .org(org), transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 2)
     }
@@ -292,7 +296,7 @@ struct APICallCounterTests {
       let counter = MockAPICallCounter()
       let url =
         "\(base)repos/\(org)/myrepo/actions/runs/1/jobs?per_page=\(GitHubConstants.maxPageSize)"
-      stub200(url, data: Data("{\"jobs\":[]}".utf8))
+      stub200array(url)
       _ = await fetchJobs(
         runID: 1, scope: .repo(owner: org, name: "myrepo"),
         transport: makeTransport(counter: counter))
@@ -305,7 +309,7 @@ struct APICallCounterTests {
     func fetchUserOrgsIncrementsCounter() async {
       let counter = MockAPICallCounter()
       let path = GitHubConstants.userOrgsPath.trimmingCharacters(in: .init(charactersIn: "/"))
-      stub200("\(base)\(path)?per_page=\(GitHubConstants.maxPageSize)", data: Data("[]".utf8))
+      stub200array("\(base)\(path)?per_page=\(GitHubConstants.maxPageSize)")
       _ = await fetchUserOrgs(transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
     }
@@ -316,9 +320,8 @@ struct APICallCounterTests {
     func fetchUserReposIncrementsCounter() async {
       let counter = MockAPICallCounter()
       let path = GitHubConstants.userReposPath.trimmingCharacters(in: .init(charactersIn: "/"))
-      stub200(
-        "\(base)\(path)?sort=updated&per_page=\(GitHubConstants.maxPageSize)",
-        data: Data("[]".utf8))
+      stub200array(
+        "\(base)\(path)?sort=updated&per_page=\(GitHubConstants.maxPageSize)")
       _ = await fetchUserRepos(transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
     }
