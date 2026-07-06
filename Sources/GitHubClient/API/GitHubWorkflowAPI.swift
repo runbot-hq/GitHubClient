@@ -269,8 +269,10 @@ public enum GitHubRunsFetchResult: Sendable {
 /// Fetches active (queued + in_progress) workflow runs for a scope.
 ///
 /// Counts as one logical API operation regardless of how many status queries
-/// are issued internally — `apiCallCounter.record()` is called once on the
-/// `.success` path only.
+/// are issued internally — `apiCallCounter.record()` is called once per
+/// invocation when the loop completes. This includes cases where both status
+/// queries return valid but empty data; early exits via `.noToken` or
+/// `.rateLimited` do not increment the counter.
 ///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.

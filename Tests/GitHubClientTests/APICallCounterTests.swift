@@ -261,7 +261,9 @@ struct APICallCounterTests {
     }
 
     /// Verifies that `fetchActiveRuns` increments `apiCallCounter` exactly once per invocation
-    /// regardless of the number of status queries issued internally.
+    /// regardless of the number of statuses iterated internally (currently two: "in_progress"
+    /// and "queued"). Adding a third status must not change this count — record() is called
+    /// once after the loop, not once per status.
     @Test("fetchActiveRuns() increments counter exactly once per invocation")
     func fetchActiveRunsIncrementsCounterOnNonNilResult() async {
       await apiCallCounter.reset()
