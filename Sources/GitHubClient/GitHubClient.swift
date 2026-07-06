@@ -40,15 +40,12 @@
 /// Use the production init for app targets; use the test init to inject
 /// protocol mocks without touching the Keychain or network.
 ///
-/// ## Isolation note
-/// `GitHubClient` is not annotated `@MainActor` at the type level, even
-/// though `oauthService` stores `any OAuthServiceProtocol` whose protocol
-/// is `@MainActor`-isolated. This is intentional for the current extraction
-/// phase — the production init is `@MainActor` and `AppDelegate` (the only
-/// call site) satisfies that. A type-level `@MainActor` annotation is
-/// deferred to #1914 when the remaining `Keychain`/`RunBotCore` call sites
-/// are also migrated, at which point the full isolation boundary can be
-/// made compiler-enforced without stranding legacy callers.
+/// ## Isolation
+/// `GitHubClient` is `@MainActor`-isolated at the type level because
+/// `oauthService` stores `any OAuthServiceProtocol` whose protocol is
+/// `@MainActor`-isolated. This makes the isolation boundary compiler-enforced
+/// rather than relying on call-site convention.
+@MainActor
 public final class GitHubClient {
 
     /// The OAuth service — manages sign-in, sign-out, and token persistence.
