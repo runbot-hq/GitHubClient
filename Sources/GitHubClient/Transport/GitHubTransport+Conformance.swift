@@ -6,6 +6,12 @@ import Foundation
 // MARK: - GitHubTransport: protocol conformance
 
 // Conformance to GitHubTransportProtocol — all public API surface.
+/// `GitHubTransport` conformance to `GitHubTransportProtocol`.
+///
+/// All public API methods (`apiAsync`, `apiPaginated`, `raw`, `post`, `put`,
+/// `delete`, `cancelRun`, `patchRunnerLabels`, `fetchRegistrationToken`,
+/// `fetchRemovalToken`, `deleteRunnerByID`) are implemented here as extensions
+/// on the core `GitHubTransport` struct defined in `GitHubURLSessionTransport.swift`.
 extension GitHubTransport {
 
   // MARK: apiAsync

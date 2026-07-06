@@ -28,7 +28,9 @@ import Foundation
 /// - Warning: Do **not** reassign this after `GitHubClient.init` has run.
 ///   Tests should always pass `transport:` explicitly at the call site and
 ///   never rely on this global.
-// Swift attribute ordering: `nonisolated` must precede access modifiers — this is correct.
+///
+/// - Note: Swift attribute ordering requires `nonisolated` before access
+///   modifiers; `nonisolated(unsafe) public internal(set)` is correct.
 nonisolated(unsafe) public internal(set) var sharedGitHubTransport: GitHubTransport = GitHubTransport()
 
 // MARK: - HTTP verb shims
