@@ -336,6 +336,8 @@ public func fetchJobs(
 ) async -> [GitHubJob] {
     let endpoint = "\(scope.apiPrefix)/actions/runs/\(runID)/jobs?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
+    // guard above ensures this is only reached on non-nil data.
+    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
     await apiCallCounter.record()
     struct Response: Decodable { let jobs: [GitHubJob] }
     return (try? JSONDecoder().decode(Response.self, from: data))?.jobs ?? []

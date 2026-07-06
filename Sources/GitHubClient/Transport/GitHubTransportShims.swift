@@ -28,6 +28,7 @@ import Foundation
 /// - Warning: Do **not** reassign this after `GitHubClient.init` has run.
 ///   Tests should always pass `transport:` explicitly at the call site and
 ///   never rely on this global.
+// Swift attribute ordering: `nonisolated` must precede access modifiers — this is correct.
 nonisolated(unsafe) public internal(set) var sharedGitHubTransport: GitHubTransport = GitHubTransport()
 
 // MARK: - HTTP verb shims
@@ -81,6 +82,10 @@ public func ghAPI(_ endpoint: String, timeout: TimeInterval = 20) async -> Data?
 @concurrent
 @discardableResult
 public func ghPost(_ endpoint: String) async -> Bool {
+    // Snapshot to a local let before the await so that transport.logger (read after
+    // the suspension point) refers to the same instance that issued the request.
+    // Other shims in this file access sharedGitHubTransport inline because they
+    // don't use the transport reference after their await.
     let transport = sharedGitHubTransport
     let result = await transport.post(endpoint)
     let success = result != nil

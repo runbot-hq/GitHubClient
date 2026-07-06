@@ -45,6 +45,8 @@ public func fetchRunners(
 ) async -> [GitHubRunner] {
     let endpoint = "\(scope.apiPrefix)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
+    // guard above ensures this is only reached on non-nil data.
+    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
     await apiCallCounter.record()
     struct Response: Decodable { let runners: [GitHubRunner] }
     return (try? JSONDecoder().decode(Response.self, from: data))?.runners ?? []
