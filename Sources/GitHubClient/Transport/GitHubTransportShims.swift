@@ -12,29 +12,52 @@ import Foundation
 /// any concurrent reads — satisfying the once-written invariant.
 ///
 /// Deprecated in favour of `currentTransport`. Will be removed once
-/// `AppDelegate` is migrated to scope via `$currentTransport.withValue` (see #25).
+/// `AppDelegate` is migrated to scope via `withTransport(_:operation:)` (see #25).
 @available(*, deprecated, renamed: "currentTransport")
 nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTransportProtocol = GitHubTransport()
 
 // MARK: - @TaskLocal transport
 
-/// The task-local default transport used by all API free functions.
+/// Task-local storage for the transport override.
 ///
-/// Defaults to `sharedGitHubTransport` (evaluated at access time), so all
-/// unoverridden call sites automatically pick up the live transport wired by
-/// `GitHubClient.init` — with no behaviour change in production.
+/// Stores `nil` by default — `nil` is a value-type constant and is safe to
+/// freeze at module load. The public `currentTransport` computed property
+/// resolves `nil` to `sharedGitHubTransport` at access time, picking up the
+/// live authenticated instance wired by `GitHubClient.init`.
 ///
-/// In tests, override per-task without touching any global:
+/// Do not read this directly. Use `currentTransport` or `withTransport(_:operation:)`.
+@TaskLocal private var _taskLocalTransport: (any GitHubTransportProtocol)? = nil
+
+/// The effective transport for the current task.
+///
+/// Returns the innermost `withTransport` override if one is in scope;
+/// otherwise falls back to `sharedGitHubTransport` — the live authenticated
+/// instance wired by `GitHubClient.init` — evaluated at call time.
+///
+/// All 9 shims and 3 domain helpers in this module read `currentTransport`
+/// directly and require no changes.
+public var currentTransport: any GitHubTransportProtocol {
+    _taskLocalTransport ?? sharedGitHubTransport
+}
+
+/// Scopes a transport override to the current task and all child tasks.
+///
+/// Use in tests to inject a mock without touching any global:
 /// ```swift
-/// await $currentTransport.withValue(MockTransport()) {
+/// await withTransport(MockTransport()) {
 ///     let orgs = await fetchUserOrgs()
 /// }
 /// ```
 ///
-/// The final migration step — replacing the `sharedGitHubTransport` write in
-/// `GitHubClient.init` with `$currentTransport.withValue` scoping in `AppDelegate`
-/// — is tracked in #25.
-@TaskLocal public var currentTransport: any GitHubTransportProtocol = sharedGitHubTransport
+/// The `@Sendable` closure and `T: Sendable` bound are required because
+/// `$_taskLocalTransport.withValue` crosses task boundaries under strict
+/// concurrency checking.
+public func withTransport<T: Sendable>(
+    _ transport: any GitHubTransportProtocol,
+    operation: @Sendable () async throws -> T
+) async rethrows -> T {
+    try await $_taskLocalTransport.withValue(transport, operation: operation)
+}
 
 // MARK: - HTTP verb shims
 //
