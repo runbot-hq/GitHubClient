@@ -71,6 +71,11 @@ public struct GitHubTransport: GitHubTransportProtocol {
   // MARK: - Core execution
 
   /// Core execution pipeline shared by all `GitHubTransportProtocol` methods.
+  ///
+  /// Resolves the token, builds a signed `URLRequest`, performs the `URLSession` round-trip,
+  /// and maps the HTTP response to an `ExecuteResult`. All public transport methods delegate
+  /// to this function. `configure` is applied after the base request is built, allowing
+  /// callers to override the HTTP method, body, and headers for POST/PUT/DELETE.
   @concurrent
   func execute(
     _ endpoint: String,

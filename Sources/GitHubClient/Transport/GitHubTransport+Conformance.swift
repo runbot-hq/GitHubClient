@@ -5,7 +5,7 @@ import Foundation
 
 // MARK: - GitHubTransport: protocol conformance
 
-/// Conformance to ``GitHubTransportProtocol`` — all public API surface.
+// Conformance to GitHubTransportProtocol — all public API surface.
 extension GitHubTransport {
 
   // MARK: apiAsync
