@@ -5,7 +5,7 @@ import os
 
 // MARK: - URL helpers
 
-// `scopeFromHtmlUrl(_:)` is defined in GitHubURLHelpers.swift in this module.
+// `scopeFromHtmlUrl(_:)` is defined in GitHubURLParsing.swift in this module.
 
 // MARK: - User orgs and repos
 

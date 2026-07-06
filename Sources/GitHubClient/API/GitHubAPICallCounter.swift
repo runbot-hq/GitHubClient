@@ -1,4 +1,4 @@
-// APICallCounter.swift
+// GitHubAPICallCounter.swift
 // GitHubClient
 //
 // Tracks GitHub REST call timestamps in a rolling 60-minute window.

@@ -1,4 +1,4 @@
-// GitHubURLHelpers.swift
+// GitHubURLParsing.swift
 // GitHubClient
 import Foundation
 
