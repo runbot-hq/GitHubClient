@@ -248,9 +248,9 @@ public struct GitHubStep: Decodable, Equatable, Sendable {
 /// - Note: `.authFailure` is currently never produced by `fetchActiveRuns` — the
 ///   underlying transport collapses all failure modes to `nil`, so auth failures
 ///   are surfaced as `.noToken` (first page) or `.rateLimited` (subsequent pages).
-///   The case is part of the intended API for when `ghAPIPaginated` is replaced
-///   with a typed `ExecuteResult`-returning call (tracked in #1950). Callers
-///   should handle it defensively but must not rely on it being produced today.
+///   The case is part of the intended API for when the transport exposes a typed
+///   `ExecuteResult`-returning call (tracked in #1950). Callers should handle it
+///   defensively but must not rely on it being produced today.
 public enum GitHubRunsFetchResult: Sendable {
     /// All pages fetched successfully.
     case success([GitHubWorkflowRun])
@@ -267,15 +267,29 @@ public enum GitHubRunsFetchResult: Sendable {
 // MARK: - API
 
 /// Fetches active (queued + in_progress) workflow runs for a scope.
+///
+/// Counts as one logical API operation regardless of how many status queries
+/// are issued internally — `apiCallCounter.record()` is called once per
+/// invocation when the loop completes. This includes cases where both status
+/// queries return valid but empty data; early exits via `.noToken` or
+/// `.rateLimited` do not increment the counter.
+///
+/// - Parameters:
+///   - scope: The org or repo scope to query.
+///   - transport: The network transport to use. Defaults to `sharedGitHubTransport`
+///     (wired at launch by `GitHubClient.init`). Pass a `MockGitHubTransport` in tests.
 @concurrent
-public func fetchActiveRuns(scope: Scope) async -> GitHubRunsFetchResult {
+public func fetchActiveRuns(
+    scope: Scope,
+    transport: any GitHubTransportProtocol = sharedGitHubTransport
+) async -> GitHubRunsFetchResult {
     let statuses = ["in_progress", "queued"]
     var allRuns: [GitHubWorkflowRun] = []
     var seenIDs = Set<Int>()
     for status in statuses {
         let endpoint = "\(scope.apiPrefix)/actions/runs?status=\(status)&per_page=\(GitHubConstants.activeRunsPageSize)"
-        guard let data = await ghAPIPaginated(endpoint) else {
-            // `ghAPIPaginated` returns `nil` for all failure modes: no token,
+        guard let data = await transport.apiPaginated(endpoint) else {
+            // `transport.apiPaginated` returns `nil` for all failure modes: no token,
             // rate limit, 401/403, and network errors. We cannot distinguish them
             // here because the transport collapses all failures to `nil`.
             //
@@ -301,14 +315,30 @@ public func fetchActiveRuns(scope: Scope) async -> GitHubRunsFetchResult {
             }
         }
     }
+    // Record once per logical invocation — the two-status fan-out is an
+    // implementation detail, same as pagination pages being invisible to the counter.
+    await apiCallCounter.record()
     return .success(allRuns)
 }
 
 /// Fetches all jobs for a given workflow run ID.
+///
+/// - Parameters:
+///   - runID: The numeric GitHub workflow run ID.
+///   - scope: The org or repo scope the run belongs to.
+///   - transport: The network transport to use. Defaults to `sharedGitHubTransport`
+///     (wired at launch by `GitHubClient.init`). Pass a `MockGitHubTransport` in tests.
 @concurrent
-public func fetchJobs(runID: Int, scope: Scope) async -> [GitHubJob] {
+public func fetchJobs(
+    runID: Int,
+    scope: Scope,
+    transport: any GitHubTransportProtocol = sharedGitHubTransport
+) async -> [GitHubJob] {
     let endpoint = "\(scope.apiPrefix)/actions/runs/\(runID)/jobs?per_page=\(GitHubConstants.maxPageSize)"
-    guard let data = await ghAPIPaginated(endpoint) else { return [] }
+    guard let data = await transport.apiPaginated(endpoint) else { return [] }
+    // guard above ensures this is only reached on non-nil data.
+    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
+    await apiCallCounter.record()
     struct Response: Decodable { let jobs: [GitHubJob] }
     return (try? JSONDecoder().decode(Response.self, from: data))?.jobs ?? []
 }
