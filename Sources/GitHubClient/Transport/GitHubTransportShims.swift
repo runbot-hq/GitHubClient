@@ -20,13 +20,13 @@ nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTr
 
 /// Task-local storage for the transport override.
 ///
-/// Stores `nil` by default — `nil` is a value-type constant and is safe to
+/// Implicitly `nil` by default — `nil` is a value-type constant and is safe to
 /// freeze at module load. The public `currentTransport` computed property
 /// resolves `nil` to `sharedGitHubTransport` at access time, picking up the
 /// live authenticated instance wired by `GitHubClient.init`.
 ///
 /// Do not read this directly. Use `currentTransport` or `withTransport(_:operation:)`.
-@TaskLocal private var _taskLocalTransport: (any GitHubTransportProtocol)? = nil
+@TaskLocal private var _taskLocalTransport: (any GitHubTransportProtocol)?
 
 /// The effective transport for the current task.
 ///
