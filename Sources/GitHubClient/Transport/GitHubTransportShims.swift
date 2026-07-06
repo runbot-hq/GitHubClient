@@ -52,6 +52,11 @@ public var currentTransport: any GitHubTransportProtocol {
 /// The `@Sendable` closure and `T: Sendable` bound are required because
 /// `$_taskLocalTransport.withValue` crosses task boundaries under strict
 /// concurrency checking.
+///
+/// - NOTE: `apiCallCounter.record()` in `fetchUserOrgs`/`fetchUserRepos` still
+///   fires even when a mock transport is injected here. This is a known latent
+///   test-isolation concern that will be resolved when counting moves to the
+///   transport layer in #26.
 public func withTransport<T: Sendable>(
     _ transport: any GitHubTransportProtocol,
     operation: @Sendable () async throws -> T
