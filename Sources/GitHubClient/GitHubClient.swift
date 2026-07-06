@@ -63,11 +63,15 @@ public final class GitHubClient {
     /// path. `TokenCache.invalidate()` is called automatically after every
     /// successful sign-in and sign-out.
     ///
-    /// Also wires `sharedGitHubTransport` to the same token-backed instance,
-    /// so all API free functions that default to `sharedGitHubTransport` are
-    /// immediately live without any additional `configureGH*` calls in
-    /// `AppDelegate`. See `GitHubTransportShims.swift` for the `nonisolated(unsafe)`
-    /// declaration and the once-written-at-launch invariant.
+    /// Currently wires the transport via the deprecated `sharedGitHubTransport`
+    /// alias. There is no `didSet` — the write-through is implicit: `currentTransport`
+    /// is a computed property that reads `_taskLocalTransport ?? sharedGitHubTransport`
+    /// at call time, so assigning `sharedGitHubTransport` here is immediately
+    /// visible at every subsequent `currentTransport` access.
+    ///
+    /// The final migration step — replacing this assignment with
+    /// `withTransport(transport) { ... }` scoping in `AppDelegate` — is
+    /// tracked in #25 and requires a coordinated change in `RunBotCore`.
     ///
     /// Must be called on the main actor because `OAuthService.init` is
     /// `@MainActor`-isolated. `AppDelegate` — the only production call site —
@@ -102,11 +106,13 @@ public final class GitHubClient {
             tokenProvider: { cache.token() },
             logger: logger
         )
-        // Wire the process-wide default used by all API functions via their
-        // `transport: any GitHubTransportProtocol = sharedGitHubTransport` defaults.
-        // Written once here, at app launch, before any concurrent API reads.
-        // The nonisolated(unsafe) declaration in GitHubTransportShims.swift
-        // is safe precisely because this is the only write site.
+        // Temporarily writes via the deprecated sharedGitHubTransport alias.
+        // There is no didSet on sharedGitHubTransport — write-through is implicit.
+        // currentTransport is a computed property: `_taskLocalTransport ?? sharedGitHubTransport`.
+        // Assigning here makes the new transport immediately visible at the next
+        // currentTransport access, with no observer or side-effect involved.
+        // Replace with withTransport(transport) { ... } in AppDelegate
+        // once RunBotCore is ready (see #25).
         sharedGitHubTransport = transport
         self.oauthService = oauth
         self.transport = transport
@@ -129,7 +135,7 @@ public final class GitHubClient {
     ///
     /// - Note: Does **not** touch `sharedGitHubTransport`. Test call sites
     ///   always pass `transport:` explicitly at the API function call site
-    ///   and must never rely on the global singleton.
+    ///   and must never rely on the global.
     ///
     /// - Parameters:
     ///   - oauthService: A mock or stub conforming to `OAuthServiceProtocol`.

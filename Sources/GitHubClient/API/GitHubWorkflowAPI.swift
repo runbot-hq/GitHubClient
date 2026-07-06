@@ -276,12 +276,12 @@ public enum GitHubRunsFetchResult: Sendable {
 ///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
-///   - transport: The network transport to use. Defaults to `sharedGitHubTransport`
-///     (wired at launch by `GitHubClient.init`). Pass a `MockGitHubTransport` in tests.
+///   - transport: The network transport to use. Defaults to `currentTransport`
+///     (wired at launch by `GitHubClient.init`). Pass a mock in tests.
 @concurrent
 public func fetchActiveRuns(
     scope: Scope,
-    transport: any GitHubTransportProtocol = sharedGitHubTransport
+    transport: any GitHubTransportProtocol = currentTransport
 ) async -> GitHubRunsFetchResult {
     let statuses = ["in_progress", "queued"]
     var allRuns: [GitHubWorkflowRun] = []
@@ -326,13 +326,13 @@ public func fetchActiveRuns(
 /// - Parameters:
 ///   - runID: The numeric GitHub workflow run ID.
 ///   - scope: The org or repo scope the run belongs to.
-///   - transport: The network transport to use. Defaults to `sharedGitHubTransport`
-///     (wired at launch by `GitHubClient.init`). Pass a `MockGitHubTransport` in tests.
+///   - transport: The network transport to use. Defaults to `currentTransport`
+///     (wired at launch by `GitHubClient.init`). Pass a mock in tests.
 @concurrent
 public func fetchJobs(
     runID: Int,
     scope: Scope,
-    transport: any GitHubTransportProtocol = sharedGitHubTransport
+    transport: any GitHubTransportProtocol = currentTransport
 ) async -> [GitHubJob] {
     let endpoint = "\(scope.apiPrefix)/actions/runs/\(runID)/jobs?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
