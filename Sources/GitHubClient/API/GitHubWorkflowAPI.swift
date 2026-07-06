@@ -26,12 +26,25 @@ public struct GitHubWorkflowRun: Decodable, Sendable {
     /// Raw ISO 8601 date string — caller is responsible for parsing.
     public let updatedAt: String
 
+    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        case id, name, status, conclusion
+        /// Maps `id`.
+        case id
+        /// Maps `name`.
+        case name
+        /// Maps `status`.
+        case status
+        /// Maps `conclusion`.
+        case conclusion
+        /// Maps `head_branch`.
         case headBranch = "head_branch"
+        /// Maps `head_sha`.
         case headSha = "head_sha"
+        /// Maps `html_url`.
         case htmlUrl = "html_url"
+        /// Maps `created_at`.
         case createdAt = "created_at"
+        /// Maps `updated_at`.
         case updatedAt = "updated_at"
     }
 }
@@ -40,13 +53,13 @@ public struct GitHubWorkflowRun: Decodable, Sendable {
 public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// Unique numeric job ID assigned by GitHub.
     public let id: Int
-    /// The workflow run this job belongs to.
+    /// The workflow run this job belongs to. Maps the `run_id` JSON field.
     public let runID: Int
     /// Display name of the job.
     public let name: String
-    /// Raw status string.
+    /// Raw status string — NOT `JobStatus` (a RunBotCore type).
     public let status: String
-    /// Raw conclusion string.
+    /// Raw conclusion string — NOT `JobConclusion` (a RunBotCore type).
     public let conclusion: String?
     /// GitHub web URL for this job.
     public let htmlUrl: String?
@@ -61,16 +74,33 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// Steps within this job.
     public let steps: [GitHubStep]
 
+    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        case id, name, status, conclusion, steps
+        /// Maps `id`.
+        case id
+        /// Maps `name`.
+        case name
+        /// Maps `status`.
+        case status
+        /// Maps `conclusion`.
+        case conclusion
+        /// Maps `steps`.
+        case steps
+        /// Maps `run_id`.
         case runID = "run_id"
+        /// Maps `html_url`.
         case htmlUrl = "html_url"
+        /// Maps `runner_name`.
         case runnerName = "runner_name"
+        /// Maps `started_at`.
         case startedAt = "started_at"
+        /// Maps `completed_at`.
         case completedAt = "completed_at"
+        /// Maps `created_at`.
         case createdAt = "created_at"
     }
 
+    /// Decodes a `GitHubJob` from the GitHub REST API JSON payload.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(Int.self, forKey: .id)
@@ -83,9 +113,11 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
         startedAt = try container.decodeIfPresent(String.self, forKey: .startedAt)
         completedAt = try container.decodeIfPresent(String.self, forKey: .completedAt)
         createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
+        // Queued jobs have no steps array in the API response — fall back to []
         steps = (try? container.decodeIfPresent([GitHubStep].self, forKey: .steps)) ?? []
     }
 
+    /// Full memberwise initialiser — used by `copying(...)` helpers and tests.
     public init(
         id: Int,
         runID: Int,
@@ -106,6 +138,9 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
         self.steps = steps
     }
 
+    // MARK: copying helpers — used by ActiveJob.withUpdatedRaw
+
+    /// Returns a copy of this job with `runnerName` replaced.
     public func copying(runnerName newValue: String?) -> GitHubJob {
         GitHubJob(id: id, runID: runID, name: name, status: status,
                   conclusion: conclusion, htmlUrl: htmlUrl,
@@ -113,6 +148,7 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
                   completedAt: completedAt, createdAt: createdAt, steps: steps)
     }
 
+    /// Returns a copy of this job with `startedAt` replaced.
     public func copying(startedAt newValue: String?) -> GitHubJob {
         GitHubJob(id: id, runID: runID, name: name, status: status,
                   conclusion: conclusion, htmlUrl: htmlUrl,
@@ -120,6 +156,7 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
                   completedAt: completedAt, createdAt: createdAt, steps: steps)
     }
 
+    /// Returns a copy of this job with `completedAt` replaced.
     public func copying(completedAt newValue: String?) -> GitHubJob {
         GitHubJob(id: id, runID: runID, name: name, status: status,
                   conclusion: conclusion, htmlUrl: htmlUrl,
@@ -127,6 +164,7 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
                   completedAt: newValue, createdAt: createdAt, steps: steps)
     }
 
+    /// Returns a copy of this job with `createdAt` replaced.
     public func copying(createdAt newValue: String?) -> GitHubJob {
         GitHubJob(id: id, runID: runID, name: name, status: status,
                   conclusion: conclusion, htmlUrl: htmlUrl,
@@ -134,6 +172,7 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
                   completedAt: completedAt, createdAt: newValue, steps: steps)
     }
 
+    /// Returns a copy of this job with `steps` replaced.
     public func copying(steps newValue: [GitHubStep]) -> GitHubJob {
         GitHubJob(id: id, runID: runID, name: name, status: status,
                   conclusion: conclusion, htmlUrl: htmlUrl,
@@ -141,6 +180,7 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
                   completedAt: completedAt, createdAt: createdAt, steps: newValue)
     }
 
+    /// Returns a copy of this job with `conclusion` replaced.
     public func copying(conclusion newValue: String?) -> GitHubJob {
         GitHubJob(id: id, runID: runID, name: name, status: status,
                   conclusion: newValue, htmlUrl: htmlUrl,
@@ -151,19 +191,40 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
 
 /// A single step within a GitHub Actions job.
 public struct GitHubStep: Decodable, Equatable, Sendable {
+    /// Display name of the step.
     public let name: String
+    /// Raw status string from the API.
     public let status: String
+    /// Raw conclusion string from the API, or `nil` if still running.
     public let conclusion: String?
+    /// 1-based step number within the job.
     public let number: Int
+    /// Raw ISO 8601 date string — caller is responsible for parsing.
     public let startedAt: String?
+    /// Raw ISO 8601 date string — caller is responsible for parsing.
     public let completedAt: String?
 
+    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        case name, status, conclusion, number
+        /// Maps `name`.
+        case name
+        /// Maps `status`.
+        case status
+        /// Maps `conclusion`.
+        case conclusion
+        /// Maps `number`.
+        case number
+        /// Maps `started_at`.
         case startedAt = "started_at"
+        /// Maps `completed_at`.
         case completedAt = "completed_at"
     }
 
+    /// Memberwise initialiser for use within `GitHubClient` only (e.g. `copying` helpers).
+    ///
+    /// Intentionally `internal` — `GitHubStep` is `Decodable`-only at the public
+    /// API surface. Tests construct instances via the JSON round-trip shim in
+    /// `TestModelHelpers.swift` (`@testable import GitHubClient`).
     init(
         number: Int,
         name: String,
@@ -181,17 +242,35 @@ public struct GitHubStep: Decodable, Equatable, Sendable {
     }
 }
 
-/// The result of fetching active workflow runs.
+/// The result of fetching active workflow runs, distinguishing auth/rate-limit failures
+/// from partial and full successes.
+///
+/// - Note: `.authFailure` is currently never produced by `fetchActiveRuns` — the
+///   underlying transport collapses all failure modes to `nil`, so auth failures
+///   are surfaced as `.noToken` (first page) or `.rateLimited` (subsequent pages).
+///   The case is part of the intended API for when the transport exposes a typed
+///   `ExecuteResult`-returning call (tracked in #1950). Callers should handle it
+///   defensively but must not rely on it being produced today.
 public enum GitHubRunsFetchResult: Sendable {
+    /// All pages fetched successfully.
     case success([GitHubWorkflowRun])
+    /// Rate limit hit mid-fetch — results are valid but may be incomplete.
     case rateLimited([GitHubWorkflowRun])
+    /// Token was rejected (401/403 without rate-limit headers) — discard everything.
+    /// Currently unreachable from `fetchActiveRuns`; see type-level note above.
     case authFailure
+    /// No GitHub token is configured — or any first-page transport failure
+    /// (see type-level note above).
     case noToken
 }
 
 // MARK: - API
 
 /// Fetches active (queued + in_progress) workflow runs for a scope.
+///
+/// Counts as one logical API operation regardless of how many status queries
+/// are issued internally. Early exits via `.noToken` or `.rateLimited` do not
+/// increment the counter (counting moves to the transport layer in #26).
 ///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
@@ -208,6 +287,20 @@ public func fetchActiveRuns(
     for status in statuses {
         let endpoint = "\(scope.apiPrefix)/actions/runs?status=\(status)&per_page=\(GitHubConstants.activeRunsPageSize)"
         guard let data = await transport.apiPaginated(endpoint) else {
+            // `transport.apiPaginated` returns `nil` for all failure modes: no token,
+            // rate limit, 401/403, and network errors. We cannot distinguish them
+            // here because the transport collapses all failures to `nil`.
+            //
+            // Heuristic: nil on the first page (allRuns still empty) is almost
+            // always a token/auth issue, so we surface `.noToken` to prompt
+            // sign-in. Nil after at least one page is surfaced as `.rateLimited`
+            // so callers can use the partial results rather than discarding them.
+            //
+            // Known gap: a rate-limit or network drop on the very first page is
+            // misclassified as `.noToken`; a 401 mid-loop surfaces as
+            // `.rateLimited(partialResults)`. Both were true before the extraction
+            // and require the transport to expose a typed ExecuteResult to fix
+            // properly. Tracked in #1950.
             if allRuns.isEmpty { return .noToken } else { return .rateLimited(allRuns) }
         }
         struct Response: Decodable {
@@ -238,6 +331,8 @@ public func fetchJobs(
 ) async -> [GitHubJob] {
     let endpoint = "\(scope.apiPrefix)/actions/runs/\(runID)/jobs?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
+    // guard above ensures this is only reached on non-nil data.
+    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
     struct Response: Decodable { let jobs: [GitHubJob] }
     return (try? JSONDecoder().decode(Response.self, from: data))?.jobs ?? []
 }

@@ -45,6 +45,8 @@ public func fetchRunners(
 ) async -> [GitHubRunner] {
     let endpoint = "\(scope.apiPrefix)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
+    // guard above ensures this is only reached on non-nil data.
+    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
     struct Response: Decodable { let runners: [GitHubRunner] }
     return (try? JSONDecoder().decode(Response.self, from: data))?.runners ?? []
 }
@@ -54,6 +56,7 @@ public func fetchRunners(
 /// - Parameters:
 ///   - scopeString: A scope string such as `"orgs/acme"` or `"repos/acme/my-repo"`.
 ///   - transport: The network transport to use. Defaults to `currentTransport`.
+///     Threaded through to `fetchRunners(scope:transport:)`.
 @concurrent
 public func fetchRunners(
     scopeString: String,
