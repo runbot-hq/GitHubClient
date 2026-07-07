@@ -143,4 +143,67 @@ struct GitHubTokenCacheTests {
       #expect(cache.token() == nil)
     }
   }
+
+  // MARK: - token() — concurrent access
+
+  /// Fifty concurrent `Task`s calling `token()` simultaneously must all return
+  /// the same value with no crash or data race.
+  ///
+  /// `TokenCache` is not an actor — it uses `Synchronization.Mutex` for thread
+  /// safety. This test validates that the Mutex guard is sufficient under
+  /// genuine concurrent load: every caller must see the expected token regardless
+  /// of which Task wins the first write to the cache.
+  ///
+  /// Mechanism:
+  /// - A fresh `TokenCache` backed by a `MockTokenStore` seeded with
+  ///   `"concurrent-token"` is created. The cache is initially empty.
+  /// - 50 Tasks are spawned concurrently. All of them race to call `token()`
+  ///   on the same instance. Because the cache is empty on the first call,
+  ///   multiple Tasks may enter `resolveFromStore()` concurrently — exactly
+  ///   the thundering-herd window documented in `TokenCache.resolveFromStore()`.
+  /// - `withTaskGroup` collects all 50 results.
+  /// - Every result is asserted to equal `"concurrent-token"` — no nil, no
+  ///   divergence, no crash.
+  ///
+  /// If the Mutex guard were absent (or broken), the Swift runtime's TSan
+  /// instrumentation would report a data race here.
+  ///
+  /// - Note: `withCleanEnv` is used to strip CI env vars (GitHub Actions always
+  ///   injects `GITHUB_TOKEN`) so the only resolution path exercised is the
+  ///   `MockTokenStore`, keeping the assertion deterministic.
+  @Test func token_concurrentCalls_allReturnSameToken() async {
+    await withCleanEnvAsync {
+      let cache = makeCache(storeToken: "concurrent-token")
+      let taskCount = 50
+
+      let results = await withTaskGroup(of: String?.self, returning: [String?].self) { group in
+        for _ in 0 ..< taskCount {
+          group.addTask { cache.token() }
+        }
+        var collected: [String?] = []
+        for await result in group {
+          collected.append(result)
+        }
+        return collected
+      }
+
+      // Every concurrent caller must receive the expected token — no nil, no divergence.
+      #expect(results.count == taskCount)
+      #expect(results.allSatisfy { $0 == "concurrent-token" })
+    }
+  }
+}
+
+// MARK: - Async env helpers
+
+/// Async variant of `withCleanEnv` for use in `async` test bodies.
+/// Strips both token env vars, runs body, then restores the previous values.
+private func withCleanEnvAsync(_ body: () async -> Void) async {
+  let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
+  let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
+  unsetenv("GH_TOKEN")
+  unsetenv("GITHUB_TOKEN")
+  await body()
+  if let prevGH { setenv("GH_TOKEN", prevGH, 1) } else { unsetenv("GH_TOKEN") }
+  if let prevGitHub { setenv("GITHUB_TOKEN", prevGitHub, 1) } else { unsetenv("GITHUB_TOKEN") }
 }
