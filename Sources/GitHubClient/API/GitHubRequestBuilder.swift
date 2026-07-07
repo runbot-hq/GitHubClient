@@ -15,7 +15,6 @@ public func resolveURL(_ endpoint: String) -> String {
 // MARK: - Request factories
 
 /// Builds a `URLRequest` with headers common to all GitHub API calls.
-// swiftlint:disable:next missing_docs
 private func makeBaseRequest(url: URL, token: String, timeout: TimeInterval) -> URLRequest {
     var req = URLRequest(url: url, timeoutInterval: timeout)
     req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
