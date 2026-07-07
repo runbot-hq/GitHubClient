@@ -254,6 +254,19 @@ struct APICallCounterTests {
   // fetchUserOrgs  — apiPaginated — stub: []
   // fetchUserRepos — apiPaginated — stub: []
   //
+  // How nil is forced for early-exit tests
+  // ---------------------------------------
+  // StubURLProtocol.canInit returns false for URLs that have no registered
+  // stub or error stub. Unregistered URLs therefore fall through to the
+  // underlying URLSession networking, which is non-deterministic in CI.
+  // To force a deterministic nil return from apiPaginated, use
+  // StubURLProtocol.registerError(.init(error: URLError(.notConnectedToInternet)))
+  // for any URL that must produce a network-error response. registerError
+  // causes canInit to return true, StubURLProtocol intercepts the request,
+  // and startLoading fires client.urlProtocol(didFailWithError:)—
+  // guaranteed to map to .networkError inside execute() and nil inside
+  // apiPaginated, regardless of real network reachability.
+  //
   // .serialized prevents tests within this suite from racing on the
   // shared stub registry.
   // final class is required for stored properties.
@@ -291,6 +304,15 @@ struct APICallCounterTests {
         for: url)
     }
 
+    // Force a deterministic network-error nil from apiPaginated for a given URL.
+    // Uses registerError so canInit returns true and StubURLProtocol intercepts
+    // the request — never falling through to real networking.
+    private func stubNetworkError(_ url: String) {
+      StubURLProtocol.registerError(
+        .init(error: URLError(.notConnectedToInternet)),
+        for: url)
+    }
+
     private var base: String { GitHubConstants.apiBase + "/" }
 
     // MARK: fetchRunners
@@ -323,20 +345,22 @@ struct APICallCounterTests {
     // suite (fetchActiveRunsSkipsCounterOnPartialNilResult and
     // fetchActiveRunsReturnsNoTokenWhenFirstStatusReturnsEmptyThenNil).
     //
-    // The invariant: fetchActiveRuns must not over-count when apiPaginated
-    // returns nil mid-loop or on the first call. record() only fires inside
-    // interpretHTTPResponse on a real 2xx, so an unstubbed URL causes
-    // StubURLProtocol to return a connection error, apiPaginated returns nil,
-    // and the guard-let in fetchActiveRuns triggers the early exit without
-    // ever reaching a record() call for that iteration.
+    // Both tests use stubNetworkError() — not an unregistered URL — to force a
+    // deterministic nil from apiPaginated. An unregistered URL is NOT intercepted
+    // by StubURLProtocol (canInit returns false) and would fall through to real
+    // networking, making the outcome non-deterministic in CI.
 
     @Test("fetchActiveRuns() counter == 1 when second status query returns nil (.rateLimited exit)")
     func fetchActiveRunsCounterStopsAtOneOnRateLimitedEarlyExit() async {
       let counter = MockAPICallCounter()
       let ps = GitHubConstants.activeRunsPageSize
-      // Stub only in_progress — queued is left unstubbed so apiPaginated
-      // returns nil, triggering the .rateLimited(partialResults) early exit.
-      stub200array("\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)")
+      let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
+      let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
+      // in_progress succeeds — one counter hit.
+      stub200array(inProgressURL)
+      // queued returns a network error — apiPaginated returns nil, triggering
+      // the .rateLimited(partialResults) early exit. No counter hit.
+      stubNetworkError(queuedURL)
       let result = await fetchActiveRuns(
         scope: .org(org), transport: makeTransport(counter: counter))
       if case .rateLimited = result { /* expected */ } else {
@@ -344,14 +368,19 @@ struct APICallCounterTests {
       }
       #expect(
         await counter.recordedCount == 1,
-        "only the successful in_progress hit should be counted; the nil queued exit must not add a second hit")
+        "only the successful in_progress hit should be counted; the network-error queued exit must not add a second hit")
     }
 
     @Test("fetchActiveRuns() counter == 0 when first status query returns nil (.noToken exit)")
     func fetchActiveRunsCounterIsZeroOnNoTokenEarlyExit() async {
       let counter = MockAPICallCounter()
-      // Both status URLs are unstubbed — first apiPaginated returns nil
-      // immediately, fetchActiveRuns returns .noToken without any record() call.
+      let ps = GitHubConstants.activeRunsPageSize
+      let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
+      let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
+      // Both URLs return network errors — first apiPaginated call returns nil
+      // immediately. fetchActiveRuns returns .noToken without any record() call.
+      stubNetworkError(inProgressURL)
+      stubNetworkError(queuedURL)
       let result = await fetchActiveRuns(
         scope: .org(org), transport: makeTransport(counter: counter))
       if case .noToken = result { /* expected */ } else {
@@ -359,7 +388,7 @@ struct APICallCounterTests {
       }
       #expect(
         await counter.recordedCount == 0,
-        "a nil first-page result must not increment the counter")
+        "a network-error first-page result must not increment the counter")
     }
 
     // MARK: fetchJobs
