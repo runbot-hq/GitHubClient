@@ -84,6 +84,17 @@ struct GitHubTokenCacheTests {
     }
   }
 
+  /// An empty-string GH_TOKEN must be treated as absent and return nil.
+  /// A blank Bearer token would be sent on every API request, causing
+  /// immediate 401s — empty strings are not valid credentials.
+  @Test func token_ghTokenEmptyString_returnsNil() {
+    withCleanEnv {
+      withEnv("GH_TOKEN", value: "") {
+        #expect(makeCache().token() == nil)
+      }
+    }
+  }
+
   // MARK: - token() — GITHUB_TOKEN fallback
 
   /// Falls back to GITHUB_TOKEN when GH_TOKEN is absent.
@@ -91,6 +102,16 @@ struct GitHubTokenCacheTests {
     withCleanEnv {
       withEnv("GITHUB_TOKEN", value: "github-test-token") {
         #expect(makeCache().token() == "github-test-token")
+      }
+    }
+  }
+
+  /// An empty-string GITHUB_TOKEN must be treated as absent and return nil.
+  /// GH_TOKEN is kept absent so only the fallback branch is exercised.
+  @Test func token_githubTokenEmptyString_returnsNil() {
+    withCleanEnv {
+      withEnv("GITHUB_TOKEN", value: "") {
+        #expect(makeCache().token() == nil)
       }
     }
   }
