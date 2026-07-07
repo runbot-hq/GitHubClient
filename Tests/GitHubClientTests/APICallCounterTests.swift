@@ -244,13 +244,15 @@ struct APICallCounterTests {
   // ----------------
   // apiPaginated decodes each HTTP response body as [AnyJSON] (a flat JSON
   // array). Stubs for endpoints that go through apiPaginated must return a
-  // bare JSON array (e.g. []) — NOT a dict wrapper like {"workflow_runs":[]}.
-  // fetchActiveRuns decodes the flat [GitHubWorkflowRun] array directly from
-  // the Data returned by apiPaginated — no {"workflow_runs":[...]} envelope.
+  // bare JSON array — NOT a dict wrapper like {"workflow_runs":[]}.
+  // All three paginated functions decode the flat array directly:
+  //   fetchActiveRuns  — [GitHubWorkflowRun] directly (no envelope)
+  //   fetchJobs        — [GitHubJob] directly (no envelope)
+  //   fetchRunners     — [GitHubRunner] directly (no envelope)
   //
-  // fetchRunners   — apiPaginated — stub: []
+  // fetchRunners   — apiPaginated — stub: [{runner object}]
   // fetchActiveRuns — apiPaginated — stub: [] (per status)
-  // fetchJobs      — apiPaginated — stub: []
+  // fetchJobs      — apiPaginated — stub: [{job object}]
   // fetchUserOrgs  — apiPaginated — stub: []
   // fetchUserRepos — apiPaginated — stub: []
   // post verb      — transport.post — stub: 201 empty body
@@ -362,17 +364,32 @@ struct APICallCounterTests {
       "updated_at":"2024-01-01T00:00:00Z"}]
       """.utf8)
 
+    // A minimal flat JSON array containing one GitHubJob object.
+    // Fields satisfy GitHubJob's custom Decodable init (id, run_id, name, status required;
+    // steps omitted — falls back to [] via the try? guard in the init).
+    private static let oneJobJSON = Data("""
+      [{"id":1,"run_id":1,"name":"build","status":"completed"}]
+      """.utf8)
+
+    // A minimal flat JSON array containing one GitHubRunner object.
+    // All five fields are required by GitHubRunner's synthesised Decodable init.
+    private static let oneRunnerJSON = Data("""
+      [{"id":1,"name":"my-runner","status":"online","busy":false,"labels":[]}]
+      """.utf8)
+
     private var base: String { GitHubConstants.apiBase + "/" }
 
     // MARK: fetchRunners
 
-    @Test("fetchRunners() increments counter once per successful HTTP response")
+    @Test("fetchRunners() increments counter once and returns decoded runners")
     func fetchRunnersIncrementsCounter() async {
       let counter = MockAPICallCounter()
       let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
-      stub200array(url)
-      _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
+      StubURLProtocol.register(
+        .init(data: Self.oneRunnerJSON, statusCode: 200, headers: [:]), for: url)
+      let runners = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
+      #expect(runners.count == 1, "fetchRunners must return the decoded runner, not [] — verify apiPaginated flat-array decode is used (no keyed wrapper)")
     }
 
     // MARK: fetchActiveRuns — happy path
@@ -448,16 +465,18 @@ struct APICallCounterTests {
 
     // MARK: fetchJobs
 
-    @Test("fetchJobs() increments counter once per successful HTTP response")
+    @Test("fetchJobs() increments counter once and returns decoded jobs")
     func fetchJobsIncrementsCounter() async {
       let counter = MockAPICallCounter()
       let url =
         "\(base)repos/\(org)/myrepo/actions/runs/1/jobs?per_page=\(GitHubConstants.maxPageSize)"
-      stub200array(url)
-      _ = await fetchJobs(
+      StubURLProtocol.register(
+        .init(data: Self.oneJobJSON, statusCode: 200, headers: [:]), for: url)
+      let jobs = await fetchJobs(
         runID: 1, scope: .repo(owner: org, name: "myrepo"),
         transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
+      #expect(jobs.count == 1, "fetchJobs must return the decoded job, not [] — verify apiPaginated flat-array decode is used (no keyed wrapper)")
     }
 
     // MARK: fetchUserOrgs

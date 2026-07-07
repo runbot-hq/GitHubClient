@@ -34,6 +34,11 @@ public struct GitHubRunnerLabel: Codable, Sendable, Equatable {
 
 /// Fetches all registered runners for a scope. Follows pagination automatically.
 ///
+/// `apiPaginated` returns a flat JSON array encoded as `Data`. This function decodes
+/// that directly as `[GitHubRunner]` — **not** via a `{"runners":[...]}` wrapper.
+/// The GitHub REST API wraps runners in a `runners` key, but `apiPaginated` strips the
+/// envelope and returns only the array items, so no wrapper is needed here.
+///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
 ///   - transport: The network transport to use. Defaults to `currentTransport`
@@ -45,9 +50,11 @@ public func fetchRunners(
 ) async -> [GitHubRunner] {
     let endpoint = "\(scope.apiPrefix)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
-    struct Response: Decodable { let runners: [GitHubRunner] }
+    // apiPaginated returns a flat JSON array — decode directly as [GitHubRunner].
+    // Do NOT use a {"runners":[...]} wrapper here: apiPaginated strips the
+    // GitHub API envelope and encodes only the array items into the returned Data.
     do {
-        return try transport.decoder.decode(Response.self, from: data).runners
+        return try transport.decoder.decode([GitHubRunner].self, from: data)
     } catch {
         transport.logger?.log(
             "fetchRunners › decode failed for scope=\(scope.apiPrefix): \(error)",

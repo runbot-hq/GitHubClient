@@ -357,6 +357,11 @@ public func fetchActiveRuns(
 /// Each `transport.apiPaginated` call records its own hits in the transport layer
 /// (one count per successful HTTP page). No manual `apiCallCounter.record()` is needed.
 ///
+/// `apiPaginated` returns a flat JSON array encoded as `Data`. This function decodes
+/// that directly as `[GitHubJob]` — **not** via a `{"jobs":[...]}` wrapper.
+/// The GitHub REST API wraps jobs in a `jobs` key, but `apiPaginated` strips the
+/// envelope and returns only the array items, so no wrapper is needed here.
+///
 /// - Parameters:
 ///   - runID: The numeric GitHub workflow run ID.
 ///   - scope: The org or repo scope the run belongs to.
@@ -370,9 +375,11 @@ public func fetchJobs(
 ) async -> [GitHubJob] {
     let endpoint = "\(scope.apiPrefix)/actions/runs/\(runID)/jobs?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
-    struct Response: Decodable { let jobs: [GitHubJob] }
+    // apiPaginated returns a flat JSON array — decode directly as [GitHubJob].
+    // Do NOT use a {"jobs":[...]} wrapper here: apiPaginated strips the
+    // GitHub API envelope and encodes only the array items into the returned Data.
     do {
-        return try transport.decoder.decode(Response.self, from: data).jobs
+        return try transport.decoder.decode([GitHubJob].self, from: data)
     } catch {
         transport.logger?.log(
             "fetchJobs › decode failed for runID=\(runID): \(error)",
