@@ -26,25 +26,6 @@ import Foundation
 @MainActor
 public final class OAuthService: OAuthServiceProtocol {
 
-    // MARK: - Default scopes
-
-    /// The default set of OAuth scopes requested during sign-in.
-    ///
-    /// Referenced by `OAuthService.init` and `GitHubClient.init` as the default
-    /// value for the `scopes` parameter. Defined once here to avoid duplication
-    /// and to provide a discoverable base consumers can extend:
-    ///
-    /// ```swift
-    /// GitHubClient(scopes: OAuthService.defaultScopes + [GitHubScopes.readUser])
-    /// ```
-    public static let defaultScopes: [String] = [
-        GitHubScopes.repo,
-        GitHubScopes.readOrg,
-        GitHubScopes.adminOrg,
-        GitHubScopes.manageRunnersOrg,
-        GitHubScopes.workflow
-    ]
-
     /// Shared `JSONDecoder` — reused across token-exchange decode calls.
     private let decoder = JSONDecoder()
     /// Shared `JSONEncoder` — reused across token-exchange encode calls.
@@ -87,8 +68,10 @@ public final class OAuthService: OAuthServiceProtocol {
     ///   - clientID: The GitHub OAuth app client ID.
     ///   - clientSecret: The GitHub OAuth app client secret.
     ///   - tokenStore: The backing store used to save/delete/load the OAuth token.
-    ///   - scopes: The OAuth scopes to request during sign-in. Defaults to `OAuthService.defaultScopes`.
-    ///     Must not be empty — a `precondition` failure is raised at init time if an empty array is passed.
+    ///   - scopes: The OAuth scopes to request during sign-in. Defaults to `GitHubScopes.default`.
+    ///     Must not be empty — a `precondition` failure is raised at init time if an empty array
+    ///     is passed (fires in both debug and release builds — this is intentional; an empty
+    ///     scopes array is a programming error, not a runtime condition).
     ///     Use `GitHubScopes` constants for type safety and discoverability.
     ///   - logger: Optional logger for diagnostic messages.
     ///   - session: The `URLSession` used for token-exchange requests. Defaults to `.shared`.
@@ -103,7 +86,7 @@ public final class OAuthService: OAuthServiceProtocol {
         clientID: String,
         clientSecret: String,
         tokenStore: any TokenStore,
-        scopes: [String] = OAuthService.defaultScopes,
+        scopes: [String] = GitHubScopes.default,
         logger: (any GitHubLogger)? = nil,
         session: URLSession = .shared,
         onTokenSaved: (() -> Void)? = nil,
@@ -255,14 +238,6 @@ public final class OAuthService: OAuthServiceProtocol {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let code = comps.queryItems?.first(where: { $0.name == "code" })?.value
         else {
-            // Intentionally does NOT clear `pendingState` here. A URL with no
-            // `code` param is likely a malformed deep-link or a different app's
-            // URL being mis-routed to us — not the GitHub redirect. Keeping
-            // `pendingState` live means the real GitHub callback (arriving
-            // moments later) still has a valid nonce to match against. Clearing
-            // it here would cause that legitimate callback to be rejected.
-            // All other guard branches clear `pendingState` because they involve
-            // the actual GitHub redirect (state param present but wrong/absent).
             logger?.log("OAuthService › handleCallback — missing code param, calling fireSignIn(false)", category: "transport")
             fireSignIn(false)
             return
@@ -280,12 +255,6 @@ public final class OAuthService: OAuthServiceProtocol {
             return
         }
         logger?.log("OAuthService › handleCallback — state OK, exchanging code", category: "transport")
-        // `pendingState` is cleared *before* the Task is spawned. This is the
-        // double-tap guard: a second rapid `handleCallback` (e.g. from a duplicate
-        // system URL delivery) will reach the `returnedState == pendingState` check
-        // above with `pendingState == nil` and be rejected with `fireSignIn(false)`.
-        // GitHub one-time codes cannot be replayed, so the race window is
-        // effectively zero even without an explicit `isExchangingCode` flag.
         pendingState = nil
         Task { await exchangeCode(code) }
     }
@@ -314,9 +283,6 @@ public final class OAuthService: OAuthServiceProtocol {
         do {
             data = try await fetchTokenData(request: req)
         } catch {
-            // Safe to log error.localizedDescription here — URLError never includes
-            // HTTP response body or auth credentials; it carries only transport-level
-            // metadata (e.g. "The network connection was lost.").
             logger?.log("OAuthService › exchangeCode: network error — \(error.localizedDescription), calling fireSignIn(false)", category: "transport")
             fireSignIn(false)
             return
@@ -357,26 +323,6 @@ public final class OAuthService: OAuthServiceProtocol {
     }
 
     /// Performs the network call for the token exchange.
-    ///
-    /// Marked `@concurrent` — consistent with the transport layer's convention for
-    /// network calls. `session.data(for:)` suspends during the network hop so the
-    /// main thread is never blocked, but `@concurrent` makes the isolation explicit
-    /// and avoids unnecessarily dispatching setup work on the main actor.
-    ///
-    /// - Parameter request: The pre-built `URLRequest` to send.
-    /// - Returns: The raw response `Data`.
-    /// - Throws: Any `URLError` from the underlying `URLSession`.
-    ///
-    /// The `URLResponse` is intentionally discarded. GitHub's token exchange
-    /// endpoint always returns HTTP 200, even for OAuth-level errors — the
-    /// error is in the JSON body (`error` / `error_description` fields) and
-    /// is handled by `handleTokenResponse(_:)`. A genuine server-side failure
-    /// (e.g. HTTP 5xx during a GitHub outage) will return a non-JSON body,
-    /// causing the decode to throw, which surfaces as `fireSignIn(false)` —
-    /// the correct outcome. Adding an HTTP status check here would not change
-    /// behaviour; it would only improve the log message from "decode error"
-    /// to "HTTP 5xx". If richer diagnostics are ever needed, surface the
-    /// `HTTPURLResponse` at this layer and pass the status to the caller.
     @concurrent
     private func fetchTokenData(request: URLRequest) async throws -> Data {
         let (data, _) = try await session.data(for: request)
@@ -384,11 +330,6 @@ public final class OAuthService: OAuthServiceProtocol {
     }
 
     /// Validates the GitHub-level token response and extracts the access token.
-    ///
-    /// Logs and returns `nil` for both GitHub-reported errors and missing/empty tokens.
-    ///
-    /// - Parameter response: The decoded `OAuthTokenResponse`.
-    /// - Returns: The access token string on success; `nil` on failure.
     private func handleTokenResponse(_ response: OAuthTokenResponse) -> String? {
         if let errorCode = response.error {
             let desc = response.errorDescription ?? ""
@@ -408,24 +349,16 @@ public final class OAuthService: OAuthServiceProtocol {
 /// Response body from the GitHub OAuth token exchange.
 /// GitHub returns HTTP 200 even on failure, so both `accessToken` and `error` are optional.
 private struct OAuthTokenResponse: Decodable {
-    /// The access token returned on success; `nil` when GitHub reports an error.
     let accessToken: String?
-    /// Short error code returned by GitHub on failure (e.g. `"bad_verification_code"`).
     let error: String?
-    /// Human-readable description of the error, if present.
     let errorDescription: String?
 
-    /// Maps Swift property names to the snake_case JSON keys returned by the GitHub OAuth endpoint.
     private enum CodingKeys: String, CodingKey {
-        /// JSON key: `access_token`.
         case accessToken = "access_token" // skipcq: SCT-A000
-        /// JSON key: `error`.
         case error
-        /// JSON key: `error_description`.
         case errorDescription = "error_description"
     }
 
-    /// Returns the names of modelled fields that are non-nil, for safe diagnostic logging.
     var debugKeys: [String] {
         var keys: [String] = []
         if accessToken != nil { keys.append("access_token") } // skipcq: SCT-A000
@@ -440,20 +373,13 @@ private struct OAuthTokenResponse: Decodable {
 // periphery:ignore
 /// OAuth token-exchange request body for the GitHub API.
 private struct OAuthTokenRequest: Encodable {
-    /// The GitHub OAuth app client ID.
     let clientID: String
-    /// The GitHub OAuth app client secret.
     let clientSecret: String
-    /// The one-time authorization code received in the OAuth redirect callback.
     let code: String
 
-    /// Maps Swift property names to the snake_case JSON keys expected by the GitHub OAuth endpoint.
     private enum CodingKeys: String, CodingKey {
-        /// JSON key: `client_id`.
         case clientID = "client_id" // skipcq: SCT-A000
-        /// JSON key: `client_secret`.
         case clientSecret = "client_secret" // skipcq: SCT-A000
-        /// JSON key: `code`.
         case code
     }
 }

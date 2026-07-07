@@ -16,14 +16,14 @@
 //       logger: MyLogger()
 //   )
 //
-// Custom scopes (optional — defaults to OAuthService.defaultScopes):
+// Custom scopes (optional — defaults to GitHubScopes.default):
 //
 //   let github = GitHubClient(
 //       clientID: "your-client-id",
 //       clientSecret: "your-client-secret",
 //       service: "com.example.myapp",
 //       account: "github-oauth-token",
-//       scopes: [GitHubScopes.repo, GitHubScopes.readUser]
+//       scopes: GitHubScopes.default + [GitHubScopes.readUser]
 //   )
 //
 // Tests inject mocks via the secondary init:
@@ -73,16 +73,6 @@ public final class GitHubClient {
     /// path. `TokenCache.invalidate()` is called automatically after every
     /// successful sign-in and sign-out.
     ///
-    /// Currently wires the transport via the deprecated `sharedGitHubTransport`
-    /// alias. There is no `didSet` — the write-through is implicit: `currentTransport`
-    /// is a computed property that reads `_taskLocalTransport ?? sharedGitHubTransport`
-    /// at call time, so assigning `sharedGitHubTransport` here is immediately
-    /// visible at every subsequent `currentTransport` access.
-    ///
-    /// The final migration step — replacing this assignment with
-    /// `withTransport(transport) { ... }` scoping in `AppDelegate` — is
-    /// tracked in #25 and requires a coordinated change in `RunBotCore`.
-    ///
     /// Must be called on the main actor because `OAuthService.init` is
     /// `@MainActor`-isolated. `AppDelegate` — the only production call site —
     /// satisfies this requirement automatically.
@@ -93,7 +83,7 @@ public final class GitHubClient {
     ///   - service: The keychain service name (e.g. your app's bundle identifier).
     ///   - account: The keychain account name (e.g. `"github-oauth-token"`).
     ///   - scopes: The OAuth scopes to request during sign-in. Defaults to
-    ///     `OAuthService.defaultScopes`. Must not be empty. Use `GitHubScopes`
+    ///     `GitHubScopes.default`. Must not be empty. Use `GitHubScopes`
     ///     constants for type safety and discoverability.
     ///   - logger: Optional logger for diagnostic messages.
     @MainActor
@@ -102,7 +92,7 @@ public final class GitHubClient {
         clientSecret: String,
         service: String,
         account: String,
-        scopes: [String] = OAuthService.defaultScopes,
+        scopes: [String] = GitHubScopes.default,
         logger: (any GitHubLogger)? = nil
     ) {
         let store = KeychainTokenStore(service: service, account: account, logger: logger)
@@ -121,13 +111,6 @@ public final class GitHubClient {
             tokenProvider: { cache.token() },
             logger: logger
         )
-        // Temporarily writes via the deprecated sharedGitHubTransport alias.
-        // There is no didSet on sharedGitHubTransport — write-through is implicit.
-        // currentTransport is a computed property: `_taskLocalTransport ?? sharedGitHubTransport`.
-        // Assigning here makes the new transport immediately visible at the next
-        // currentTransport access, with no observer or side-effect involved.
-        // Replace with withTransport(transport) { ... } in AppDelegate
-        // once RunBotCore is ready (see #25).
         sharedGitHubTransport = transport
         self.oauthService = oauth
         self.transport = transport
@@ -143,14 +126,6 @@ public final class GitHubClient {
     ///
     /// Intentionally nonisolated — it only assigns protocol existentials
     /// and never calls any `@MainActor`-isolated code directly.
-    ///
-    /// ⚠️ Callers must pass a `@MainActor`-isolated mock for `oauthService`
-    /// to satisfy `OAuthServiceProtocol`'s `@MainActor` constraint. A mock
-    /// that is not `@MainActor`-isolated will not compile.
-    ///
-    /// - Note: Does **not** touch `sharedGitHubTransport`. Test call sites
-    ///   always pass `transport:` explicitly at the API function call site
-    ///   and must never rely on the global.
     ///
     /// - Note: Does **not** accept a `scopes:` parameter — it takes
     ///   `any OAuthServiceProtocol` directly, which already encapsulates
