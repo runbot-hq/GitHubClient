@@ -21,6 +21,14 @@ public struct GitHubTransport: GitHubTransportProtocol {
   // MARK: - Stored properties
 
   /// JSON decoder — stateless after `init`, safe for concurrent reads.
+  ///
+  /// ⚠️ **Do not mutate the returned instance.** `JSONDecoder` is a reference type;
+  /// mutating its properties (e.g. `keyDecodingStrategy`, `dateDecodingStrategy`)
+  /// after this transport has been initialised will corrupt concurrent decodes
+  /// across all callers sharing this transport instance. Configure the decoder
+  /// before passing it to `GitHubTransport.init(decoder:...)` and never touch it
+  /// again. This constraint cannot be enforced by the type system because
+  /// `GitHubTransportProtocol.decoder` must satisfy a `public` protocol requirement.
   public let decoder: JSONDecoder
 
   /// JSON encoder — stateless after `init`, safe for concurrent reads.

@@ -11,7 +11,7 @@
 //   5. APICallCounterSnapshot is Equatable and Sendable.
 //   6. snapshot() returns zero after all timestamps expire (idle-gap regression).
 //   7. GitHubTransport increments the injected callCounter on every 2xx response.
-//      Each successful HTTP page counts as one hit.
+//      Each successful HTTP page counts as one hit, regardless of HTTP verb.
 //   8. record() trims buffer to hourlyLimit at >5,000 entries.
 //   9. purge() retains entries exactly at the 60-minute boundary (inclusive).
 //  10. purge() evicts entries just beyond the 60-minute boundary (exclusive).
@@ -253,6 +253,7 @@ struct APICallCounterTests {
   // fetchJobs      — apiPaginated — stub: []
   // fetchUserOrgs  — apiPaginated — stub: []
   // fetchUserRepos — apiPaginated — stub: []
+  // post verb      — transport.post — stub: 201 empty body
   //
   // How nil is forced for early-exit tests
   // ---------------------------------------
@@ -407,9 +408,14 @@ struct APICallCounterTests {
       let ps = GitHubConstants.activeRunsPageSize
       let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
       let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
-      // Both URLs return network errors — first apiPaginated call returns nil
-      // immediately. fetchActiveRuns returns .noToken without any record() call.
+      // in_progress returns a network error — fetchActiveRuns hits the nil guard
+      // with allRuns still empty and returns .noToken immediately. No record() call.
       stubNetworkError(inProgressURL)
+      // queuedURL is registered but structurally unreachable: fetchActiveRuns
+      // returns .noToken after the first nil guard fires and never reaches the
+      // second loop iteration. The stub is present only to ensure StubURLProtocol
+      // intercepts the URL if the early-exit logic ever regresses, rather than
+      // falling through to real networking.
       stubNetworkError(queuedURL)
       let result = await fetchActiveRuns(
         scope: .org(org), transport: makeTransport(counter: counter))
@@ -456,6 +462,30 @@ struct APICallCounterTests {
         "\(base)\(path)?sort=updated&per_page=\(GitHubConstants.maxPageSize)")
       _ = await fetchUserRepos(transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
+    }
+
+    // MARK: mutation verb — POST
+
+    // This test directly proves the core correctness claim of PR #37:
+    // all HTTP verbs are now counted via interpretHTTPResponse, not just
+    // GET-like methods that flow through apiPaginated.
+    // A 201 Created response is used because POST endpoints (e.g. runner
+    // registration token) commonly return 201, and interpretHTTPResponse
+    // treats the full 200..<300 range as 2xx success.
+    @Test("POST 2xx response increments counter once")
+    func postVerbIncrementsCounter() async {
+      let counter = MockAPICallCounter()
+      let endpoint = "orgs/\(org)/actions/runners/registration-token"
+      let url = "\(base)\(endpoint)"
+      StubURLProtocol.register(
+        .init(data: Data("{\"token\":\"abc\",\"expires_at\":\"2099-01-01T00:00:00Z\"}".utf8),
+              statusCode: 201,
+              headers: [:]),
+        for: url)
+      _ = await makeTransport(counter: counter).post(endpoint, body: nil)
+      #expect(
+        await counter.recordedCount == 1,
+        "a 201 Created POST response must increment the counter once via interpretHTTPResponse")
     }
 
     // MARK: non-2xx does not increment
