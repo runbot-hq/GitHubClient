@@ -25,14 +25,34 @@ import Foundation
 /// Manages OAuth state and behaviour. No AppKit dependency.
 @MainActor
 public final class OAuthService: OAuthServiceProtocol {
+
+    // MARK: - Default scopes
+
+    /// The default set of OAuth scopes requested during sign-in.
+    ///
+    /// Referenced by `OAuthService.init` and `GitHubClient.init` as the default
+    /// value for the `scopes` parameter. Defined once here to avoid duplication
+    /// and to provide a discoverable base consumers can extend:
+    ///
+    /// ```swift
+    /// GitHubClient(scopes: OAuthService.defaultScopes + [GitHubScopes.readUser])
+    /// ```
+    public static let defaultScopes: [String] = [
+        GitHubScopes.repo,
+        GitHubScopes.readOrg,
+        GitHubScopes.adminOrg,
+        GitHubScopes.manageRunnersOrg,
+        GitHubScopes.workflow
+    ]
+
     /// Shared `JSONDecoder` — reused across token-exchange decode calls.
     private let decoder = JSONDecoder()
     /// Shared `JSONEncoder` — reused across token-exchange encode calls.
     private let encoder = JSONEncoder()
     /// The OAuth redirect URI. Must match the value registered in the GitHub OAuth app settings.
     private let redirectURI = GitHubConstants.oauthRedirectURI
-    /// OAuth scopes requested during sign-in.
-    private let scopes = "repo read:org admin:org manage_runners:org workflow"
+    /// OAuth scopes requested during sign-in. Set at init time via the `scopes` parameter.
+    private let scopes: [String]
     /// GitHub OAuth authorisation URL.
     private let authorizeURL = "\(GitHubConstants.base)/login/oauth/authorize"
     /// GitHub OAuth token-exchange URL.
@@ -67,6 +87,9 @@ public final class OAuthService: OAuthServiceProtocol {
     ///   - clientID: The GitHub OAuth app client ID.
     ///   - clientSecret: The GitHub OAuth app client secret.
     ///   - tokenStore: The backing store used to save/delete/load the OAuth token.
+    ///   - scopes: The OAuth scopes to request during sign-in. Defaults to `OAuthService.defaultScopes`.
+    ///     Must not be empty — a `precondition` failure is raised at init time if an empty array is passed.
+    ///     Use `GitHubScopes` constants for type safety and discoverability.
     ///   - logger: Optional logger for diagnostic messages.
     ///   - session: The `URLSession` used for token-exchange requests. Defaults to `.shared`.
     ///     Inject a custom session in tests to avoid real network calls.
@@ -80,11 +103,14 @@ public final class OAuthService: OAuthServiceProtocol {
         clientID: String,
         clientSecret: String,
         tokenStore: any TokenStore,
+        scopes: [String] = OAuthService.defaultScopes,
         logger: (any GitHubLogger)? = nil,
         session: URLSession = .shared,
         onTokenSaved: (() -> Void)? = nil,
         onTokenDeleted: (() -> Void)? = nil
     ) {
+        precondition(!scopes.isEmpty, "OAuthService: scopes must not be empty — pass at least one GitHubScopes constant")
+        self.scopes = scopes
         self.clientID = clientID
         self.clientSecret = clientSecret
         self.tokenStore = tokenStore
