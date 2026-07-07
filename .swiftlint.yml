@@ -44,6 +44,16 @@ identifier_name:
     - n
 
 missing_docs:
+  # All access levels are intentionally included — every declaration must be
+  # documented regardless of visibility. This is stricter than the SwiftLint
+  # default (which only warns on open/public). The rationale: internal and
+  # private types/members are just as likely to be misunderstood by future
+  # maintainers as public ones, and doc comments serve as inline spec.
+  #
+  # Consequence: private struct members (e.g. CodingKeys, stored let properties)
+  # that don't benefit from prose docs must be suppressed individually with:
+  #   // swiftlint:disable:next missing_docs
+  # This is intentional and not noise — the suppression is load-bearing.
   warning: [open, public, internal, private, fileprivate]
   excludes_extensions: false
   excludes_inherited_types: false
