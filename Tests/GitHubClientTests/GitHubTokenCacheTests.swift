@@ -189,9 +189,9 @@ struct GitHubTokenCacheTests {
   /// If the Mutex guard were absent (or broken), the Swift runtime's TSan
   /// instrumentation would report a data race here.
   ///
-  /// - Note: `withCleanEnv` is used to strip CI env vars (GitHub Actions always
-  ///   injects `GITHUB_TOKEN`) so the only resolution path exercised is the
-  ///   `MockTokenStore`, keeping the assertion deterministic.
+  /// - Note: `withCleanEnvAsync` is used to strip CI env vars (GitHub Actions
+  ///   always injects `GITHUB_TOKEN`) so the only resolution path exercised is
+  ///   the `MockTokenStore`, keeping the assertion deterministic.
   @Test func token_concurrentCalls_allReturnSameToken() async {
     await withCleanEnvAsync {
       let cache = makeCache(storeToken: "concurrent-token")
@@ -218,7 +218,20 @@ struct GitHubTokenCacheTests {
 // MARK: - Async env helpers
 
 /// Async variant of `withCleanEnv` for use in `async` test bodies.
-/// Strips both token env vars, runs body, then restores the previous values.
+/// Strips both token env vars, runs `body`, then restores the previous values.
+///
+/// - NOTE: `setenv`/`unsetenv` are POSIX calls that mutate the **process-global**
+///   environment. Because this is an `async` function, the Swift runtime may
+///   resume `body` (and the restore lines that follow it) on a different thread
+///   than the one that ran the unset lines. Between `await body()` returning and
+///   the restore executing, a thread in a *different* suite could briefly observe
+///   the stripped variables.
+///
+///   This is safe today: no other suite in this test target reads
+///   `GH_TOKEN`/`GITHUB_TOKEN`. It becomes a latent flakiness trap if any future
+///   suite does. If env-var-touching suites multiply, consider elevating the
+///   `.serialized` constraint to the full test target level, or moving all
+///   env-var mutation behind a process-scoped actor.
 private func withCleanEnvAsync(_ body: () async -> Void) async {
   let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
   let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
