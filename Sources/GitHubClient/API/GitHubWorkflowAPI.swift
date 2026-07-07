@@ -274,10 +274,12 @@ public enum GitHubRunsFetchResult: Sendable {
 /// - Note: **Rate-limit budget change (PR #37) — on the public signature, visible in
 ///   Quick Help at every call site.** Before PR #37, `fetchActiveRuns` was counted as
 ///   **1** logical operation (record() was called once after the for-loop). After PR #37,
-///   record() fires inside `interpretHTTPResponse` on every 2xx response, so each
-///   invocation registers **2** hits against the hourly budget — one for the
-///   `in_progress` query and one for the `queued` query. Callers that track or display
-///   the counter value should account for this.
+///   record() fires inside `interpretHTTPResponse` on every 2xx response, so a **fully
+///   successful** invocation registers **2** hits against the hourly budget — one for
+///   the `in_progress` query and one for the `queued` query. Early exits record only
+///   the pages that completed before the exit: **0** hits on `.noToken` (first query
+///   fails) or **1** hit on `.rateLimited` (first query succeeds, second fails).
+///   Callers that track or display the counter value should account for this.
 ///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
