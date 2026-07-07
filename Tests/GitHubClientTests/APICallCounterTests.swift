@@ -245,8 +245,8 @@ struct APICallCounterTests {
   // apiPaginated decodes each HTTP response body as [AnyJSON] (a flat JSON
   // array). Stubs for endpoints that go through apiPaginated must return a
   // bare JSON array (e.g. []) — NOT a dict wrapper like {"workflow_runs":[]}.
-  // The dict wrapper is what fetchActiveRuns decodes from the *accumulated*
-  // result returned by apiPaginated, not from the raw HTTP body.
+  // fetchActiveRuns decodes the flat [GitHubWorkflowRun] array directly from
+  // the Data returned by apiPaginated — no {"workflow_runs":[...]} envelope.
   //
   // fetchRunners   — apiPaginated — stub: []
   // fetchActiveRuns — apiPaginated — stub: [] (per status)
@@ -271,10 +271,18 @@ struct APICallCounterTests {
   // -------------------------------------------------------------
   // fetchActiveRuns returns .noToken when allRuns.isEmpty at the nil guard,
   // and .rateLimited(partialRuns) only when allRuns is non-empty.
-  // The fetchActiveRunsCounterStopsAtOneOnRateLimitedEarlyExit test must
-  // therefore stub in_progress with at least one decodable run object so
-  // allRuns is non-empty before the nil guard fires on queued. A bare []
-  // body leaves allRuns empty and takes .noToken instead — wrong branch.
+  // The fetchActiveRunsCounterStopsAtOneOnRateLimitedEarlyExit test stubs
+  // in_progress with oneRunJSON — a flat array containing one GitHubWorkflowRun
+  // object with only the fields required by its Decodable init. This makes
+  // allRuns non-empty after the first successful page, so when queued hits a
+  // network error the nil guard correctly takes .rateLimited(partialRuns).
+  // A bare [] body leaves allRuns empty and takes .noToken instead.
+  //
+  // oneRunJSON fields match GitHubWorkflowRun.CodingKeys exactly:
+  //   id, name, status, conclusion(optional), head_branch, head_sha,
+  //   html_url, created_at, updated_at.
+  // No other fields (repository, run_number, workflow_id, event) are needed
+  // or present on GitHubWorkflowRun.
   //
   // .serialized prevents tests within this suite from racing on the
   // shared stub registry.
@@ -322,14 +330,16 @@ struct APICallCounterTests {
         for: url)
     }
 
-    // A minimal valid workflow-run JSON array that apiPaginated accepts (bare
-    // array of objects) and fetchActiveRuns can decode into a non-empty allRuns.
-    // Only fields required by GitHubRun's Decodable init are included.
+    // A minimal flat JSON array containing one GitHubWorkflowRun object.
+    // Fields match GitHubWorkflowRun.CodingKeys exactly — no extra fields.
+    // Used to make allRuns non-empty so .rateLimited is reachable in the
+    // early-exit counter test.
     private static let oneRunJSON = Data("""
-      [{"id":1,"name":"CI","status":"in_progress","html_url":"https://github.com/counter-test/r/actions/runs/1",\
-      "run_number":1,"head_branch":"main","head_sha":"abc","event":"push",\
-      "updated_at":"2024-01-01T00:00:00Z","workflow_id":1,\
-      "repository":{"name":"r","owner":{"login":"counter-test"}}}]
+      [{"id":1,"name":"CI","status":"in_progress",\
+      "head_branch":"main","head_sha":"abc",\
+      "html_url":"https://github.com/counter-test/r/actions/runs/1",\
+      "created_at":"2024-01-01T00:00:00Z",\
+      "updated_at":"2024-01-01T00:00:00Z"}]
       """.utf8)
 
     private var base: String { GitHubConstants.apiBase + "/" }
@@ -363,8 +373,8 @@ struct APICallCounterTests {
     // Both tests use stubNetworkError() — not an unregistered URL — to force a
     // deterministic nil from apiPaginated.
     //
-    // The .rateLimited test stubs in_progress with oneRunJSON (non-empty) so
-    // allRuns is non-empty before the nil guard fires on queued — the only way
+    // The .rateLimited test stubs in_progress with oneRunJSON (one decodable run)
+    // so allRuns is non-empty before the nil guard fires on queued — the only way
     // to reach the .rateLimited(partialRuns) branch. A bare [] body would leave
     // allRuns empty and take .noToken instead.
 
@@ -375,8 +385,6 @@ struct APICallCounterTests {
       let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
       let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
       // in_progress returns one run — allRuns becomes non-empty, counter gets 1 hit.
-      // Must use a non-empty run array so fetchActiveRuns takes .rateLimited,
-      // not .noToken, when queued hits a network error.
       StubURLProtocol.register(
         .init(data: Self.oneRunJSON, statusCode: 200, headers: [:]),
         for: inProgressURL)

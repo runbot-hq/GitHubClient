@@ -271,6 +271,11 @@ public enum GitHubRunsFetchResult: Sendable {
 /// Each `transport.apiPaginated` call records its own hits in the transport layer
 /// (one count per successful HTTP page). No manual `apiCallCounter.record()` is needed.
 ///
+/// `apiPaginated` returns a flat JSON array encoded as `Data`. This function decodes
+/// that directly as `[GitHubWorkflowRun]` — **not** via a `{"workflow_runs":[...]}` wrapper.
+/// The GitHub REST API wraps runs in a `workflow_runs` key, but `apiPaginated` strips the
+/// envelope and returns only the array items, so no wrapper is needed here.
+///
 /// - Note: **Rate-limit budget change (PR #37) — on the public signature, visible in
 ///   Quick Help at every call site.** Before PR #37, `fetchActiveRuns` was counted as
 ///   **1** logical operation (record() was called once after the for-loop). After PR #37,
@@ -312,12 +317,11 @@ public func fetchActiveRuns(
             // properly. Tracked in #1950.
             if allRuns.isEmpty { return .noToken } else { return .rateLimited(allRuns) }
         }
-        struct Response: Decodable {
-            let workflowRuns: [GitHubWorkflowRun]
-            enum CodingKeys: String, CodingKey { case workflowRuns = "workflow_runs" }
-        }
-        if let decoded = try? JSONDecoder().decode(Response.self, from: data) {
-            for run in decoded.workflowRuns where seenIDs.insert(run.id).inserted {
+        // apiPaginated returns a flat JSON array — decode directly as [GitHubWorkflowRun].
+        // Do NOT use a {"workflow_runs":[...]} wrapper here: apiPaginated strips the
+        // GitHub API envelope and encodes only the array items into the returned Data.
+        if let runs = try? JSONDecoder().decode([GitHubWorkflowRun].self, from: data) {
+            for run in runs where seenIDs.insert(run.id).inserted {
                 allRuns.append(run)
             }
         }
