@@ -588,8 +588,23 @@ final class GitHubTransportPaginatedTests {
 
   // MARK: - Token revoked mid-pagination discards all items
 
-  /// A token that is valid for page 1 but revoked before page 2 is requested
-  /// must cause all partial items to be discarded and nil to be returned.
+  /// A token that is valid for page 1 but revoked (returns nil) before page 2 is
+  /// requested must cause all partial items to be discarded and nil to be returned.
+  ///
+  /// Mechanism: `TokenCallCounter` returns "test-token" on the first call and nil
+  /// on every subsequent call. The transport checks the token at the start of each
+  /// page loop iteration; a nil token on iteration 2 hits the no-token guard and
+  /// returns nil (discarding the page-1 item).
+  ///
+  /// Two assertions:
+  /// - `result == nil` — partial items are discarded on mid-pagination token loss
+  /// - `spy.setCalled == false` — a missing token is not a rate-limit event
+  ///
+  /// Note: page 2 is intentionally NOT registered in StubURLProtocol. If the
+  /// transport ever makes a second network request with a nil token instead of
+  /// aborting early, StubURLProtocol will error with URLError(.fileDoesNotExist)
+  /// and the test will fail loudly — providing an automatic regression sentinel
+  /// for the no-token early-exit path.
   @Test func paginatedReturnsNilWhenTokenRevokedMidPagination() async {
     StubURLProtocol.reset()
     let page1URL = "\(apiBase)orgs/test/actions/runners"
@@ -602,7 +617,14 @@ final class GitHubTransportPaginatedTests {
         statusCode: 200,
         headers: ["Link": "<\(page2URL)>; rel=\"next\""]
       ), for: page1URL)
+    // page2URL is intentionally NOT registered — see test doc comment above.
 
+    /// A call-counting token provider that returns a valid token exactly once.
+    ///
+    /// `@unchecked Sendable` is intentional: `count` is a plain `Int` protected
+    /// by `NSLock` on every read-modify-write. `@unchecked` is required because
+    /// the class has no actor isolation and Swift 6 strict concurrency cannot
+    /// verify the lock-based safety statically. This type is test-support only.
     final class TokenCallCounter: @unchecked Sendable {
       let lock = NSLock()
       var count = 0
