@@ -9,23 +9,8 @@ import Foundation
 ///
 /// Written exactly once by `GitHubClient.init` before any concurrent reads,
 /// satisfying the once-written invariant. All internal code reads/writes this
-/// directly to avoid triggering the `#DeprecatedDeclaration` warning emitted
-/// when the deprecated public alias `sharedGitHubTransport` is used internally.
+/// directly.
 nonisolated(unsafe) internal var sharedTransportStorage: any GitHubTransportProtocol = GitHubTransport()
-
-/// The process-wide default transport instance.
-///
-/// Deprecated in favour of `currentTransport`. Will be removed once
-/// `AppDelegate` is migrated to scope via `withTransport(_:operation:)` (see #25).
-///
-/// - Note: This is a thin public alias over `sharedTransportStorage`.
-///   Internal code must use `sharedTransportStorage` directly to avoid
-///   triggering deprecation warnings.
-@available(*, deprecated, renamed: "currentTransport")
-nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTransportProtocol {
-    get { sharedTransportStorage }
-    set { sharedTransportStorage = newValue }
-}
 
 // MARK: - @TaskLocal transport
 
@@ -72,11 +57,6 @@ public var currentTransport: any GitHubTransportProtocol {
 /// The `@Sendable` closure and `T: Sendable` bound are required because
 /// `$taskLocalTransport.withValue` crosses task boundaries under strict
 /// concurrency checking.
-///
-/// - NOTE: `apiCallCounter.record()` in `fetchUserOrgs`/`fetchUserRepos` still
-///   fires even when a mock transport is injected here. This is a known latent
-///   test-isolation concern that will be resolved when counting moves to the
-///   transport layer in #26.
 nonisolated public func withTransport<T: Sendable>(
     _ transport: any GitHubTransportProtocol,
     operation: @Sendable () async throws -> T
