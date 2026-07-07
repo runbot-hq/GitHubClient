@@ -31,6 +31,18 @@ actor SpyRateLimitActor: RateLimitActorProtocol {
     private(set) var setCalled = false
     private(set) var clearCalled = false
 
+    /// Ordered log of method calls. Each entry is one of:
+    /// - `"set"` — appended by `set(resetAt:)`
+    /// - `"clear"` — appended by `clear()` (directly or via delegation from `clearIfNotLimited`)
+    /// - `"clearIfNotLimited"` — appended by `clearIfNotLimited()` before it delegates
+    ///
+    /// The delegation chain means a single `clearIfNotLimited()` call on an unlimited actor
+    /// produces `["clearIfNotLimited", "clear"]` in sequence, making both the caller identity
+    /// and the actual state mutation visible to ordering tests.
+    ///
+    /// `reset()` clears this array alongside the boolean flags.
+    private(set) var callOrder: [String] = []
+
     func setUp(isLimited: Bool) {
         self.isLimited = isLimited
     }
@@ -39,12 +51,14 @@ actor SpyRateLimitActor: RateLimitActorProtocol {
         setCalled = true
         isLimited = true
         resetDate = resetAt.map { Date(timeIntervalSince1970: $0) }
+        callOrder.append("set")
     }
 
     func clear() {
         clearCalled = true
         isLimited = false
         resetDate = nil
+        callOrder.append("clear")
     }
 
     /// Clears the rate-limit flag only when not currently limited.
@@ -56,7 +70,12 @@ actor SpyRateLimitActor: RateLimitActorProtocol {
     /// This means tests that seed `spy.isLimited = true` before the call under test
     /// will correctly see `clearCalled == false` after a 2xx response, confirming
     /// that the pre-armed rate-limit window was not disturbed.
+    ///
+    /// `callOrder` always receives `"clearIfNotLimited"` regardless of whether the
+    /// guard passes. When the guard passes and `clear()` is called, `callOrder` then
+    /// also receives `"clear"`, making the full delegation chain visible.
     func clearIfNotLimited() {
+        callOrder.append("clearIfNotLimited")
         guard !isLimited else { return }
         clear()
     }
@@ -71,5 +90,6 @@ actor SpyRateLimitActor: RateLimitActorProtocol {
         resetDate = nil
         setCalled = false
         clearCalled = false
+        callOrder = []
     }
 }

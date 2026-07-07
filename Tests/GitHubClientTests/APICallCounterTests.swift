@@ -4,7 +4,7 @@
 // Unit tests for APICallCounter and APICallCounterSnapshot.
 //
 // The key invariants tested:
-//   1. Fresh actor starts at zero.
+//   1. Fresh actor starts at zero, fraction 0.0, and limit == hourlyLimit.
 //   2. record() increments count within the rolling window.
 //   3. fraction is always clamped to [0, 1].
 //   4. snapshot() is atomic — consistent count + limit in one hop (P10).
@@ -15,6 +15,7 @@
 //   8. record() trims buffer to hourlyLimit at >5,000 entries.
 //   9. purge() retains entries exactly at the 60-minute boundary (inclusive).
 //  10. purge() evicts entries just beyond the 60-minute boundary (exclusive).
+//  11. record() trims to hourlyLimit when buffer is at exactly hourlyLimit before the call.
 import Foundation
 import Testing
 
@@ -25,19 +26,16 @@ struct APICallCounterTests {
 
   // MARK: - Defaults
 
-  @Test("fresh actor starts at count zero")
-  func freshActorStartsAtZero() async {
+  /// Merged from freshActorStartsAtZero, freshActorFractionIsZero, and
+  /// snapshotLimitMatchesConstant — all shared identical setup and tested
+  /// different fields of the same snapshot value.
+  @Test("fresh actor has expected defaults: count 0, fraction 0.0, limit == hourlyLimit")
+  func freshActorHasExpectedDefaults() async {
     let counter = APICallCounter()
     let snap = await counter.snapshot()
     #expect(snap.count == 0)
-    #expect(snap.limit == APICallCounter.hourlyLimit)
-  }
-
-  @Test("fresh actor fraction is zero")
-  func freshActorFractionIsZero() async {
-    let counter = APICallCounter()
-    let snap = await counter.snapshot()
     #expect(snap.fraction == 0.0)
+    #expect(snap.limit == APICallCounter.hourlyLimit)
   }
 
   // MARK: - record()
@@ -75,6 +73,46 @@ struct APICallCounterTests {
     await counter.record()
     let snap = await counter.snapshot()
     #expect(snap.count == APICallCounter.hourlyLimit)
+  }
+
+  /// Verifies the exact-boundary case of `record()`'s trim guard:
+  /// `if timestamps.count > Self.hourlyLimit`.
+  ///
+  /// `recordTrimsToHourlyLimit` seeds `hourlyLimit + 10` entries, which is
+  /// already **over** the limit before `record()` is called. This test seeds
+  /// exactly `hourlyLimit` entries — the buffer is full but not yet over —
+  /// then calls `record()` once.
+  ///
+  /// After the append, `timestamps.count == hourlyLimit + 1`, which is
+  /// strictly greater than `hourlyLimit`, so the trim fires:
+  ///   `timestamps = Array(timestamps.suffix(hourlyLimit))`
+  ///
+  /// The suffix slice keeps the **newest** `hourlyLimit` entries, evicting
+  /// only the oldest seeded entry (index 0). The result must be
+  /// `count == hourlyLimit`, not `hourlyLimit + 1`.
+  ///
+  /// This test would catch a regression where the guard is changed to
+  /// `>=` (which would trim one call too early, preventing the counter
+  /// from ever reaching the limit) or to `> hourlyLimit + 1` (which would
+  /// allow the buffer to grow one entry beyond the cap).
+  @Test("record() at exact hourlyLimit boundary trims back to hourlyLimit")
+  func recordAtExactHourlyLimit_trimsToLimit() async {
+    let counter = APICallCounter()
+    let now = ContinuousClock.now
+    // Seed exactly hourlyLimit fresh timestamps (buffer full, not over).
+    let full = (0..<APICallCounter.hourlyLimit).map {
+      now.advanced(by: .milliseconds($0))
+    }
+    await counter.seed(timestamps: full)
+
+    // One more record() call tips the buffer to hourlyLimit + 1, triggering trim.
+    await counter.record()
+
+    let snap = await counter.snapshot()
+    // Must be trimmed back to exactly hourlyLimit, not hourlyLimit + 1.
+    #expect(
+      snap.count == APICallCounter.hourlyLimit,
+      "record() must trim the buffer to hourlyLimit when it reaches hourlyLimit + 1 entries")
   }
 
   // MARK: - fraction clamping
@@ -115,8 +153,12 @@ struct APICallCounterTests {
 
   // MARK: - snapshot atomicity (P10)
 
-  @Test("snapshot returns consistent count + limit in a single hop")
-  func snapshotIsConsistent() async {
+  /// Two consecutive snapshot() calls on an idle actor return the same value.
+  /// This is not a concurrency stress test — concurrent atomicity is covered
+  /// by snapshotAtomicUnderConcurrentMutations. Renamed from snapshotIsConsistent
+  /// to reflect what is actually verified.
+  @Test("snapshot() is deterministic on an idle actor")
+  func snapshotIsDeterministicOnIdle() async {
     let counter = APICallCounter()
     await counter.record()
     let s1 = await counter.snapshot()
@@ -141,13 +183,6 @@ struct APICallCounterTests {
         }
       }
     }
-  }
-
-  @Test("snapshot limit always equals hourlyLimit constant")
-  func snapshotLimitMatchesConstant() async {
-    let counter = APICallCounter()
-    let snap = await counter.snapshot()
-    #expect(snap.limit == APICallCounter.hourlyLimit)
   }
 
   // MARK: - Idle-gap regression
@@ -301,10 +336,8 @@ struct APICallCounterTests {
   // handleRateLimitResponse returns true (→ .rateLimited) only when the 403
   // carries rate-limit signals: X-RateLimit-Remaining: 0 or a Retry-After
   // header. A plain 403 with neither header returns false (→ .permissionDenied).
-  // counterNotIncrementedOnPermissionDenied403 exercises the .permissionDenied
-  // path specifically (plain 403, no rate-limit headers). The suite does not
-  // currently exercise the .rateLimited 403 path (X-RateLimit-Remaining: 0),
-  // which is out of scope for this PR.
+  // counterNotIncrementedOnPermissionDenied403 covers the .permissionDenied path.
+  // The .rateLimited 403 path (X-RateLimit-Remaining: 0) is tracked in #43.
   //
   // .serialized prevents tests within this suite from racing on the
   // shared stub registry.
@@ -544,12 +577,9 @@ struct APICallCounterTests {
       #expect(await counter.recordedCount == 0)
     }
 
-    // A plain 403 with no rate-limit headers (no X-RateLimit-Remaining: 0,
-    // no Retry-After) maps to .permissionDenied in interpretHTTPResponse —
-    // not .rateLimited. handleRateLimitResponse returns false, the 403/429
-    // branch returns .permissionDenied, and callCounter.record() is never
-    // reached. This is the correct behaviour: a permission error did not
-    // consume a successful API quota slot.
+    // A plain 403 with no rate-limit headers maps to .permissionDenied — not .rateLimited.
+    // handleRateLimitResponse returns false, callCounter.record() is never reached.
+    // For the .rateLimited 403 path (X-RateLimit-Remaining: 0), see #43.
     @Test("counter is not incremented on 403 permission-denied response (no rate-limit headers)")
     func counterNotIncrementedOnPermissionDenied403() async {
       let counter = MockAPICallCounter()

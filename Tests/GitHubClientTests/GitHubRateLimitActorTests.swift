@@ -103,9 +103,6 @@ struct RateLimitActorTests {
     #expect(snap.isLimited)
     if let date = snap.resetDate {
       let diff = date.timeIntervalSinceReferenceDate - now.timeIntervalSinceReferenceDate
-      // Assert diff >= (minClamp - clampTolerance) so a loaded CI host
-      // with up to `clampTolerance` seconds of scheduling latency still
-      // passes without losing the signal that the 5 s floor was applied.
       #expect(diff >= 5.0 - Self.clampTolerance)
     } else {
       Issue.record("resetDate should not be nil")
@@ -131,54 +128,101 @@ struct RateLimitActorTests {
     }
   }
 
+  /// A `resetAt` timestamp in the past produces a negative `secondsUntilReset`,
+  /// which must be clamped up to the 5 s floor rather than scheduling a
+  /// zero-delay or immediate-fire reset.
+  ///
+  /// Real-world scenario: the GitHub API returns an `X-RateLimit-Reset` header
+  /// that was already in the past by the time the response is processed (clock
+  /// skew, slow response, or cached header). Without the floor clamp the actor
+  /// would arm with a ≤0 delay and fire almost immediately, silently unblocking
+  /// the client before the actual rate-limit window closes.
+  ///
+  /// `set(resetAt:)` computes `secondsUntilReset = ts - now` then applies
+  /// `min(max(secondsUntilReset, 5), 7200)`. A timestamp 60 s in the past
+  /// produces `secondsUntilReset ≈ -60`, which `max(..., 5)` raises to exactly 5.
+  ///
+  /// Three assertions:
+  /// - `isLimited == true` — a past timestamp still arms the flag
+  /// - `resetDate != nil` — the floor-clamped date is stored
+  /// - `resetDate ≈ now + 5s` — the 5 s floor was applied (within clampTolerance)
+  @Test("set with past timestamp clamps to the 5 s floor")
+  func setWithPastTimestamp_clampsToFloor() async {
+    let actor = RateLimitActor()
+    let now = Date()
+    // 60 seconds in the past — well below the 5 s floor.
+    let pastTimestamp = now.timeIntervalSince1970 - 60
+
+    await actor.set(resetAt: pastTimestamp)
+    let snap = await actor.snapshot()
+
+    // A past timestamp must still arm the flag.
+    #expect(snap.isLimited)
+    // A floor-clamped resetDate must be produced.
+    if let date = snap.resetDate {
+      let diff = date.timeIntervalSinceReferenceDate - now.timeIntervalSinceReferenceDate
+      // Must be at least the 5 s floor (minus scheduling tolerance).
+      #expect(diff >= 5.0 - Self.clampTolerance)
+      // Must not be unreasonably far in the future (e.g. ceiling was applied instead).
+      // Uses clampTolerance on the upper bound for consistency with all other timing
+      // assertions in this file and to account for CI scheduling jitter.
+      #expect(diff < 10.0 + Self.clampTolerance)
+    } else {
+      Issue.record("resetDate must not be nil for a past timestamp")
+    }
+  }
+
+  /// Calling `clear()` twice in a row must be idempotent: the second call must
+  /// not crash, and the actor must remain in the cleared state.
+  ///
+  /// `clear()` unconditionally cancels `resetTask` and sets it to `nil`. A second
+  /// call therefore calls `nil?.cancel()` (a no-op in Swift) and re-sets already-nil
+  /// / already-false state. This test confirms that no force-unwrap or guard is
+  /// lurking in the implementation.
+  ///
+  /// Regression guard: a future refactor that replaces `resetTask?.cancel()` with
+  /// `resetTask!.cancel()` would crash here, making the regression immediately visible.
+  ///
+  /// Three assertions (after the second clear()):
+  /// - `isLimited == false` — flag remains cleared
+  /// - `resetDate == nil` — date remains nil
+  /// - no crash (implicit: the test completes)
+  @Test("clear() called twice is idempotent")
+  func clearTwice_isIdempotent() async {
+    let actor = RateLimitActor()
+    // Arm the actor first so the first clear() has real work to do.
+    await actor.set(resetAt: Date().timeIntervalSince1970 + 120)
+    #expect(await actor.isLimited)
+
+    // First clear — disarms.
+    await actor.clear()
+    // Second clear — must be a no-op, not a crash.
+    await actor.clear()
+
+    let snap = await actor.snapshot()
+    #expect(!snap.isLimited)
+    #expect(snap.resetDate == nil)
+  }
+
   // MARK: - Generation-guard (stale-task race)
 
-  /// Verifies that a second `set()` cancels the prior window's reset task via
-  /// `resetTask?.cancel()` inside `set()`, and that window-2's state remains
-  /// intact after a brief sleep (giving any already-sleeping stale didFire a
-  /// chance to arrive — it will be rejected by the generation guard).
-  ///
-  /// NOTE: This does NOT exercise the full generation-guard race. The actual
-  /// timer-boundary race — where window-1's reset task has *exited* `Task.sleep`
-  /// (so `.cancel()` no longer stops it) and calls `didFire` after window-2 has
-  /// incremented `generation` — is not directly exercisable from the public API
-  /// without clock injection. A full race test would require injecting a
-  /// controllable time source into `RateLimitActor`, which is out of scope for
-  /// this PR. The generation-guard logic is instead verified by code review and
-  /// the swift-testing run that confirms the guard path
-  /// (`guard generation == self.generation else { ... }`) compiles and executes.
-  ///
-  /// TODO: Upgrade to a deterministic race test once `RateLimitActor` supports
-  /// injectable `Clock` conformance. Track in follow-up issue.
-  /// Verifies that a second `set()` cancels the prior window's reset task and that window-2's armed state survives a brief yield.
   @Test("set after set cancels prior window and preserves new window state")
   func set_after_set_cancels_prior_window() async throws {
     let actor = RateLimitActor()
 
-    // Window 1
     await actor.set(resetAt: Date().timeIntervalSince1970 + 5)
     #expect(await actor.isLimited)
 
-    // Window 2 replaces window 1 (generation increments)
     await actor.set(resetAt: Date().timeIntervalSince1970 + 60)
     #expect(await actor.isLimited)
 
-    // Use `try await` (not `try?`) so test-task cancellation propagates
-    // rather than being swallowed silently.
     try await Task.sleep(for: .milliseconds(100))
 
-    // Window 2's state must still be intact
     let snap = await actor.snapshot()
     #expect(snap.isLimited)
     #expect(snap.resetDate != nil)
   }
 
-  /// Multiple rapid set calls: only the last window's state survives.
-  /// Loop starts at i=1 so every call passes a strictly future timestamp
-  /// (now + 10 ... now + 40), keeping the test off the clamp-floor path.
-  /// Uses the captured `now` timestamp for assertions to avoid wall-clock
-  /// drift in slow CI environments.
-  /// Verifies that four rapid `set()` calls in a loop leave only the last window's `resetDate` intact, with all earlier windows discarded.
   @Test("rapid successive sets keep only the latest window")
   func rapidSuccessiveSets() async {
     let actor = RateLimitActor()
@@ -192,10 +236,6 @@ struct RateLimitActorTests {
     #expect(snap.isLimited)
 
     if let date = snap.resetDate {
-      // The last call passed now + 40; resetDate is derived from the
-      // clamped delay which matches this value (within the [5, 7200]
-      // range). Using the captured `now` instead of a fresh Date()
-      // eliminates wall-clock drift sensitivity.
       let referenceNow = Date(timeIntervalSince1970: now)
       let diff = date.timeIntervalSinceReferenceDate - referenceNow.timeIntervalSinceReferenceDate
       #expect(diff > 30)
@@ -207,7 +247,6 @@ struct RateLimitActorTests {
 
   // MARK: - Snapshot atomicity
 
-  /// Verifies that `snapshot()` returns a consistent `isLimited` + `resetDate` pair both after `set()` and after a subsequent `clear()`.
   @Test("snapshot returns consistent isLimited + resetDate pair")
   func snapshotConsistency() async {
     let actor = RateLimitActor()
@@ -226,7 +265,6 @@ struct RateLimitActorTests {
 
   // MARK: - Multiple set calls without intermediate clear
 
-  /// Verifies that calling `set()` twice without `clear()` overwrites the previous window and leaves the actor in the state set by the second call.
   @Test("set after set without clear overwrites gracefully")
   func setAfterSetWithoutClear() async {
     let actor = RateLimitActor()
@@ -239,8 +277,6 @@ struct RateLimitActorTests {
     #expect(snap.isLimited)
 
     if let date = snap.resetDate {
-      // Second call passed now + 20. Using the captured `now` instead of
-      // a fresh Date() eliminates wall-clock drift sensitivity in CI.
       let referenceNow = Date(timeIntervalSince1970: now)
       let diff = date.timeIntervalSinceReferenceDate - referenceNow.timeIntervalSinceReferenceDate
       #expect(diff > 10)

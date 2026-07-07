@@ -75,6 +75,11 @@ public final class TokenCache: Sendable {
 
     /// Loads the token from the `TokenStore`. Populates the cache on success.
     ///
+    /// Empty strings are rejected — a `TokenStore` returning `""` (e.g. a corrupted
+    /// Keychain entry) is treated identically to `nil`. This mirrors the empty-string
+    /// guard in `resolveFromEnvironment()` and prevents a blank Bearer header from
+    /// being cached and sent on every subsequent request.
+    ///
     /// - Note: Thundering-herd window is intentional. Two concurrent callers that
     ///   both miss `resolveFromCache()` will both call `tokenStore.load()` and both
     ///   attempt to set the cache. The `if $0 == nil { $0 = token }` check-before-write
@@ -85,6 +90,12 @@ public final class TokenCache: Sendable {
         guard let token = tokenStore.load() else {
             #if DEBUG
             logger?.log("TokenCache › token store returned nil", category: "transport")
+            #endif
+            return nil
+        }
+        guard !token.isEmpty else {
+            #if DEBUG
+            logger?.log("TokenCache › token store returned empty string — treating as absent", category: "transport")
             #endif
             return nil
         }

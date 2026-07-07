@@ -73,6 +73,19 @@ struct GitHubTokenCacheTests {
     }
   }
 
+  /// An empty-string token returned by the store must be treated as absent and
+  /// return nil. A blank Bearer token would be sent on every API request, causing
+  /// immediate 401s — empty strings are not valid credentials.
+  ///
+  /// Regression guard for the missing isEmpty check in resolveFromStore().
+  /// resolveFromEnvironment() already had this guard; the store path was
+  /// asymmetrically unprotected before this test was added.
+  @Test func token_storeEmptyString_returnsNil() {
+    withCleanEnv {
+      #expect(makeCache(storeToken: "").token() == nil)
+    }
+  }
+
   // MARK: - token() — GH_TOKEN
 
   /// Resolves a token from GH_TOKEN when the store is empty.
@@ -84,6 +97,17 @@ struct GitHubTokenCacheTests {
     }
   }
 
+  /// An empty-string GH_TOKEN must be treated as absent and return nil.
+  /// A blank Bearer token would be sent on every API request, causing
+  /// immediate 401s — empty strings are not valid credentials.
+  @Test func token_ghTokenEmptyString_returnsNil() {
+    withCleanEnv {
+      withEnv("GH_TOKEN", value: "") {
+        #expect(makeCache().token() == nil)
+      }
+    }
+  }
+
   // MARK: - token() — GITHUB_TOKEN fallback
 
   /// Falls back to GITHUB_TOKEN when GH_TOKEN is absent.
@@ -91,6 +115,16 @@ struct GitHubTokenCacheTests {
     withCleanEnv {
       withEnv("GITHUB_TOKEN", value: "github-test-token") {
         #expect(makeCache().token() == "github-test-token")
+      }
+    }
+  }
+
+  /// An empty-string GITHUB_TOKEN must be treated as absent and return nil.
+  /// GH_TOKEN is kept absent so only the fallback branch is exercised.
+  @Test func token_githubTokenEmptyString_returnsNil() {
+    withCleanEnv {
+      withEnv("GITHUB_TOKEN", value: "") {
+        #expect(makeCache().token() == nil)
       }
     }
   }
@@ -142,5 +176,58 @@ struct GitHubTokenCacheTests {
       cache.invalidate()  // must not crash on empty cache
       #expect(cache.token() == nil)
     }
+  }
+
+  // MARK: - token() — concurrent access
+
+  /// Fifty concurrent `Task`s calling `token()` simultaneously must all return
+  /// the same value with no crash or data race.
+  ///
+  /// `TokenCache` is not an actor — it uses `Synchronization.Mutex` for thread
+  /// safety. This test validates that the Mutex guard is sufficient under
+  /// genuine concurrent load: every caller must see the expected token regardless
+  /// of which Task wins the first write to the cache.
+  ///
+  /// Mechanism:
+  /// - A fresh `TokenCache` backed by a `MockTokenStore` seeded with
+  ///   `"concurrent-token"` is created. The cache is initially empty.
+  /// - `resolveFromStore()` has priority 2 — it is always consulted before the
+  ///   env-var path. Because the store is seeded, any CI-injected GITHUB_TOKEN
+  ///   or GH_TOKEN is irrelevant: the store result wins regardless of what env
+  ///   vars are present. No env manipulation is needed or performed.
+  /// - 50 Tasks are spawned concurrently. All of them race to call `token()`
+  ///   on the same instance. Because the cache is empty on the first call,
+  ///   multiple Tasks may enter `resolveFromStore()` concurrently — exactly
+  ///   the thundering-herd window documented in `TokenCache.resolveFromStore()`.
+  /// - `withTaskGroup` collects all 50 results.
+  /// - Every result is asserted to equal `"concurrent-token"` — no nil, no
+  ///   divergence, no crash.
+  ///
+  /// If the Mutex guard were absent (or broken), the Swift runtime's TSan
+  /// instrumentation would report a data race here.
+  ///
+  /// - Note: The suite is `.serialized`, which prevents this test from running
+  ///   concurrently with *other tests in the same suite*. That is orthogonal to
+  ///   the 50 Tasks spawned inside this test body — those Tasks are intentional
+  ///   intra-test concurrency exercising `TokenCache`'s thread-safety. There is
+  ///   no contradiction: `.serialized` controls inter-test scheduling only.
+  @Test func token_concurrentCalls_allReturnSameToken() async {
+    let cache = makeCache(storeToken: "concurrent-token")
+    let taskCount = 50
+
+    let results = await withTaskGroup(of: String?.self, returning: [String?].self) { group in
+      for _ in 0 ..< taskCount {
+        group.addTask { cache.token() }
+      }
+      var collected: [String?] = []
+      for await result in group {
+        collected.append(result)
+      }
+      return collected
+    }
+
+    // Every concurrent caller must receive the expected token — no nil, no divergence.
+    #expect(results.count == taskCount)
+    #expect(results.allSatisfy { $0 == "concurrent-token" })
   }
 }

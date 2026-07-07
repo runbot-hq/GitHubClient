@@ -273,9 +273,9 @@ final class GitHubTransportPaginatedTests {
   /// and must NOT arm the rate-limit actor (clear() IS called because execute()
   /// clears on any 2xx before the decode step).
   ///
-  /// paginatedReturnsNilOnNonArrayBodyFirstPage was removed in #1500 — it was a
-  /// functional duplicate of this test with identical stub, result, and spy assertions.
-  @Test func paginatedNonArrayFirstPageDoesNotArmRateLimiter() async {
+  /// Renamed from paginatedNonArrayFirstPageDoesNotArmRateLimiter: the test also
+  /// asserts result == nil, which the old name did not reflect.
+  @Test func paginatedNonArrayFirstPage_returnsNilAndDoesNotArmRateLimiter() async {
     StubURLProtocol.reset()
     let pageURL = "\(apiBase)orgs/test/actions/runners"
 
@@ -367,9 +367,22 @@ final class GitHubTransportPaginatedTests {
 
   /// A genuine 429 rate-limit mid-pagination arms the spy and returns partial items.
   ///
-  /// Verifies: `.rateLimited` path returns collected items (not nil), and
-  /// `SpyRateLimitActor.setCalled` is true — confirming the injected actor
-  /// (not the global) was armed.
+  /// Verifies:
+  /// - Partial items from page 1 are returned (not nil)
+  /// - `setCalled` is true — the injected spy (not the global) was armed
+  /// - `clearCalled` is true — clearIfNotLimited() fired after the page-1 2xx response
+  /// - **Ordering**: clearIfNotLimited() is recorded before the *last* set() in
+  ///   `callOrder`, confirming the page-1 success clears the limiter before the
+  ///   page-2 429 re-arms it. Using `lastIndex(of: "set")` (not `firstIndex`) ensures
+  ///   a future code path that emits "set" before the pagination loop cannot silently
+  ///   pass the check by having `firstIndex(of: "set")` point to that earlier entry.
+  ///
+  ///   `callOrder` after a normal two-page run looks like:
+  ///   `["clearIfNotLimited", "clear", "set"]`
+  ///   The ordering assertion keys on `"clearIfNotLimited"` (the protocol call
+  ///   the transport actually makes on a 2xx) rather than `"clear"` (an internal
+  ///   delegation detail). This makes the assertion resilient to a future refactor
+  ///   that inlines clearIfNotLimited() instead of delegating to clear().
   ///
   /// - Note: 429 is chosen over 403 because the GitHub API uses 429 exclusively
   ///   for genuine rate limits. The stub includes a `Retry-After: 60` header so
@@ -410,7 +423,19 @@ final class GitHubTransportPaginatedTests {
     #expect(wasSetCalled)
     let wasClearCalled = await spy.clearCalled
     #expect(wasClearCalled)
-    // clear() IS called after page 1 success (2xx response clears the limiter).
+    // Ordering assertion: clearIfNotLimited() must appear before the last set() in
+    // callOrder. lastIndex(of: "set") is intentional — it ensures a hypothetical
+    // early "set" emission (before the pagination loop) cannot hide a regression
+    // where the real rate-limit set() fires before clearIfNotLimited().
+    let order = await spy.callOrder
+    if let clearIfNotLimitedIndex = order.firstIndex(of: "clearIfNotLimited"),
+       let setIndex = order.lastIndex(of: "set") {
+      #expect(
+        clearIfNotLimitedIndex < setIndex,
+        "clearIfNotLimited() must be recorded before set() — page-1 2xx clears, page-2 429 arms")
+    } else {
+      Issue.record("callOrder missing expected entries — got: \(order)")
+    }
   }
 
   // MARK: - Transient network error returns partial results
@@ -558,51 +583,43 @@ final class GitHubTransportPaginatedTests {
 
   // MARK: - Token revoked mid-pagination discards all items
 
-  /// A token that is valid for page 1 but revoked before page 2 is requested
-  /// must cause all partial items to be discarded and nil to be returned.
+  /// A token that is valid for page 1 but revoked (returns nil) before page 2 is
+  /// requested must cause all partial items to be discarded and nil to be returned.
   ///
-  /// Verifies: the `.noToken` arm in the pagination loop is reachable and
-  /// correctly sets `didFailAuth = true` after page 1 has already been fetched.
+  /// Mechanism: `TokenCallCounter` returns "test-token" on the first call and nil
+  /// on every subsequent call. The transport checks the token at the start of each
+  /// page loop iteration; a nil token on iteration 2 hits the no-token guard and
+  /// returns nil (discarding the page-1 item).
   ///
-  /// Mechanism: a lock-protected call counter is installed as the token provider.
-  /// The first call (page-1 iteration) returns "test-token"; every subsequent
-  /// call returns nil. Page 1 therefore succeeds and its item is accumulated.
-  /// On the page-2 iteration, `execute()` hits `guard let token = tokenProvider()`,
-  /// gets nil, and returns `.noToken` without making a network request. The
-  /// pagination loop catches `.noToken`, sets `didFailAuth`, breaks, and returns
-  /// nil — discarding the page-1 item.
+  /// Two assertions:
+  /// - `result == nil` — partial items are discarded on mid-pagination token loss
+  /// - `spy.setCalled == false` — a missing token is not a rate-limit event
   ///
-  /// The page-2 URL is intentionally NOT registered in `StubURLProtocol`: if the
-  /// token guard is ever accidentally removed, the stub miss produces a
-  /// `fileDoesNotExist` URLError rather than silently serving data, making the
-  /// regression immediately visible.
-  ///
-  /// - Warning: The call-count provider assumes `execute()` calls `tokenProvider()`
-  ///   exactly once per pagination iteration. If that guard is hoisted, cached, or
-  ///   called more than once per iteration, the counter will misfire. Re-examine
-  ///   this test whenever `execute()`'s token-read pattern changes.
+  /// Note: page 2 is intentionally NOT registered in StubURLProtocol. If the
+  /// transport ever makes a second network request with a nil token instead of
+  /// aborting early, StubURLProtocol will error with URLError(.fileDoesNotExist)
+  /// and the test will fail loudly — providing an automatic regression sentinel
+  /// for the no-token early-exit path.
   @Test func paginatedReturnsNilWhenTokenRevokedMidPagination() async {
     StubURLProtocol.reset()
     let page1URL = "\(apiBase)orgs/test/actions/runners"
     let page2URL = "\(apiBase)orgs/test/actions/runners?page=2"
     let page1Data = jsonPage([["id": "1", "name": "runner-a"]])
 
-    // Page 1 succeeds and advertises a next page.
     StubURLProtocol.register(
       .init(
         data: page1Data,
         statusCode: 200,
         headers: ["Link": "<\(page2URL)>; rel=\"next\""]
       ), for: page1URL)
-    // Page 2 is deliberately NOT registered — see method doc above.
+    // page2URL is intentionally NOT registered — see test doc comment above.
 
-    // Call-count-based token provider: returns a valid token for the first
-    // tokenProvider() read (page-1 iteration) and nil for all subsequent reads.
-    //
-    // - Note: `@unchecked Sendable` is intentional. `count` is guarded by
-    //   `lock` on every read and write, making concurrent access safe.
-    //   `@unchecked` is required because this local class predates Swift
-    //   concurrency. Test-only — P4's production carve-out applies.
+    /// A call-counting token provider that returns a valid token exactly once.
+    ///
+    /// `@unchecked Sendable` is intentional: `count` is a plain `Int` protected
+    /// by `NSLock` on every read-modify-write. `@unchecked` is required because
+    /// the class has no actor isolation and Swift 6 strict concurrency cannot
+    /// verify the lock-based safety statically. This type is test-support only.
     final class TokenCallCounter: @unchecked Sendable {
       let lock = NSLock()
       var count = 0
@@ -618,30 +635,15 @@ final class GitHubTransportPaginatedTests {
     let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { counter.next() })
     let result = await transport.apiPaginated("/orgs/test/actions/runners")
 
-    // Partial item from page 1 must be discarded — nil returned.
     #expect(result == nil)
-    // The rate-limit actor must NOT have been armed — this is an auth failure,
-    // not a rate-limit event.
     let wasSetCalled = await spy.setCalled
     #expect(wasSetCalled == false)
-    // clear() IS called after page 1 success (2xx response clears the limiter).
     let wasClearCalled = await spy.clearCalled
     #expect(wasClearCalled)
   }
 
   // MARK: - Pre-armed rate limit does not block first request
 
-  /// A pre-armed rate-limit state (`spy.isLimited = true` before the call) does
-  /// NOT block the initial request — the rate-limit check only fires inside
-  /// `execute()` after receiving a 403/429 response. Since page 1 returns 200,
-  /// the 2xx handler calls `clearIfNotLimited()` which is a no-op because
-  /// `isLimited` is already true, preserving the active limit window.
-  ///
-  /// Verifies: the pre-armed state is not checked at call-entry, so page-1 items
-  /// are returned; `spy.setCalled` remains false (no rate-limit response was
-  /// received to trigger `handleRateLimitResponse`); `clear()` is NOT called
-  /// because `clearIfNotLimited()` guards against clearing an already-armed actor;
-  /// the pre-armed `isLimited` state is preserved.
   @Test func paginatedReturnsItemsWhenPreArmedRateLimit() async {
     StubURLProtocol.reset()
     let pageURL = "\(apiBase)orgs/test/actions/runners"
@@ -659,26 +661,19 @@ final class GitHubTransportPaginatedTests {
     let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { "test-token" })
     let result = await transport.apiPaginated("/orgs/test/actions/runners")
 
-    // Page 1 must still be fetched — pre-armed state does not block the request.
     let items = decodeItems(result)
     #expect(items?.count == 1)
     #expect(items?[0]["id"] == .string("1"))
-    // set() must NOT have been called — no rate-limit response was received.
     let wasSetCalled = await spy.setCalled
     #expect(wasSetCalled == false)
-    // clear() is NOT called — clearIfNotLimited() is a no-op when isLimited is true.
     let wasClearCalled = await spy.clearCalled
     #expect(wasClearCalled == false)
-    // isLimited remains true — the pre-armed state is preserved.
     let snap = await spy.snapshot()
     #expect(snap.isLimited == true)
   }
 
   // MARK: - Non-auth HTTP error (404) returns partial results
 
-  /// A 404 mid-pagination must stop pagination and return items collected from
-  /// earlier pages — not nil. This verifies the `case .httpError: break pagination`
-  /// path does NOT set `didFailAuth`, preserving partial results.
   @Test func paginatedReturnsPartialResultsOnHttpError404() async {
     StubURLProtocol.reset()
     let page1URL = "\(apiBase)orgs/test/actions/runners"
@@ -691,7 +686,6 @@ final class GitHubTransportPaginatedTests {
         statusCode: 200,
         headers: ["Link": "<\(page2URL)>; rel=\"next\""]
       ), for: page1URL)
-    // 404 on page 2 — non-auth HTTP error.
     StubURLProtocol.register(
       .init(
         data: "{\"message\":\"Not found\"}".data(using: .utf8)!,
@@ -703,33 +697,22 @@ final class GitHubTransportPaginatedTests {
     let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { "test-token" })
     let result = await transport.apiPaginated("/orgs/test/actions/runners")
 
-    // Partial results from page 1 must be returned — not nil.
     #expect(result != nil)
     let items = decodeItems(result)
     #expect(items?.count == 1)
     #expect(items?[0]["id"] == .string("1"))
-    // clear() IS called after page 1 success (2xx response clears the limiter).
     let wasClearCalled = await spy.clearCalled
     #expect(wasClearCalled)
-    // set() must NOT be called — 404 is not a rate-limit event.
     let wasSetCalled = await spy.setCalled
     #expect(wasSetCalled == false)
   }
 
   // MARK: - Non-auth HTTP error on the very first page returns nil
 
-  /// A non-auth HTTP error (e.g. 404) on the very first page — before any items
-  /// are accumulated — must return nil.
-  ///
-  /// Verifies: `case .httpError: break pagination` exits the loop with
-  /// `hadAtLeastOneSuccessfulPage == false`, so the post-loop guard fails and
-  /// nil is returned. This distinguishes the first-page error from the partial-
-  /// results path tested by `paginatedReturnsPartialResultsOnHttpError404`.
   @Test func paginatedReturnsNilOnHttpErrorFirstPage() async {
     StubURLProtocol.reset()
     let pageURL = "\(apiBase)orgs/test/actions/runners"
 
-    // 404 on the very first page — no prior items accumulated.
     StubURLProtocol.register(
       .init(
         data: "{\"message\":\"Not found\"}".data(using: .utf8)!,
@@ -741,13 +724,184 @@ final class GitHubTransportPaginatedTests {
     let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { "test-token" })
     let result = await transport.apiPaginated("/orgs/test/actions/runners")
 
-    // No items were ever collected — nil must be returned.
     #expect(result == nil)
-    // Neither set() nor clear() should be called — 404 is not a rate-limit event
-    // and no 2xx page succeeded.
     let wasSetCalled = await spy.setCalled
     #expect(wasSetCalled == false)
     let wasClearCalled = await spy.clearCalled
     #expect(wasClearCalled == false)
+  }
+
+  // MARK: - 5xx server error on first page returns nil
+
+  /// A 500 Internal Server Error on the very first page must return nil and must
+  /// not arm the rate-limit actor or call clear().
+  ///
+  /// 5xx responses on the first page are treated identically to non-auth 4xx errors:
+  /// `hadAtLeastOneSuccessfulPage` is false, so nil is returned rather than an empty
+  /// array. The transport does not attempt a retry — that is the caller's responsibility.
+  ///
+  /// This is Step 2 of the PR #41 audit: explicit 5xx coverage on the first-page path.
+  ///
+  /// Three assertions:
+  /// - `result == nil` — no items were collected before the error
+  /// - `spy.setCalled == false` — a server error is not a rate-limit event
+  /// - `spy.clearCalled == false` — no 2xx preceded the error, so the limiter is untouched
+  @Test func paginatedReturnsNilOnServerError500FirstPage() async {
+    StubURLProtocol.reset()
+    let pageURL = "\(apiBase)orgs/test/actions/runners"
+
+    StubURLProtocol.register(
+      .init(
+        data: "{\"message\":\"Internal Server Error\"}".data(using: .utf8)!,
+        statusCode: 500,
+        headers: [:]
+      ), for: pageURL)
+
+    let spy = SpyRateLimitActor()
+    let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { "test-token" })
+    let result = await transport.apiPaginated("/orgs/test/actions/runners")
+
+    #expect(result == nil)
+    let wasSetCalled = await spy.setCalled
+    #expect(wasSetCalled == false)
+    let wasClearCalled = await spy.clearCalled
+    #expect(wasClearCalled == false)
+  }
+
+  // MARK: - 503 server error mid-pagination returns partial results
+
+  /// A 503 Service Unavailable mid-pagination must return the items collected
+  /// so far — not nil — and must not arm the rate-limit actor.
+  ///
+  /// This exercises the partial-result preservation path for 5xx errors: unlike
+  /// auth failures (401, 403) which discard all accumulated items and return nil,
+  /// a server error mid-pagination is treated as a stopping condition that preserves
+  /// whatever was successfully fetched before the error.
+  ///
+  /// Mechanism: page 1 succeeds (200 + Link header, one item). Page 2 returns 503.
+  /// The pagination loop exits via the server-error branch and returns `allItems`
+  /// containing the one item from page 1.
+  ///
+  /// Four assertions:
+  /// - `result != nil` — partial items are preserved, not discarded
+  /// - `items.count == 1` — exactly the item from page 1
+  /// - `spy.setCalled == false` — a server error is not a rate-limit event
+  /// - `spy.clearCalled == true` — page 1 returned 200, so clearIfNotLimited() fired
+  @Test func paginatedReturnsPartialResultsOnServerError503MidPagination() async {
+    StubURLProtocol.reset()
+    let page1URL = "\(apiBase)orgs/test/actions/runners"
+    let page2URL = "\(apiBase)orgs/test/actions/runners?page=2"
+    let page1Data = jsonPage([["id": "1", "name": "runner-a"]])
+
+    StubURLProtocol.register(
+      .init(
+        data: page1Data,
+        statusCode: 200,
+        headers: ["Link": "<\(page2URL)>; rel=\"next\""]
+      ), for: page1URL)
+    StubURLProtocol.register(
+      .init(
+        data: "{\"message\":\"Service Unavailable\"}".data(using: .utf8)!,
+        statusCode: 503,
+        headers: [:]
+      ), for: page2URL)
+
+    let spy = SpyRateLimitActor()
+    let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { "test-token" })
+    let result = await transport.apiPaginated("/orgs/test/actions/runners")
+
+    #expect(result != nil)
+    let items = decodeItems(result)
+    #expect(items?.count == 1)
+    #expect(items?[0]["id"] == .string("1"))
+    let wasSetCalled = await spy.setCalled
+    #expect(wasSetCalled == false)
+    let wasClearCalled = await spy.clearCalled
+    #expect(wasClearCalled == true)
+  }
+
+  // MARK: - Malformed Link header terminates pagination gracefully
+
+  /// A `Link` header with no angle-bracket wrapping around the URL portion
+  /// must cause `extractNextURL` to return nil, terminating pagination after
+  /// the first page without crashing or looping.
+  ///
+  /// The value `"not-a-url; rel=next"` is one specific invalid shape — no
+  /// `<...>` brackets. Other malformed shapes (e.g. angle brackets present
+  /// but non-URL content inside) are not covered by this test.
+  ///
+  /// Three assertions:
+  /// - `result != nil` — page-1 items are preserved, not discarded
+  /// - `items.count == 1` — exactly the one item from page 1
+  /// - `spy.setCalled == false` — a parse failure is not a rate-limit event
+  @Test func paginatedMalformedLinkHeaderTerminatesSinglePage() async {
+    StubURLProtocol.reset()
+    let pageURL = "\(apiBase)orgs/test/actions/runners"
+
+    // Respond with a garbage Link header — no angle brackets, no valid URL.
+    StubURLProtocol.register(
+      .init(
+        data: jsonPage([["id": "1", "name": "runner-a"]]),
+        statusCode: 200,
+        headers: ["Link": "not-a-url; rel=next"]
+      ), for: pageURL)
+
+    let spy = SpyRateLimitActor()
+    let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { "test-token" })
+    let result = await transport.apiPaginated("/orgs/test/actions/runners")
+
+    // extractNextURL must return nil — pagination terminates after page 1.
+    #expect(result != nil)
+    let items = decodeItems(result)
+    #expect(items?.count == 1)
+    #expect(items?[0]["id"] == .string("1"))
+    // A Link parse failure is not a rate-limit event.
+    let wasSetCalled = await spy.setCalled
+    #expect(wasSetCalled == false)
+    // clear() IS called — page 1 returned 200.
+    let wasClearCalled = await spy.clearCalled
+    #expect(wasClearCalled == true)
+  }
+
+  // MARK: - Empty Link header value terminates pagination gracefully
+
+  /// An empty string `Link` header value must be treated identically to no
+  /// `Link` header: `extractNextURL` returns nil, pagination terminates after
+  /// page 1, and collected items are returned.
+  ///
+  /// Some proxies or GitHub Enterprise installations strip the Link header
+  /// content while leaving the header key present. This test confirms the
+  /// parser handles that silently rather than crashing.
+  ///
+  /// Three assertions:
+  /// - `result != nil` — items from page 1 are preserved
+  /// - `items.count == 2` — both items from the single page are present
+  /// - `spy.setCalled == false` — empty Link is not a rate-limit event
+  @Test func paginatedEmptyLinkHeaderTerminatesAfterFirstPage() async {
+    StubURLProtocol.reset()
+    let pageURL = "\(apiBase)orgs/test/actions/runners"
+
+    // Empty Link header value — simulates a proxy that strips the URL portion.
+    StubURLProtocol.register(
+      .init(
+        data: jsonPage([["id": "1", "name": "runner-a"], ["id": "2", "name": "runner-b"]]),
+        statusCode: 200,
+        headers: ["Link": ""]
+      ), for: pageURL)
+
+    let spy = SpyRateLimitActor()
+    let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { "test-token" })
+    let result = await transport.apiPaginated("/orgs/test/actions/runners")
+
+    // Empty Link — treated as no next page.
+    #expect(result != nil)
+    let items = decodeItems(result)
+    #expect(items?.count == 2)
+    // Empty Link is not a rate-limit event.
+    let wasSetCalled = await spy.setCalled
+    #expect(wasSetCalled == false)
+    // clear() IS called — page 1 returned 200.
+    let wasClearCalled = await spy.clearCalled
+    #expect(wasClearCalled == true)
   }
 }

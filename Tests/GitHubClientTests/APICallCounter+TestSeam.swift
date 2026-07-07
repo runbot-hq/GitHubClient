@@ -10,6 +10,10 @@ import Foundation
 extension APICallCounter {
   /// Seeds the rolling buffer with pre-built `ContinuousClock.Instant` values.
   ///
+  /// The production `timestamps` property is `[ContinuousClock.Instant]` —
+  /// never `[Date]`. Both the seam and the production actor use the same
+  /// type, so there is no clock-type mismatch between test and production.
+  ///
   /// Use `ContinuousClock.now.advanced(by: .seconds(-n))` to create
   /// instants in the past.
   func seed(timestamps: [ContinuousClock.Instant]) {
