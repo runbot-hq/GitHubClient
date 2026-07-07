@@ -189,6 +189,12 @@ struct GitHubTokenCacheTests {
   /// If the Mutex guard were absent (or broken), the Swift runtime's TSan
   /// instrumentation would report a data race here.
   ///
+  /// - Note: The suite is `.serialized`, which prevents this test from running
+  ///   concurrently with *other tests in the same suite*. That is orthogonal to
+  ///   the 50 Tasks spawned inside this test body — those Tasks are intentional
+  ///   intra-test concurrency exercising `TokenCache`'s thread-safety. There is
+  ///   no contradiction: `.serialized` controls inter-test scheduling only.
+  ///
   /// - Note: `withCleanEnvAsync` is used to strip CI env vars (GitHub Actions
   ///   always injects `GITHUB_TOKEN`) so the only resolution path exercised is
   ///   the `MockTokenStore`, keeping the assertion deterministic.
@@ -227,8 +233,9 @@ struct GitHubTokenCacheTests {
 ///   the restore executing, a thread in a *different* suite could briefly observe
 ///   the stripped variables.
 ///
-///   This is safe today: no other suite in this test target reads
-///   `GH_TOKEN`/`GITHUB_TOKEN`. It becomes a latent flakiness trap if any future
+///   This is safe today because `GitHubTokenCacheTests` is the **only suite in
+///   this test target** that reads `GH_TOKEN` or `GITHUB_TOKEN` — no cross-suite
+///   observation is possible. It becomes a latent flakiness trap if any future
 ///   suite does. If env-var-touching suites multiply, consider elevating the
 ///   `.serialized` constraint to the full test target level, or moving all
 ///   env-var mutation behind a process-scoped actor.
