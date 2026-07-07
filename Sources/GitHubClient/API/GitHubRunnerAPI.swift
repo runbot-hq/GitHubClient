@@ -46,7 +46,15 @@ public func fetchRunners(
     let endpoint = "\(scope.apiPrefix)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
     struct Response: Decodable { let runners: [GitHubRunner] }
-    return (try? JSONDecoder().decode(Response.self, from: data))?.runners ?? []
+    do {
+        return try transport.decoder.decode(Response.self, from: data).runners
+    } catch {
+        transport.logger?.log(
+            "fetchRunners › decode failed for scope=\(scope.apiPrefix): \(error)",
+            category: "transport"
+        )
+        return []
+    }
 }
 
 /// Convenience overload — parses `scopeString` first, returns `nil` on invalid input.
