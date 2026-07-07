@@ -1,26 +1,16 @@
 // GitHubRateLimitHandler.swift
 // GitHubClient
-// swiftlint:disable missing_docs
 import Foundation
 
 // MARK: - RateLimitSnapshot
 
 /// An atomic snapshot of rate-limit state returned by `RateLimitActorProtocol.snapshot()`.
-///
-/// Using a nominal struct rather than an anonymous tuple prevents conformers from
-/// accidentally dropping named labels (which Swift permits silently for tuples),
-/// and keeps the return type extensible (e.g. `Equatable`, `Codable`) without
-/// an API break.
 public struct RateLimitSnapshot: Sendable, Equatable, Hashable {
     /// Whether the GitHub API is currently rate-limiting this client.
     public let isLimited: Bool
     /// The moment at which the rate-limit window expires, or `nil` if unknown.
     public let resetDate: Date?
-    /// Creates a new snapshot with the given rate-limit state.
-    ///
-    /// - Parameters:
-    ///   - isLimited: `true` when the GitHub API is currently rate-limiting this client.
-    ///   - resetDate: The moment the rate-limit window expires, or `nil` if unknown.
+    /// Creates a new snapshot.
     public init(isLimited: Bool, resetDate: Date?) {
         self.isLimited = isLimited
         self.resetDate = resetDate
@@ -49,24 +39,23 @@ public protocol RateLimitActorProtocol: Actor {
 public actor RateLimitActor: RateLimitActorProtocol {
     /// Whether the GitHub API is currently rate-limiting this client.
     public private(set) var isLimited = false
-    /// The moment at which the rate-limit window expires.
-    /// `nil` when the reset time is unknown.
+    /// The moment at which the rate-limit window expires. `nil` when unknown.
     public private(set) var resetDate: Date?
-    /// Structured task that clears `isLimited` when the rate-limit window expires.
+    /// Structured task that fires when the rate-limit window expires.
+    // swiftlint:disable:next missing_docs
     private var resetTask: Task<Void, Never>?
     /// Monotonically increasing generation counter; guards stale reset tasks.
+    // swiftlint:disable:next missing_docs
     private var generation = 0
     /// Optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
 
     /// Creates a new `RateLimitActor`.
-    /// - Parameter logger: The injected logger, or `nil` to suppress output.
     public init(logger: (any GitHubLogger)? = nil) {
         self.logger = logger
     }
 
     /// Arms the rate-limit flag and schedules an automatic reset.
-    /// - Parameter resetAt: Unix timestamp from the `X-RateLimit-Reset` response header.
     public func set(resetAt: TimeInterval?) {
         let delay: TimeInterval
         if let ts = resetAt {
@@ -83,11 +72,7 @@ public actor RateLimitActor: RateLimitActorProtocol {
         isLimited = true
         resetDate = date
         resetTask = Task {
-            do {
-                try await Task.sleep(for: .seconds(delay))
-            } catch {
-                return
-            }
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
             await self.didFire(generation: capturedGeneration, scheduledDelay: delay)
         }
     }
@@ -111,13 +96,10 @@ public actor RateLimitActor: RateLimitActorProtocol {
         RateLimitSnapshot(isLimited: isLimited, resetDate: resetDate)
     }
 
-    // MARK: Private
-
-    /// Fires when `Task.sleep` in `set(resetAt:)` completes without cancellation.
-    /// Guards against stale tasks via the `generation` counter.
+    /// Fires when the sleep task completes; guards against stale tasks via `generation`.
     private func didFire(generation: Int, scheduledDelay: TimeInterval) async {
         guard generation == self.generation else {
-            logger?.log("RateLimitActor › stale didFire ignored (gen=\(generation) current=\(self.generation))", category: "transport")
+            logger?.log("RateLimitActor › stale didFire ignored", category: "transport")
             return
         }
         isLimited = false
@@ -137,7 +119,7 @@ public var ghIsRateLimited: Bool {
     get async { await rateLimitActor.isLimited }
 }
 
-/// Clears the rate-limit flag. Called at the start of each poll cycle in `RunnerStore.fetch()`.
+/// Clears the rate-limit flag.
 nonisolated(nonsending)
 public func clearGhRateLimit() async {
     await rateLimitActor.clear()

@@ -1,6 +1,5 @@
 // OAuthServicing.swift
 // GitHubClient
-// swiftlint:disable missing_docs
 import Foundation
 
 // MARK: - OAuthServiceProtocol

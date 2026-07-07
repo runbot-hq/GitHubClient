@@ -1,6 +1,5 @@
 // GitHubResponseDecoder.swift
 // GitHubClient
-// swiftlint:disable missing_docs
 import Foundation
 
 // MARK: - Error logging
@@ -46,16 +45,16 @@ func handleRateLimitResponse(
     return true
 }
 
-/// Returns the rate-limit kind string for logging.
+/// Returns `"secondary"` for 429s or `Retry-After`; `"primary"` for quota-exhausted 403s.
+// swiftlint:disable:next missing_docs
 private func rateLimitKind(retryAfter: Double?, statusCode: Int) -> String {
     retryAfter != nil || statusCode == 429 ? "secondary" : "primary"
 }
 
 /// Computes the absolute reset timestamp from rate-limit response headers.
+// swiftlint:disable:next missing_docs
 private func resetTimestamp(retryAfter: Double?, resetHeader: TimeInterval?) -> TimeInterval? {
-    if let retryAfter {
-        return Date().timeIntervalSince1970 + retryAfter
-    }
+    if let retryAfter { return Date().timeIntervalSince1970 + retryAfter }
     return resetHeader
 }
 
@@ -77,6 +76,7 @@ func extractNextURL(from header: String?) -> String? {
 }
 
 /// Strips RFC 8288 angle-bracket delimiters from a `Link` header URL segment.
+// swiftlint:disable:next missing_docs
 private func extractURL(from segment: String) -> String? {
     let trimmed = segment.trimmingCharacters(in: .whitespaces)
     guard trimmed.hasPrefix("<"), trimmed.hasSuffix(">") else { return nil }

@@ -1,23 +1,11 @@
 // GitHubHelpers.swift
 // GitHubClient
-// swiftlint:disable missing_docs
 import Foundation
 import os
-
-// MARK: - URL helpers
-// `scopeFromHtmlUrl(_:)` is defined in GitHubURLParsing.swift in this module.
 
 // MARK: - User orgs and repos
 
 /// Returns the login names of all GitHub organisations the authenticated user belongs to.
-///
-/// - Parameter transport: The network transport to use. Defaults to `currentTransport`
-///   (wired at launch by `GitHubClient.init`). Pass a mock in tests.
-///
-/// - Note: `= currentTransport` is evaluated at each call site, not at declaration time.
-///   Swift evaluates default parameter expressions when the function is called, so this
-///   always picks up the live `@TaskLocal` value — including any `withTransport` override
-///   in scope at the moment of the call.
 @concurrent
 public func fetchUserOrgs(
     transport: any GitHubTransportProtocol = currentTransport
@@ -25,20 +13,13 @@ public func fetchUserOrgs(
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
+    // swiftlint:disable:next missing_docs
     struct Org: Decodable { let login: String }
     guard let orgs = try? JSONDecoder().decode([Org].self, from: data) else { return [] }
     return orgs.map(\.login)
 }
 
 /// Returns the `owner/repo` full names of all repositories visible to the authenticated user.
-///
-/// - Parameter transport: The network transport to use. Defaults to `currentTransport`
-///   (wired at launch by `GitHubClient.init`). Pass a mock in tests.
-///
-/// - Note: `= currentTransport` is evaluated at each call site, not at declaration time.
-///   Swift evaluates default parameter expressions when the function is called, so this
-///   always picks up the live `@TaskLocal` value — including any `withTransport` override
-///   in scope at the moment of the call.
 @concurrent
 public func fetchUserRepos(
     transport: any GitHubTransportProtocol = currentTransport
@@ -46,8 +27,10 @@ public func fetchUserRepos(
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userReposPath)?sort=updated&per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
+    // swiftlint:disable:next missing_docs
     struct Repo: Decodable {
         let fullName: String
+        // swiftlint:disable:next missing_docs
         enum CodingKeys: String, CodingKey { case fullName = "full_name" }
     }
     guard let repos = try? JSONDecoder().decode([Repo].self, from: data) else { return [] }
@@ -57,23 +40,11 @@ public func fetchUserRepos(
 // MARK: - Step log
 
 /// Compiled regular expression for stripping ANSI escape sequences from log output.
-/// Safety: NSRegularExpression is immutable after initialisation — concurrent reads are safe.
 private let ansiRegex: NSRegularExpression? = try? NSRegularExpression(
     pattern: "\u{001B}\\[[0-9;]*[A-Za-z]"
 )
 
 /// Fetches the log for a single step via the transport layer's `raw()` method.
-///
-/// - Parameters:
-///   - jobID: The numeric GitHub job ID.
-///   - stepNumber: The 1-based step index within the job.
-///   - scopeString: A scope string such as `"repos/acme/my-repo"`.
-///   - transport: The network transport to use. Defaults to `currentTransport`.
-///
-/// - Note: `= currentTransport` is evaluated at each call site, not at declaration time.
-///   Swift evaluates default parameter expressions when the function is called, so this
-///   always picks up the live `@TaskLocal` value — including any `withTransport` override
-///   in scope at the moment of the call.
 @concurrent
 public func fetchStepLog(
     jobID: Int,
@@ -99,6 +70,7 @@ public func fetchStepLog(
     return parseStepLog(raw, stepNumber: stepNumber, logger: transport.logger)
 }
 
+/// Fetches raw log data from `endpoint`, decodes it as UTF-8, and validates the response.
 @concurrent
 private func fetchAndDecodeStepLog(
     endpoint: String,
@@ -126,6 +98,7 @@ private func fetchAndDecodeStepLog(
     return raw
 }
 
+/// Parses a raw multi-group log string into the section at `stepNumber`.
 private func parseStepLog(
     _ raw: String,
     stepNumber: Int,
@@ -151,6 +124,7 @@ private func parseStepLog(
     return section
 }
 
+/// Splits a cleaned log string into sections delimited by `##[group]` markers.
 private func buildLogSections(from cleaned: String) -> [String] {
     let lines = cleaned.components(separatedBy: "\n")
     var sections: [String] = []
@@ -169,6 +143,7 @@ private func buildLogSections(from cleaned: String) -> [String] {
     return sections
 }
 
+/// Strips ANSI escape sequences from a string using the pre-compiled `ansiRegex`.
 private func stripAnsi(_ input: String) -> String {
     guard let ansiRegex else { return input }
     let range = NSRange(input.startIndex..., in: input)

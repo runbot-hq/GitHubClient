@@ -1,24 +1,21 @@
 // GitHubRequestBuilder.swift
 // GitHubClient
-// swiftlint:disable missing_docs
 import Foundation
 
-/// Module-level constant allocated once; avoids a fresh `CharacterSet` allocation
-/// on every `resolveURL` call and pagination iteration.
+// swiftlint:disable:next missing_docs
 private let slashCharacterSet = CharacterSet(charactersIn: "/")
 
 // MARK: - URL helpers
 
 /// Resolves an endpoint string to a full GitHub API URL string.
-/// Absolute URLs (starting with "http") are returned unchanged;
-/// relative paths are prefixed with `GitHubConstants.apiBase`.
 public func resolveURL(_ endpoint: String) -> String {
     endpoint.hasPrefix("http") ? endpoint : "\(GitHubConstants.apiBase)/\(endpoint.trimmingCharacters(in: slashCharacterSet))"
 }
 
 // MARK: - Request factories
 
-/// Builds a `URLRequest` with the headers common to all GitHub API requests.
+/// Builds a `URLRequest` with headers common to all GitHub API calls.
+// swiftlint:disable:next missing_docs
 private func makeBaseRequest(url: URL, token: String, timeout: TimeInterval) -> URLRequest {
     var req = URLRequest(url: url, timeoutInterval: timeout)
     req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -26,7 +23,7 @@ private func makeBaseRequest(url: URL, token: String, timeout: TimeInterval) -> 
     return req
 }
 
-/// Builds a pre-configured `URLRequest` with the standard `application/vnd.github+json` Accept header.
+/// Builds a `URLRequest` with the `application/vnd.github+json` Accept header.
 public func makeRequest(url: URL, token: String, timeout: TimeInterval) -> URLRequest {
     var req = makeBaseRequest(url: url, token: token, timeout: timeout)
     req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
