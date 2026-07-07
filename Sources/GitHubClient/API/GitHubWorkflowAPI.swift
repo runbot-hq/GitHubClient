@@ -271,13 +271,13 @@ public enum GitHubRunsFetchResult: Sendable {
 /// Each `transport.apiPaginated` call records its own hits in the transport layer
 /// (one count per successful HTTP page). No manual `apiCallCounter.record()` is needed.
 ///
-/// - Note: **Rate-limit budget change introduced in PR #37.** Before this change,
-///   `fetchActiveRuns` was counted as **1** logical operation (record() was called
-///   once after the for-loop). After this change, record() fires inside
-///   `interpretHTTPResponse` on every 2xx response, so each invocation of
-///   `fetchActiveRuns` registers **2** hits against the hourly budget — one for
-///   the `in_progress` query and one for the `queued` query. Callers that track
-///   or display the counter value should account for this.
+/// - Note: **Rate-limit budget change (PR #37) — on the public signature, visible in
+///   Quick Help at every call site.** Before PR #37, `fetchActiveRuns` was counted as
+///   **1** logical operation (record() was called once after the for-loop). After PR #37,
+///   record() fires inside `interpretHTTPResponse` on every 2xx response, so each
+///   invocation registers **2** hits against the hourly budget — one for the
+///   `in_progress` query and one for the `queued` query. Callers that track or display
+///   the counter value should account for this.
 ///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.

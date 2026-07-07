@@ -218,6 +218,28 @@ struct APICallCounterTests {
   // URLSession.shared or the registerClass/unregisterClass lifecycle owned by
   // GitHubTransportPaginatedTests.
   //
+  // Why no StubURLProtocol.reset() calls?
+  // --------------------------------------
+  // reset() wipes the entire process-global stub registry. The two suites
+  // (GitHubTransportPaginatedTests + TransportIncrementGuard) run concurrently;
+  // calling reset() here raced against in-flight stub lookups in
+  // GitHubTransportPaginatedTests and was the original source of flakiness.
+  // It is safe to omit reset() here because every stub URL in this suite
+  // uses the org "counter-test", which never appears in
+  // GitHubTransportPaginatedTests — so there are zero key collisions and
+  // no isolation benefit from calling reset().
+  //
+  // Why does MockAPICallCounter expose reset() if it isn't called here?
+  // --------------------------------------------------------------------
+  // MockAPICallCounter.reset() is a test-spy convenience method, not part
+  // of APICallCounterProtocol. It exists for tests that reuse a single spy
+  // instance across multiple assertions (e.g. if a future test verifies
+  // count before and after a second call). It is intentionally not called
+  // here because each test instantiates a fresh MockAPICallCounter(),
+  // making reset() redundant. If APICallCounterProtocol gains new
+  // requirements, MockAPICallCounter will need to be updated, but reset()
+  // itself does not create coupling to the protocol.
+  //
   // Stub data shapes
   // ----------------
   // apiPaginated decodes each HTTP response body as [AnyJSON] (a flat JSON
