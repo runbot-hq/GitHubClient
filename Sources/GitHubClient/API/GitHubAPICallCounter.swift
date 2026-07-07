@@ -80,6 +80,10 @@ public actor APICallCounter: APICallCounterProtocol {
     /// Evicts timestamps outside the rolling 60-minute window.
     ///
     /// Relies on the ascending-order invariant of `timestamps` — see its declaration.
+    ///
+    /// Boundary: elements at exactly `cutoff` are retained. `drop(while: { $0 < cutoff })`
+    /// stops at the first element where `$0 >= cutoff`, which is identical to the
+    /// previous `firstIndex(where: { $0 >= cutoff })` inclusive boundary.
     private func purge() {
         let cutoff = ContinuousClock.now - .seconds(3_600)
         timestamps = Array(timestamps.drop(while: { $0 < cutoff }))
