@@ -67,15 +67,9 @@ public actor APICallCounter: APICallCounterProtocol {
     // MARK: - Private
 
     /// Evicts timestamps outside the rolling 60-minute window.
-    /// Uses `>=` so an instant at exactly the cutoff boundary is retained (inclusive window).
-    /// When no timestamp meets the cutoff all entries are stale and the buffer is cleared.
     private func purge() {
         let cutoff = ContinuousClock.now - .seconds(3_600)
-        if let idx = timestamps.firstIndex(where: { $0 >= cutoff }) {
-            if idx > 0 { timestamps.removeFirst(idx) }
-        } else {
-            timestamps.removeAll()
-        }
+        timestamps = Array(timestamps.drop(while: { $0 < cutoff }))
     }
 }
 
