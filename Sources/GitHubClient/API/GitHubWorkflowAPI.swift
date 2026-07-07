@@ -327,6 +327,14 @@ public func fetchActiveRuns(
                 allRuns.append(run)
             }
         } catch {
+            // Decode failure on a successful 2xx page is intentionally non-fatal.
+            // The HTTP request succeeded — this is an API shape change or decoder
+            // misconfiguration, not a network or auth condition. The logger call above
+            // surfaces it for diagnostics. Returning a typed error to the caller is
+            // not possible without a signature change, and the caller's correct
+            // response (show available runs) is identical to an empty result set.
+            // The loop continues so a decode failure on one status page does not
+            // discard successfully decoded runs from the other.
             transport.logger?.log(
                 "fetchActiveRuns › decode failed for status=\(status): \(error)",
                 category: "transport"
