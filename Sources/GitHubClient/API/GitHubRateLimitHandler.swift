@@ -64,12 +64,12 @@ public actor RateLimitActor: RateLimitActorProtocol {
     public func set(resetAt: TimeInterval?) {
         let delay: TimeInterval
         if let ts = resetAt {
-            let secondsUntilReset = ts - Date().timeIntervalSince1970
+            let secondsUntilReset = ts - Date.now.timeIntervalSince1970
             delay = min(max(secondsUntilReset, 5), 7200)
         } else {
             delay = 3600
         }
-        let date = Date().addingTimeInterval(delay)
+        let date = Date.now.addingTimeInterval(delay)
         logger?.log("RateLimitActor › arming: delay=\(Int(delay))s resetDate=\(date)", category: "transport")
         generation &+= 1
         let capturedGeneration = generation
