@@ -113,7 +113,7 @@ public final class GitHubClient {
         )
         // Write through the internal backing store to avoid triggering the
         // #DeprecatedDeclaration warning on the public `sharedGitHubTransport` alias.
-        _sharedTransportStorage = transport
+        sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
     }
