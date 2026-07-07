@@ -371,9 +371,11 @@ final class GitHubTransportPaginatedTests {
   /// - Partial items from page 1 are returned (not nil)
   /// - `setCalled` is true — the injected spy (not the global) was armed
   /// - `clearCalled` is true — clearIfNotLimited() fired after the page-1 2xx response
-  /// - **Ordering**: clearIfNotLimited() is recorded before set() in `callOrder`,
-  ///   confirming the page-1 success clears the limiter before the page-2 429 re-arms it.
-  ///   This would catch a regression where the arm-before-clear order is reversed.
+  /// - **Ordering**: clearIfNotLimited() is recorded before the *last* set() in
+  ///   `callOrder`, confirming the page-1 success clears the limiter before the
+  ///   page-2 429 re-arms it. Using `lastIndex(of: "set")` (not `firstIndex`) ensures
+  ///   a future code path that emits "set" before the pagination loop cannot silently
+  ///   pass the check by having `firstIndex(of: "set")` point to that earlier entry.
   ///
   ///   `callOrder` after a normal two-page run looks like:
   ///   `["clearIfNotLimited", "clear", "set"]`
@@ -421,20 +423,13 @@ final class GitHubTransportPaginatedTests {
     #expect(wasSetCalled)
     let wasClearCalled = await spy.clearCalled
     #expect(wasClearCalled)
-    // Ordering assertion: clearIfNotLimited() must appear before set() in callOrder.
-    //
-    // The transport calls clearIfNotLimited() after every 2xx response and set()
-    // after every rate-limit response. For a two-page run where page 1 is 200 and
-    // page 2 is 429, the expected callOrder is:
-    //   ["clearIfNotLimited", "clear", "set"]
-    //
-    // Keying on "clearIfNotLimited" (not "clear") tests the protocol boundary —
-    // the call the transport actually makes — rather than an internal delegation
-    // detail. If clearIfNotLimited() is ever inlined, "clear" may disappear from
-    // callOrder while "clearIfNotLimited" remains, keeping this assertion valid.
+    // Ordering assertion: clearIfNotLimited() must appear before the last set() in
+    // callOrder. lastIndex(of: "set") is intentional — it ensures a hypothetical
+    // early "set" emission (before the pagination loop) cannot hide a regression
+    // where the real rate-limit set() fires before clearIfNotLimited().
     let order = await spy.callOrder
     if let clearIfNotLimitedIndex = order.firstIndex(of: "clearIfNotLimited"),
-       let setIndex = order.firstIndex(of: "set") {
+       let setIndex = order.lastIndex(of: "set") {
       #expect(
         clearIfNotLimitedIndex < setIndex,
         "clearIfNotLimited() must be recorded before set() — page-1 2xx clears, page-2 429 arms")
@@ -738,6 +733,19 @@ final class GitHubTransportPaginatedTests {
 
   // MARK: - 5xx server error on first page returns nil
 
+  /// A 500 Internal Server Error on the very first page must return nil and must
+  /// not arm the rate-limit actor or call clear().
+  ///
+  /// 5xx responses on the first page are treated identically to non-auth 4xx errors:
+  /// `hadAtLeastOneSuccessfulPage` is false, so nil is returned rather than an empty
+  /// array. The transport does not attempt a retry — that is the caller's responsibility.
+  ///
+  /// This is Step 2 of the PR #41 audit: explicit 5xx coverage on the first-page path.
+  ///
+  /// Three assertions:
+  /// - `result == nil` — no items were collected before the error
+  /// - `spy.setCalled == false` — a server error is not a rate-limit event
+  /// - `spy.clearCalled == false` — no 2xx preceded the error, so the limiter is untouched
   @Test func paginatedReturnsNilOnServerError500FirstPage() async {
     StubURLProtocol.reset()
     let pageURL = "\(apiBase)orgs/test/actions/runners"
