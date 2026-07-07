@@ -16,10 +16,20 @@ import Foundation
 public protocol GitHubTransportProtocol: Sendable {
     /// The JSON decoder used to decode API responses.
     ///
-    /// Exposed as a protocol requirement so call sites can decode responses
-    /// consistently without downcasting to the concrete `GitHubTransport` type.
-    /// Conformers should return the same decoder instance they use internally
-    /// so that any configured strategies (date, key, etc.) are applied uniformly.
+    /// Exposed as a protocol requirement so call sites (e.g. `fetchActiveRuns`,
+    /// `fetchJobs`) can decode responses using the same decoder the transport uses
+    /// internally — without downcasting to the concrete `GitHubTransport` type.
+    ///
+    /// **Contract:** Conformers should return the **same** `JSONDecoder` instance
+    /// they use internally so that any configured key or date strategies are applied
+    /// consistently at every decode call site. This contract is enforced by convention
+    /// only — the type system cannot prevent a conformer from returning a fresh
+    /// `JSONDecoder()` on each access.
+    ///
+    /// **Mock conformers** (e.g. `MockTransport`) may safely return a fresh
+    /// `JSONDecoder()` each call, because test fixtures are encoded without custom
+    /// strategies. If a test ever requires a custom strategy, it must configure the
+    /// mock's decoder accordingly rather than relying on this convention.
     var decoder: JSONDecoder { get }
     /// The logger used for transport-layer diagnostics, or `nil` if none was provided.
     /// Exposed on the protocol so host apps can forward it to `configureGHLogger(_:)`

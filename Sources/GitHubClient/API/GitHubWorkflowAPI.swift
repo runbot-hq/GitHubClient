@@ -320,10 +320,16 @@ public func fetchActiveRuns(
         // apiPaginated returns a flat JSON array — decode directly as [GitHubWorkflowRun].
         // Do NOT use a {"workflow_runs":[...]} wrapper here: apiPaginated strips the
         // GitHub API envelope and encodes only the array items into the returned Data.
-        if let runs = try? transport.decoder.decode([GitHubWorkflowRun].self, from: data) {
+        do {
+            let runs = try transport.decoder.decode([GitHubWorkflowRun].self, from: data)
             for run in runs where seenIDs.insert(run.id).inserted {
                 allRuns.append(run)
             }
+        } catch {
+            transport.logger?.log(
+                "fetchActiveRuns › decode failed for status=\(status): \(error)",
+                category: "transport"
+            )
         }
     }
     return .success(allRuns)
@@ -348,5 +354,13 @@ public func fetchJobs(
     let endpoint = "\(scope.apiPrefix)/actions/runs/\(runID)/jobs?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
     struct Response: Decodable { let jobs: [GitHubJob] }
-    return (try? transport.decoder.decode(Response.self, from: data))?.jobs ?? []
+    do {
+        return try transport.decoder.decode(Response.self, from: data).jobs
+    } catch {
+        transport.logger?.log(
+            "fetchJobs › decode failed for runID=\(runID): \(error)",
+            category: "transport"
+        )
+        return []
+    }
 }
