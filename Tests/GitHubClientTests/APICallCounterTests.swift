@@ -342,10 +342,8 @@ struct APICallCounterTests {
   // handleRateLimitResponse returns true (→ .rateLimited) only when the 403
   // carries rate-limit signals: X-RateLimit-Remaining: 0 or a Retry-After
   // header. A plain 403 with neither header returns false (→ .permissionDenied).
-  // counterNotIncrementedOnPermissionDenied403 exercises the .permissionDenied
-  // path specifically (plain 403, no rate-limit headers). The suite does not
-  // currently exercise the .rateLimited 403 path (X-RateLimit-Remaining: 0),
-  // which is out of scope for this PR.
+  // counterNotIncrementedOnPermissionDenied403 covers the .permissionDenied path.
+  // The .rateLimited 403 path (X-RateLimit-Remaining: 0) is tracked in #43.
   //
   // .serialized prevents tests within this suite from racing on the
   // shared stub registry.
@@ -585,12 +583,9 @@ struct APICallCounterTests {
       #expect(await counter.recordedCount == 0)
     }
 
-    // A plain 403 with no rate-limit headers (no X-RateLimit-Remaining: 0,
-    // no Retry-After) maps to .permissionDenied in interpretHTTPResponse —
-    // not .rateLimited. handleRateLimitResponse returns false, the 403/429
-    // branch returns .permissionDenied, and callCounter.record() is never
-    // reached. This is the correct behaviour: a permission error did not
-    // consume a successful API quota slot.
+    // A plain 403 with no rate-limit headers maps to .permissionDenied — not .rateLimited.
+    // handleRateLimitResponse returns false, callCounter.record() is never reached.
+    // For the .rateLimited 403 path (X-RateLimit-Remaining: 0), see #43.
     @Test("counter is not incremented on 403 permission-denied response (no rate-limit headers)")
     func counterNotIncrementedOnPermissionDenied403() async {
       let counter = MockAPICallCounter()
