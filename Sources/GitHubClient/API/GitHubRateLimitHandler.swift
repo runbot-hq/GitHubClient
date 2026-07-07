@@ -128,12 +128,20 @@ public var ghIsRateLimited: Bool {
 }
 
 /// Clears the rate-limit flag.
+///
+/// - Note: `@concurrent` is the canonical Swift 6.2 spelling of `nonisolated(nonsending)`
+///   per SE-0431. It is intentional on a free function delegating to an actor — it means
+///   the function carries no actor isolation and can be called from any context.
 @concurrent
 public func clearGhRateLimit() async {
     await rateLimitActor.clear()
 }
 
 /// Returns a `RateLimitSnapshot` in a single actor hop.
+///
+/// - Note: `@concurrent` is the canonical Swift 6.2 spelling of `nonisolated(nonsending)`
+///   per SE-0431. It is intentional on a free function delegating to an actor — it means
+///   the function carries no actor isolation and can be called from any context.
 @concurrent
 public func ghRateLimitSnapshot() async -> RateLimitSnapshot {
     await rateLimitActor.snapshot()
