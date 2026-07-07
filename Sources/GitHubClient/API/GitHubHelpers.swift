@@ -26,10 +26,8 @@ public func fetchUserRepos(
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userReposPath)?sort=updated&per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
-    // swiftlint:disable:next missing_docs
     struct Repo: Decodable {
         let fullName: String
-        // swiftlint:disable:next missing_docs
         enum CodingKeys: String, CodingKey { case fullName = "full_name" }
     }
     guard let repos = try? JSONDecoder().decode([Repo].self, from: data) else { return [] }
