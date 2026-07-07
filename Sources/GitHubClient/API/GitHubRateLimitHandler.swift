@@ -45,12 +45,12 @@ public actor RateLimitActor: RateLimitActorProtocol {
     public private(set) var isLimited = false
     /// The moment at which the rate-limit window expires. `nil` when unknown.
     public private(set) var resetDate: Date?
-    /// Structured task that fires when the rate-limit window expires.
-    // swiftlint:disable:next missing_docs
+    /// The structured `Task` that fires when the current rate-limit window expires.
+    /// Cancelled and replaced on every `set(resetAt:)` call to ensure only one reset is pending.
     private var resetTask: Task<Void, Never>?
-    /// Monotonically increasing generation counter; incremented on every `set(resetAt:)` call
-    /// to invalidate in-flight reset tasks from previous rate-limit windows.
-    // swiftlint:disable:next missing_docs
+    /// Monotonically increasing generation counter incremented on every `set(resetAt:)` call.
+    /// Each reset task captures its generation at creation and ignores the callback if the
+    /// counter has since advanced, preventing stale tasks from clearing a newer rate-limit window.
     private var generation = 0
     /// Optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
@@ -101,7 +101,9 @@ public actor RateLimitActor: RateLimitActorProtocol {
         RateLimitSnapshot(isLimited: isLimited, resetDate: resetDate)
     }
 
-    /// Fires when the sleep task completes; guards against stale tasks via `generation`.
+    /// Callback invoked when the reset `Task` sleep completes.
+    /// Guards against stale callbacks by comparing `generation` to the value captured at task creation.
+    /// No-ops silently if a newer `set(resetAt:)` call has superseded this task.
     private func didFire(generation: Int, scheduledDelay: TimeInterval) async {
         guard generation == self.generation else {
             logger?.log("RateLimitActor › stale didFire ignored", category: "transport")

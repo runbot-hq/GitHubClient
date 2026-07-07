@@ -42,7 +42,7 @@ public actor APICallCounter: APICallCounterProtocol {
     public static let shared = APICallCounter()
     /// GitHub authenticated REST rate limit per rolling hour.
     public static let hourlyLimit = 5_000
-    // swiftlint:disable:next missing_docs
+    /// Rolling buffer of call instants in ascending order. Internal so tests can inspect it directly.
     var timestamps: [ContinuousClock.Instant] = []
     /// Creates a new `APICallCounter` instance.
     public init() {}
@@ -66,10 +66,9 @@ public actor APICallCounter: APICallCounterProtocol {
 
     // MARK: - Private
 
-    /// Evicts timestamps older than the rolling 60-minute window.
-    /// Uses `>=` for the cutoff comparison so entries at exactly the boundary are retained
-    /// (inclusive window: a call made exactly 60 minutes ago is still within the window).
-    /// When no entry meets the cutoff, all timestamps are stale and the buffer is cleared.
+    /// Evicts timestamps outside the rolling 60-minute window.
+    /// Uses `>=` so an instant at exactly the cutoff boundary is retained (inclusive window).
+    /// When no timestamp meets the cutoff all entries are stale and the buffer is cleared.
     private func purge() {
         let cutoff = ContinuousClock.now - .seconds(3_600)
         if let idx = timestamps.firstIndex(where: { $0 >= cutoff }) {

@@ -36,8 +36,8 @@ public func fetchUserRepos(
 
 // MARK: - Step log
 
-/// Compiled regular expression for stripping ANSI escape sequences from log output.
-// swiftlint:disable:next missing_docs
+/// Pre-compiled regular expression for stripping ANSI escape sequences from CI log output.
+/// Compiled once at module load to avoid repeated allocation on every log fetch.
 private let ansiRegex: NSRegularExpression? = try? NSRegularExpression(
     pattern: "\u{001B}\\[[0-9;]*[A-Za-z]"
 )
@@ -68,12 +68,11 @@ public func fetchStepLog(
     return parseStepLog(raw, stepNumber: stepNumber, logger: transport.logger)
 }
 
-/// Fetches raw log data from `endpoint`, decodes it as UTF-8, and validates the response.
-/// GitHub's log endpoint issues an S3 redirect; `URLSession` follows it automatically,
-/// but the response body will be the raw log text — not JSON. A body starting with `{`
-/// signals a GitHub error object was returned instead of log content.
+/// Fetches raw log bytes from `endpoint` and decodes them as UTF-8.
+/// GitHub’s log endpoint redirects to S3; `URLSession` follows the redirect automatically
+/// and returns the raw log text. A response body starting with `{` indicates a GitHub
+/// error object was returned instead of log content and is treated as a failure.
 @concurrent
-// swiftlint:disable:next missing_docs
 private func fetchAndDecodeStepLog(
     endpoint: String,
     jobID: Int,
@@ -100,8 +99,9 @@ private func fetchAndDecodeStepLog(
     return raw
 }
 
-/// Parses a raw multi-group log string into the section at `stepNumber`.
-// swiftlint:disable:next missing_docs
+/// Extracts the log section for `stepNumber` from a raw multi-group log string.
+/// If the log contains no `##[group]` markers the full cleaned log is returned.
+/// If `stepNumber` is out of range the full cleaned log is returned as a fallback.
 private func parseStepLog(
     _ raw: String,
     stepNumber: Int,
@@ -128,7 +128,7 @@ private func parseStepLog(
 }
 
 /// Splits a cleaned log string into sections delimited by `##[group]` markers.
-// swiftlint:disable:next missing_docs
+/// Each section starts at the marker line and ends just before the next marker.
 private func buildLogSections(from cleaned: String) -> [String] {
     let lines = cleaned.components(separatedBy: "\n")
     var sections: [String] = []
@@ -147,8 +147,8 @@ private func buildLogSections(from cleaned: String) -> [String] {
     return sections
 }
 
-/// Strips ANSI escape sequences from a string using the pre-compiled `ansiRegex`.
-// swiftlint:disable:next missing_docs
+/// Removes ANSI escape sequences from `input` using the pre-compiled `ansiRegex`.
+/// Returns `input` unchanged if `ansiRegex` failed to compile at module load time.
 private func stripAnsi(_ input: String) -> String {
     guard let ansiRegex else { return input }
     let range = NSRange(input.startIndex..., in: input)
