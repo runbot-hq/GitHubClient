@@ -167,6 +167,14 @@ public struct GitHubTransport: GitHubTransportProtocol {
   ///   successful API quota slot. `.permissionDenied` specifically covers plain 403s
   ///   with no rate-limit headers (wrong token scope, revoked PAT, repo access denial);
   ///   the request reached GitHub but was rejected, so counting it would overstate usage.
+  ///
+  /// Sequential awaits — not a missed `async let` optimisation:
+  /// - `rateLimiter.clearIfNotLimited()` and `callCounter.record()` look like two
+  ///   independent actor hops that could be parallelised with `async let`. They are
+  ///   intentionally sequential: rate-limit state must be cleared *before* the success
+  ///   is recorded so the two pieces of state stay consistent from the caller’s
+  ///   perspective. Both are nanosecond in-memory actor operations; `async let` child-task
+  ///   allocation overhead would exceed any latency gain here.
   private func interpretHTTPResponse(
     _ response: URLResponse,
     data: Data,
@@ -190,6 +198,7 @@ public struct GitHubTransport: GitHubTransportProtocol {
       logErrorBody(data, endpoint: urlString, status: http.statusCode, logger: logger)
       return .httpError(http.statusCode)
     }
+    // Sequential awaits are intentional — see doc comment above.
     await rateLimiter.clearIfNotLimited()
     await callCounter.record()
     let linkHeader = http.value(forHTTPHeaderField: "Link")
