@@ -42,10 +42,8 @@ public actor RateLimitActor: RateLimitActorProtocol {
     /// The moment at which the rate-limit window expires. `nil` when unknown.
     public private(set) var resetDate: Date?
     /// Structured task that fires when the rate-limit window expires.
-    // swiftlint:disable:next missing_docs
     private var resetTask: Task<Void, Never>?
     /// Monotonically increasing generation counter; guards stale reset tasks.
-    // swiftlint:disable:next missing_docs
     private var generation = 0
     /// Optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
