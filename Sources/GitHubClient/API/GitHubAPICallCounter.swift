@@ -1,5 +1,6 @@
 // GitHubAPICallCounter.swift
 // GitHubClient
+// swiftlint:disable missing_docs
 //
 // Tracks GitHub REST call timestamps in a rolling 60-minute window.
 // Mirrors the RateLimitActor pattern (P16 — Actor-Per-Concern Isolation).
@@ -30,7 +31,6 @@ public struct APICallCounterSnapshot: Sendable, Equatable {
         guard limit > 0 else { return 0.0 }
         return max(0.0, min(Double(count) / Double(limit), 1.0))
     }
-
     /// Creates a new snapshot.
     public init(count: Int, limit: Int) {
         self.count = count
@@ -67,10 +67,8 @@ public protocol APICallCounterProtocol: Actor {
 public actor APICallCounter: APICallCounterProtocol {
     /// Shared instance wired at module level.
     public static let shared = APICallCounter()
-
     /// GitHub authenticated REST rate limit per rolling hour.
     public static let hourlyLimit = 5_000
-
     /// Rolling buffer of call instants, always in ascending order.
     ///
     /// Stored as `ContinuousClock.Instant` to avoid wall-clock skew.
@@ -80,7 +78,6 @@ public actor APICallCounter: APICallCounterProtocol {
     /// `APICallCounter+TestSeam.swift` can inject pre-built timestamps
     /// via `@testable import GitHubClient` without needing a public API.
     var timestamps: [ContinuousClock.Instant] = []
-
     /// Creates a new `APICallCounter` instance.
     public init() {
         // Default property initializers fully define state.

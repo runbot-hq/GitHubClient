@@ -1,10 +1,10 @@
 // GitHubHelpers.swift
 // GitHubClient
+// swiftlint:disable missing_docs
 import Foundation
 import os
 
 // MARK: - URL helpers
-
 // `scopeFromHtmlUrl(_:)` is defined in GitHubURLParsing.swift in this module.
 
 // MARK: - User orgs and repos
@@ -25,9 +25,7 @@ public func fetchUserOrgs(
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
-    struct Org: Decodable {
-        let login: String
-    }
+    struct Org: Decodable { let login: String }
     guard let orgs = try? JSONDecoder().decode([Org].self, from: data) else { return [] }
     return orgs.map(\.login)
 }
@@ -50,9 +48,7 @@ public func fetchUserRepos(
     ) else { return [] }
     struct Repo: Decodable {
         let fullName: String
-        enum CodingKeys: String, CodingKey {
-            case fullName = "full_name"
-        }
+        enum CodingKeys: String, CodingKey { case fullName = "full_name" }
     }
     guard let repos = try? JSONDecoder().decode([Repo].self, from: data) else { return [] }
     return repos.map(\.fullName)
@@ -97,11 +93,12 @@ public func fetchStepLog(
     }
     let endpoint = "\(scope.apiPrefix)/actions/jobs/\(jobID)/logs"
     transport.logger?.log("fetchStepLog › fetching \(endpoint) step=\(stepNumber)", category: "transport")
-    guard let raw = await fetchAndDecodeStepLog(endpoint: endpoint, jobID: jobID, transport: transport) else { return nil }
+    guard let raw = await fetchAndDecodeStepLog(endpoint: endpoint, jobID: jobID, transport: transport) else {
+        return nil
+    }
     return parseStepLog(raw, stepNumber: stepNumber, logger: transport.logger)
 }
 
-/// Fetches raw log data from `endpoint`, decodes it as UTF-8, and validates the response.
 @concurrent
 private func fetchAndDecodeStepLog(
     endpoint: String,
@@ -129,7 +126,6 @@ private func fetchAndDecodeStepLog(
     return raw
 }
 
-/// Parses a raw log string into sections delimited by `##[group]` markers.
 private func parseStepLog(
     _ raw: String,
     stepNumber: Int,
@@ -146,7 +142,7 @@ private func parseStepLog(
     guard index >= 0, index < sections.count else {
         logger?.log(
             "parseStepLog › stepNumber \(stepNumber) out of range "
-                + "(sections=\(sections.count)), returning full log",
+            + "(sections=\(sections.count)), returning full log",
             category: "transport")
         return cleaned
     }
@@ -155,7 +151,6 @@ private func parseStepLog(
     return section
 }
 
-/// Splits a cleaned log string into sections delimited by `##[group]` markers.
 private func buildLogSections(from cleaned: String) -> [String] {
     let lines = cleaned.components(separatedBy: "\n")
     var sections: [String] = []
@@ -174,7 +169,6 @@ private func buildLogSections(from cleaned: String) -> [String] {
     return sections
 }
 
-/// Strips ANSI escape sequences from a string using the pre-compiled `ansiRegex`.
 private func stripAnsi(_ input: String) -> String {
     guard let ansiRegex else { return input }
     let range = NSRange(input.startIndex..., in: input)
