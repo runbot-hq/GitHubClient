@@ -267,6 +267,15 @@ struct APICallCounterTests {
   // guaranteed to map to .networkError inside execute() and nil inside
   // apiPaginated, regardless of real network reachability.
   //
+  // .rateLimited vs .noToken branch selection in fetchActiveRuns
+  // -------------------------------------------------------------
+  // fetchActiveRuns returns .noToken when allRuns.isEmpty at the nil guard,
+  // and .rateLimited(partialRuns) only when allRuns is non-empty.
+  // The fetchActiveRunsCounterStopsAtOneOnRateLimitedEarlyExit test must
+  // therefore stub in_progress with at least one decodable run object so
+  // allRuns is non-empty before the nil guard fires on queued. A bare []
+  // body leaves allRuns empty and takes .noToken instead — wrong branch.
+  //
   // .serialized prevents tests within this suite from racing on the
   // shared stub registry.
   // final class is required for stored properties.
@@ -313,6 +322,16 @@ struct APICallCounterTests {
         for: url)
     }
 
+    // A minimal valid workflow-run JSON array that apiPaginated accepts (bare
+    // array of objects) and fetchActiveRuns can decode into a non-empty allRuns.
+    // Only fields required by GitHubRun's Decodable init are included.
+    private static let oneRunJSON = Data("""
+      [{"id":1,"name":"CI","status":"in_progress","html_url":"https://github.com/counter-test/r/actions/runs/1",\
+      "run_number":1,"head_branch":"main","head_sha":"abc","event":"push",\
+      "updated_at":"2024-01-01T00:00:00Z","workflow_id":1,\
+      "repository":{"name":"r","owner":{"login":"counter-test"}}}]
+      """.utf8)
+
     private var base: String { GitHubConstants.apiBase + "/" }
 
     // MARK: fetchRunners
@@ -341,14 +360,13 @@ struct APICallCounterTests {
 
     // MARK: fetchActiveRuns — nil-exit counter invariants
     //
-    // These two tests restore coverage that existed in the old MockTransport
-    // suite (fetchActiveRunsSkipsCounterOnPartialNilResult and
-    // fetchActiveRunsReturnsNoTokenWhenFirstStatusReturnsEmptyThenNil).
-    //
     // Both tests use stubNetworkError() — not an unregistered URL — to force a
-    // deterministic nil from apiPaginated. An unregistered URL is NOT intercepted
-    // by StubURLProtocol (canInit returns false) and would fall through to real
-    // networking, making the outcome non-deterministic in CI.
+    // deterministic nil from apiPaginated.
+    //
+    // The .rateLimited test stubs in_progress with oneRunJSON (non-empty) so
+    // allRuns is non-empty before the nil guard fires on queued — the only way
+    // to reach the .rateLimited(partialRuns) branch. A bare [] body would leave
+    // allRuns empty and take .noToken instead.
 
     @Test("fetchActiveRuns() counter == 1 when second status query returns nil (.rateLimited exit)")
     func fetchActiveRunsCounterStopsAtOneOnRateLimitedEarlyExit() async {
@@ -356,10 +374,14 @@ struct APICallCounterTests {
       let ps = GitHubConstants.activeRunsPageSize
       let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
       let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
-      // in_progress succeeds — one counter hit.
-      stub200array(inProgressURL)
-      // queued returns a network error — apiPaginated returns nil, triggering
-      // the .rateLimited(partialResults) early exit. No counter hit.
+      // in_progress returns one run — allRuns becomes non-empty, counter gets 1 hit.
+      // Must use a non-empty run array so fetchActiveRuns takes .rateLimited,
+      // not .noToken, when queued hits a network error.
+      StubURLProtocol.register(
+        .init(data: Self.oneRunJSON, statusCode: 200, headers: [:]),
+        for: inProgressURL)
+      // queued returns a network error — apiPaginated returns nil, allRuns
+      // is non-empty → .rateLimited(partialRuns) branch. No counter hit.
       stubNetworkError(queuedURL)
       let result = await fetchActiveRuns(
         scope: .org(org), transport: makeTransport(counter: counter))
