@@ -111,7 +111,9 @@ public final class GitHubClient {
             tokenProvider: { cache.token() },
             logger: logger
         )
-        sharedGitHubTransport = transport
+        // Write through the internal backing store to avoid triggering the
+        // #DeprecatedDeclaration warning on the public `sharedGitHubTransport` alias.
+        _sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
     }

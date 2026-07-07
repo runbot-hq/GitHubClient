@@ -5,16 +5,27 @@ import Foundation
 
 // MARK: - Process-wide transport instance
 
-/// The process-wide default transport instance.
+/// Internal backing storage for the process-wide default transport.
 ///
-/// Set once by `GitHubClient.init` at app launch before any API calls are made.
-/// Declared `nonisolated(unsafe)` because it is written exactly once — before
-/// any concurrent reads — satisfying the once-written invariant.
+/// Written exactly once by `GitHubClient.init` before any concurrent reads,
+/// satisfying the once-written invariant. All internal code reads/writes this
+/// directly to avoid triggering the `#DeprecatedDeclaration` warning emitted
+/// when the deprecated public alias `sharedGitHubTransport` is used internally.
+nonisolated(unsafe) internal var _sharedTransportStorage: any GitHubTransportProtocol = GitHubTransport()
+
+/// The process-wide default transport instance.
 ///
 /// Deprecated in favour of `currentTransport`. Will be removed once
 /// `AppDelegate` is migrated to scope via `withTransport(_:operation:)` (see #25).
+///
+/// - Note: This is a thin public alias over `_sharedTransportStorage`.
+///   Internal code must use `_sharedTransportStorage` directly to avoid
+///   triggering deprecation warnings.
 @available(*, deprecated, renamed: "currentTransport")
-nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTransportProtocol = GitHubTransport()
+nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTransportProtocol {
+    get { _sharedTransportStorage }
+    set { _sharedTransportStorage = newValue }
+}
 
 // MARK: - @TaskLocal transport
 
@@ -22,7 +33,7 @@ nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTr
 ///
 /// Implicitly `nil` by default — `nil` is a value-type constant and is safe to
 /// freeze at module load. The public `currentTransport` computed property
-/// resolves `nil` to `sharedGitHubTransport` at access time, picking up the
+/// resolves `nil` to `_sharedTransportStorage` at access time, picking up the
 /// live authenticated instance wired by `GitHubClient.init`.
 ///
 /// Do not read this directly. Use `currentTransport` or `withTransport(_:operation:)`.
@@ -31,7 +42,7 @@ nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTr
 /// The effective transport for the current task.
 ///
 /// Returns the innermost `withTransport` override if one is in scope;
-/// otherwise falls back to `sharedGitHubTransport` — the live authenticated
+/// otherwise falls back to `_sharedTransportStorage` — the live authenticated
 /// instance wired by `GitHubClient.init` — evaluated at call time.
 ///
 /// All shims and domain helpers in this module read `currentTransport`
@@ -41,7 +52,7 @@ nonisolated(unsafe) public internal(set) var sharedGitHubTransport: any GitHubTr
 ///   `let` is not valid for a computed getter. This property has no setter and
 ///   is immutable from any call site — the compiler enforces this.
 public var currentTransport: any GitHubTransportProtocol {
-    _taskLocalTransport ?? sharedGitHubTransport
+    _taskLocalTransport ?? _sharedTransportStorage
 }
 
 /// Scopes a transport override to the current task and all child tasks.
