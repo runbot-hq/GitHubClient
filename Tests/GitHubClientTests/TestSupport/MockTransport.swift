@@ -38,9 +38,15 @@ final class MockTransport: GitHubTransportProtocol, @unchecked Sendable {
 
     // MARK: - GitHubTransportProtocol
 
-    /// Returns a plain `JSONDecoder()` — sufficient for mock use since
-    /// `MockTransport` returns pre-encoded `Data` fixtures that do not
-    /// depend on any custom decoding strategy.
+    /// Intentionally returns a **fresh** `JSONDecoder()` on each access, which
+    /// deviates from the same-instance convention documented on
+    /// `GitHubTransportProtocol.decoder`. This is safe for mock use because
+    /// `MockTransport` returns pre-encoded `Data` fixtures that are produced
+    /// without any custom key or date strategy — so every call decodes correctly
+    /// with a plain default decoder. If a future test requires a custom strategy
+    /// (e.g. a `keyDecodingStrategy`), it must either subclass `MockTransport`
+    /// and override `decoder`, or switch to a real `GitHubTransport` configured
+    /// with the desired strategy.
     var decoder: JSONDecoder { JSONDecoder() }
     var logger: (any GitHubLogger)? { nil }
 

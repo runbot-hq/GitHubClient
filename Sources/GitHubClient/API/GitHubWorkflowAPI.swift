@@ -113,7 +113,12 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
         startedAt = try container.decodeIfPresent(String.self, forKey: .startedAt)
         completedAt = try container.decodeIfPresent(String.self, forKey: .completedAt)
         createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
-        // Queued jobs have no steps array in the API response — fall back to []
+        // `try?` here is intentional, not a silent-failure smell.
+        // The GitHub API omits the `steps` key entirely for queued jobs — it is
+        // not an empty array but an absent key. `decodeIfPresent` returns `nil`
+        // for an absent key, and `try?` converts a malformed-but-present array
+        // to `nil` as well. Both cases correctly fall back to `[]`.
+        // This is a known API shape difference, not a decode bug.
         steps = (try? container.decodeIfPresent([GitHubStep].self, forKey: .steps)) ?? []
     }
 
@@ -276,15 +281,24 @@ public enum GitHubRunsFetchResult: Sendable {
 /// The GitHub REST API wraps runs in a `workflow_runs` key, but `apiPaginated` strips the
 /// envelope and returns only the array items, so no wrapper is needed here.
 ///
-/// - Note: **Rate-limit budget change (PR #37) — on the public signature, visible in
-///   Quick Help at every call site.** Before PR #37, `fetchActiveRuns` was counted as
-///   **1** logical operation (record() was called once after the for-loop). After PR #37,
-///   record() fires inside `interpretHTTPResponse` on every 2xx response, so a **fully
-///   successful** invocation registers **2** hits against the hourly budget — one for
-///   the `in_progress` query and one for the `queued` query. Early exits record only
-///   the pages that completed before the exit: **0** hits on `.noToken` (first query
-///   fails) or **1** hit on `.rateLimited` (first query succeeds, second fails).
-///   Callers that track or display the counter value should account for this.
+/// - Note: **Nil-transport heuristic —** `transport.apiPaginated` collapses all
+///   failure modes (no token, rate limit, 401/403, network error) to `nil` because
+///   the current transport API does not expose a typed result. The heuristic is:
+///   nil on the **first** page (when `allRuns` is still empty) is surfaced as
+///   `.noToken` to prompt sign-in; nil on a **subsequent** page is surfaced as
+///   `.rateLimited` so callers keep the partial results. This means a rate-limit
+///   hit on the first page is misclassified as `.noToken`, and a 401 mid-loop
+///   is misclassified as `.rateLimited`. Both are known limitations tracked
+///   in #1950 (typed `ExecuteResult` on the transport protocol).
+///
+/// - Note: **Rate-limit budget change (PR #37).** Before PR #37, `fetchActiveRuns`
+///   was counted as **1** logical operation (record() was called once after the
+///   for-loop). After PR #37, record() fires inside `interpretHTTPResponse` on
+///   every 2xx response, so a **fully successful** invocation registers **2** hits
+///   against the hourly budget — one for the `in_progress` query and one for the
+///   `queued` query. Early exits record only the pages that completed: **0** hits
+///   on `.noToken`, **1** hit on `.rateLimited`. Callers that track or display the
+///   counter value should account for this.
 ///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
@@ -301,20 +315,7 @@ public func fetchActiveRuns(
     for status in statuses {
         let endpoint = "\(scope.apiPrefix)/actions/runs?status=\(status)&per_page=\(GitHubConstants.activeRunsPageSize)"
         guard let data = await transport.apiPaginated(endpoint) else {
-            // `transport.apiPaginated` returns `nil` for all failure modes: no token,
-            // rate limit, 401/403, and network errors. We cannot distinguish them
-            // here because the transport collapses all failures to `nil`.
-            //
-            // Heuristic: nil on the first page (allRuns still empty) is almost
-            // always a token/auth issue, so we surface `.noToken` to prompt
-            // sign-in. Nil after at least one page is surfaced as `.rateLimited`
-            // so callers can use the partial results rather than discarding them.
-            //
-            // Known gap: a rate-limit or network drop on the very first page is
-            // misclassified as `.noToken`; a 401 mid-loop surfaces as
-            // `.rateLimited(partialResults)`. Both were true before the extraction
-            // and require the transport to expose a typed ExecuteResult to fix
-            // properly. Tracked in #1950.
+            // See the nil-transport heuristic note in the function doc comment above.
             if allRuns.isEmpty { return .noToken } else { return .rateLimited(allRuns) }
         }
         // apiPaginated returns a flat JSON array — decode directly as [GitHubWorkflowRun].
