@@ -73,6 +73,19 @@ struct GitHubTokenCacheTests {
     }
   }
 
+  /// An empty-string token returned by the store must be treated as absent and
+  /// return nil. A blank Bearer token would be sent on every API request, causing
+  /// immediate 401s — empty strings are not valid credentials.
+  ///
+  /// Regression guard for the missing isEmpty check in resolveFromStore().
+  /// resolveFromEnvironment() already had this guard; the store path was
+  /// asymmetrically unprotected before this test was added.
+  @Test func token_storeEmptyString_returnsNil() {
+    withCleanEnv {
+      #expect(makeCache(storeToken: "").token() == nil)
+    }
+  }
+
   // MARK: - token() — GH_TOKEN
 
   /// Resolves a token from GH_TOKEN when the store is empty.
@@ -236,9 +249,14 @@ struct GitHubTokenCacheTests {
 ///   This is safe today because `GitHubTokenCacheTests` is the **only suite in
 ///   this test target** that reads `GH_TOKEN` or `GITHUB_TOKEN` — no cross-suite
 ///   observation is possible. It becomes a latent flakiness trap if any future
-///   suite does. If env-var-touching suites multiply, consider elevating the
-///   `.serialized` constraint to the full test target level, or moving all
-///   env-var mutation behind a process-scoped actor.
+///   suite does.
+///
+///   The structurally correct fix is to make this function and its `body` parameter
+///   non-async: `token()` is synchronous, so the env mutation, body call, and
+///   restore can all run without any suspension point. `.serialized` at target
+///   level is NOT the right fix — it prevents inter-test interleaving but does
+///   not close the within-test thread-resume window between `await body()` and
+///   the restore lines. See issue #47 for the full remediation plan.
 private func withCleanEnvAsync(_ body: () async -> Void) async {
   let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
   let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
