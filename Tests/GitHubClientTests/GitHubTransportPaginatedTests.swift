@@ -797,17 +797,13 @@ final class GitHubTransportPaginatedTests {
 
   // MARK: - Malformed Link header terminates pagination gracefully
 
-  /// A completely invalid `Link` header value must cause `extractNextURL` to
-  /// return nil gracefully, terminating pagination after the first page without
-  /// crashing or looping.
+  /// A `Link` header with no angle-bracket wrapping around the URL portion
+  /// must cause `extractNextURL` to return nil, terminating pagination after
+  /// the first page without crashing or looping.
   ///
-  /// The value `"not-a-url; rel=next"` has no `<...>` angle-bracket wrapping
-  /// around the URL portion — it cannot be parsed as a valid RFC 5988 link.
-  /// `extractNextURL` must return nil, the pagination loop must exit after
-  /// page 1, and items already collected must be returned.
-  ///
-  /// This is a contract test for `extractNextURL`: callers must never see
-  /// an infinite loop or a crash from a server returning garbage in Link.
+  /// The value `"not-a-url; rel=next"` is one specific invalid shape — no
+  /// `<...>` brackets. Other malformed shapes (e.g. angle brackets present
+  /// but non-URL content inside) are not covered by this test.
   ///
   /// Three assertions:
   /// - `result != nil` — page-1 items are preserved, not discarded
