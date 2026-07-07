@@ -164,7 +164,9 @@ struct RateLimitActorTests {
       // Must be at least the 5 s floor (minus scheduling tolerance).
       #expect(diff >= 5.0 - Self.clampTolerance)
       // Must not be unreasonably far in the future (e.g. ceiling was applied instead).
-      #expect(diff < 10.0)
+      // Uses clampTolerance on the upper bound for consistency with all other timing
+      // assertions in this file and to account for CI scheduling jitter.
+      #expect(diff < 10.0 + Self.clampTolerance)
     } else {
       Issue.record("resetDate must not be nil for a past timestamp")
     }
