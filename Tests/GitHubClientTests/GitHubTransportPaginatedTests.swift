@@ -750,4 +750,97 @@ final class GitHubTransportPaginatedTests {
     let wasClearCalled = await spy.clearCalled
     #expect(wasClearCalled == false)
   }
+
+  // MARK: - 5xx server error on first page returns nil
+
+  /// A 500 Internal Server Error on the very first page — before any items are
+  /// accumulated — must return nil and must NOT arm the rate-limit actor.
+  ///
+  /// Verifies: 5xx responses are treated as non-rate-limit HTTP errors. The
+  /// pagination loop exits with `hadAtLeastOneSuccessfulPage == false`, so nil
+  /// is returned. This covers the common GitHub outage scenario where the API
+  /// returns 500 before any data is served.
+  ///
+  /// Three assertions:
+  /// - `result == nil` — no items were accumulated before the error
+  /// - `spy.setCalled == false` — 5xx is not a rate-limit event
+  /// - `spy.clearCalled == false` — no 2xx page succeeded to trigger a clear
+  @Test func paginatedReturnsNilOnServerError500FirstPage() async {
+    StubURLProtocol.reset()
+    let pageURL = "\(apiBase)orgs/test/actions/runners"
+
+    // 500 on the very first page — GitHub outage scenario.
+    StubURLProtocol.register(
+      .init(
+        data: "{\"message\":\"Internal Server Error\"}".data(using: .utf8)!,
+        statusCode: 500,
+        headers: [:]
+      ), for: pageURL)
+
+    let spy = SpyRateLimitActor()
+    let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { "test-token" })
+    let result = await transport.apiPaginated("/orgs/test/actions/runners")
+
+    #expect(result == nil)
+    let wasSetCalled = await spy.setCalled
+    #expect(wasSetCalled == false)
+    let wasClearCalled = await spy.clearCalled
+    #expect(wasClearCalled == false)
+  }
+
+  // MARK: - 503 server error mid-pagination returns partial results
+
+  /// A 503 Service Unavailable mid-pagination must stop pagination and return
+  /// items collected from earlier pages — not nil.
+  ///
+  /// Verifies: a 5xx mid-pagination follows the same `case .httpError: break pagination`
+  /// path as a 404 — it is a non-auth, non-rate-limit error that preserves partial
+  /// results. This is distinct from the first-page 500 test above, where nil is
+  /// returned because no items were ever accumulated.
+  ///
+  /// Real-world scenario: GitHub returns 503 on page 2 of a large runner list
+  /// during a partial outage. The caller should receive the runners already
+  /// fetched rather than losing all data.
+  ///
+  /// Four assertions:
+  /// - `result != nil` — partial items from page 1 are preserved
+  /// - `items.count == 1` — only the page-1 item is present
+  /// - `spy.setCalled == false` — 503 is not a rate-limit event
+  /// - `spy.clearCalled == true` — clear() fires after the page-1 2xx response
+  @Test func paginatedReturnsPartialResultsOnServerError503MidPagination() async {
+    StubURLProtocol.reset()
+    let page1URL = "\(apiBase)orgs/test/actions/runners"
+    let page2URL = "\(apiBase)orgs/test/actions/runners?page=2"
+    let page1Data = jsonPage([["id": "1", "name": "runner-a"]])
+
+    StubURLProtocol.register(
+      .init(
+        data: page1Data,
+        statusCode: 200,
+        headers: ["Link": "<\(page2URL)>; rel=\"next\""]
+      ), for: page1URL)
+    // 503 on page 2 — GitHub partial outage mid-pagination.
+    StubURLProtocol.register(
+      .init(
+        data: "{\"message\":\"Service Unavailable\"}".data(using: .utf8)!,
+        statusCode: 503,
+        headers: [:]
+      ), for: page2URL)
+
+    let spy = SpyRateLimitActor()
+    let transport = GitHubTransport(rateLimiter: spy, tokenProvider: { "test-token" })
+    let result = await transport.apiPaginated("/orgs/test/actions/runners")
+
+    // Partial results from page 1 must be returned — not nil.
+    #expect(result != nil)
+    let items = decodeItems(result)
+    #expect(items?.count == 1)
+    #expect(items?[0]["id"] == .string("1"))
+    // 503 is not a rate-limit event — set() must not fire.
+    let wasSetCalled = await spy.setCalled
+    #expect(wasSetCalled == false)
+    // clear() IS called after page 1 success (2xx response clears the limiter).
+    let wasClearCalled = await spy.clearCalled
+    #expect(wasClearCalled == true)
+  }
 }
