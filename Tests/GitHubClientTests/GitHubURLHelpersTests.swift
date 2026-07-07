@@ -50,6 +50,27 @@ struct ScopeFromUrlTests {
     #expect(scopeFromUrl(url) == "acme/my-repo")
   }
 
+  // MARK: Percent-encoded path components
+
+  /// Foundation decodes percent-encoding in `pathComponents`, so a URL with
+  /// `%20` in the owner segment must return the decoded form "acme corp/my-repo"
+  /// rather than the raw escaped string. This ensures callers that match scope
+  /// strings against API responses (which are never percent-encoded) work correctly.
+  @Test func percentEncodedOwner_returnsDecodedScope() {
+    let url = URL(string: "https://github.com/acme%20corp/my-repo")!
+    #expect(scopeFromUrl(url) == "acme corp/my-repo")
+  }
+
+  // MARK: Query string is ignored
+
+  /// `URL.pathComponents` never includes query parameters.
+  /// A URL like `https://github.com/acme/repo?foo=bar` must return "acme/repo"
+  /// — the query string must not appear in the scope string or cause an error.
+  @Test func queryString_isIgnored() {
+    let url = URL(string: "https://github.com/acme/repo?foo=bar")!
+    #expect(scopeFromUrl(url) == "acme/repo")
+  }
+
   // MARK: Nil path
 
   /// A bare host with no path components returns nil.
@@ -131,6 +152,23 @@ struct ScopeFromHtmlUrlTests {
     #expect(scopeFromHtmlUrl("https://github.com/acme") == "acme")
   }
 
+  // MARK: Percent-encoded path components
+
+  /// Foundation decodes percent-encoding in `pathComponents`; the returned scope
+  /// must be the decoded form. Mirrors scopeFromUrl's percent-encoding test
+  /// through the String? wrapper.
+  @Test func percentEncodedOwner_returnsDecodedScope() {
+    #expect(scopeFromHtmlUrl("https://github.com/acme%20corp/my-repo") == "acme corp/my-repo")
+  }
+
+  // MARK: Query string is ignored
+
+  /// Query parameters must not appear in the returned scope string.
+  /// Mirrors scopeFromUrl's queryString_isIgnored test through the String? wrapper.
+  @Test func queryString_isIgnored() {
+    #expect(scopeFromHtmlUrl("https://github.com/acme/repo?foo=bar") == "acme/repo")
+  }
+
   // MARK: Nil / no-scope input
 
   /// nil input returns nil.
@@ -166,5 +204,18 @@ struct ScopeFromHtmlUrlTests {
     let urlString = "https://github.com/acme"
     let url = URL(string: urlString)!
     #expect(scopeFromHtmlUrl(urlString) == scopeFromUrl(url))
+  }
+
+  /// nil input is a boundary that scopeFromUrl cannot receive (URL is non-optional);
+  /// scopeFromHtmlUrl must return nil for it. Anchors the nil boundary alongside
+  /// the other consistency checks.
+  @Test func consistencyWithScopeFromUrl_nilInput() {
+    #expect(scopeFromHtmlUrl(nil) == nil)
+  }
+
+  /// Empty string produces nil from URL(string:) on all platforms, so
+  /// scopeFromHtmlUrl must return nil — consistent with the nil-input boundary.
+  @Test func consistencyWithScopeFromUrl_emptyString() {
+    #expect(scopeFromHtmlUrl("") == nil)
   }
 }
