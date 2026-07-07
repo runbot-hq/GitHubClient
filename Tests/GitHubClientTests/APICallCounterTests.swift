@@ -255,6 +255,15 @@ struct APICallCounterTests {
   // fetchUserRepos — apiPaginated — stub: []
   // post verb      — transport.post — stub: 201 empty body
   //
+  // fetchUserOrgs / fetchUserRepos stub URL construction
+  // ----------------------------------------------------
+  // Stub URLs mirror the exact endpoint string the production functions pass
+  // to apiPaginated — i.e. the same GitHubConstants interpolation used in
+  // GitHubHelpers.swift. Do NOT use trimmingCharacters(in:) + base string
+  // concatenation: that indirection works today only because the trim rescues
+  // a double-slash, but would silently break if apiBase or the path constants
+  // ever change shape.
+  //
   // How nil is forced for early-exit tests
   // ---------------------------------------
   // StubURLProtocol.canInit returns false for URLs that have no registered
@@ -284,6 +293,16 @@ struct APICallCounterTests {
   //   html_url, created_at, updated_at.
   // No other fields (repository, run_number, workflow_id, event) are needed
   // or present on GitHubWorkflowRun.
+  //
+  // .rateLimited vs .permissionDenied for 403 responses
+  // -----------------------------------------------------
+  // handleRateLimitResponse returns true (→ .rateLimited) only when the 403
+  // carries rate-limit signals: X-RateLimit-Remaining: 0 or a Retry-After
+  // header. A plain 403 with neither header returns false (→ .permissionDenied).
+  // counterNotIncrementedOnPermissionDenied403 exercises the .permissionDenied
+  // path specifically (plain 403, no rate-limit headers). The suite does not
+  // currently exercise the .rateLimited 403 path (X-RateLimit-Remaining: 0),
+  // which is out of scope for this PR.
   //
   // .serialized prevents tests within this suite from racing on the
   // shared stub registry.
@@ -443,23 +462,30 @@ struct APICallCounterTests {
 
     // MARK: fetchUserOrgs
 
+    // Stub URL mirrors the exact endpoint string fetchUserOrgs passes to apiPaginated
+    // (GitHubHelpers.swift). Do not use path-trimming + base concatenation —
+    // see "fetchUserOrgs / fetchUserRepos stub URL construction" above.
     @Test("fetchUserOrgs() increments counter once per successful HTTP response")
     func fetchUserOrgsIncrementsCounter() async {
       let counter = MockAPICallCounter()
-      let path = GitHubConstants.userOrgsPath.trimmingCharacters(in: .init(charactersIn: "/"))
-      stub200array("\(base)\(path)?per_page=\(GitHubConstants.maxPageSize)")
+      stub200array(
+        "\(GitHubConstants.apiBase)\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)"
+      )
       _ = await fetchUserOrgs(transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
     }
 
     // MARK: fetchUserRepos
 
+    // Stub URL mirrors the exact endpoint string fetchUserRepos passes to apiPaginated
+    // (GitHubHelpers.swift). Do not use path-trimming + base concatenation —
+    // see "fetchUserOrgs / fetchUserRepos stub URL construction" above.
     @Test("fetchUserRepos() increments counter once per successful HTTP response")
     func fetchUserReposIncrementsCounter() async {
       let counter = MockAPICallCounter()
-      let path = GitHubConstants.userReposPath.trimmingCharacters(in: .init(charactersIn: "/"))
       stub200array(
-        "\(base)\(path)?sort=updated&per_page=\(GitHubConstants.maxPageSize)")
+        "\(GitHubConstants.apiBase)\(GitHubConstants.userReposPath)?sort=updated&per_page=\(GitHubConstants.maxPageSize)"
+      )
       _ = await fetchUserRepos(transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
     }
@@ -499,10 +525,18 @@ struct APICallCounterTests {
       #expect(await counter.recordedCount == 0)
     }
 
-    @Test("counter is not incremented on 403 response (GitHub primary rate-limit signal)")
-    func counterNotIncrementedOn403() async {
+    // A plain 403 with no rate-limit headers (no X-RateLimit-Remaining: 0,
+    // no Retry-After) maps to .permissionDenied in interpretHTTPResponse —
+    // not .rateLimited. handleRateLimitResponse returns false, the 403/429
+    // branch returns .permissionDenied, and callCounter.record() is never
+    // reached. This is the correct behaviour: a permission error did not
+    // consume a successful API quota slot.
+    @Test("counter is not incremented on 403 permission-denied response (no rate-limit headers)")
+    func counterNotIncrementedOnPermissionDenied403() async {
       let counter = MockAPICallCounter()
       let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
+      // stubError returns {"message":"error"} with no rate-limit headers —
+      // handleRateLimitResponse returns false → .permissionDenied path.
       stubError(url, statusCode: 403)
       _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 0)

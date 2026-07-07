@@ -159,6 +159,14 @@ public struct GitHubTransport: GitHubTransportProtocol {
   ///
   /// Records one call-counter hit on every 2xx response — the single point all successful
   /// HTTP round-trips flow through regardless of verb or pagination depth.
+  ///
+  /// Counter exclusions:
+  /// - 403/429 responses: handled before the 2xx guard and return `.rateLimited` or
+  ///   `.permissionDenied` without calling `callCounter.record()`. Both are excluded
+  ///   deliberately — a request that was denied or rate-limited did not consume a
+  ///   successful API quota slot. `.permissionDenied` specifically covers plain 403s
+  ///   with no rate-limit headers (wrong token scope, revoked PAT, repo access denial);
+  ///   the request reached GitHub but was rejected, so counting it would overstate usage.
   private func interpretHTTPResponse(
     _ response: URLResponse,
     data: Data,
