@@ -4,7 +4,7 @@
 // Unit tests for APICallCounter and APICallCounterSnapshot.
 //
 // The key invariants tested:
-//   1. Fresh actor starts at zero.
+//   1. Fresh actor starts at zero, fraction 0.0, and limit == hourlyLimit.
 //   2. record() increments count within the rolling window.
 //   3. fraction is always clamped to [0, 1].
 //   4. snapshot() is atomic — consistent count + limit in one hop (P10).
@@ -26,19 +26,16 @@ struct APICallCounterTests {
 
   // MARK: - Defaults
 
-  @Test("fresh actor starts at count zero")
-  func freshActorStartsAtZero() async {
+  /// Merged from freshActorStartsAtZero, freshActorFractionIsZero, and
+  /// snapshotLimitMatchesConstant — all shared identical setup and tested
+  /// different fields of the same snapshot value.
+  @Test("fresh actor has expected defaults: count 0, fraction 0.0, limit == hourlyLimit")
+  func freshActorHasExpectedDefaults() async {
     let counter = APICallCounter()
     let snap = await counter.snapshot()
     #expect(snap.count == 0)
-    #expect(snap.limit == APICallCounter.hourlyLimit)
-  }
-
-  @Test("fresh actor fraction is zero")
-  func freshActorFractionIsZero() async {
-    let counter = APICallCounter()
-    let snap = await counter.snapshot()
     #expect(snap.fraction == 0.0)
+    #expect(snap.limit == APICallCounter.hourlyLimit)
   }
 
   // MARK: - record()
@@ -156,8 +153,12 @@ struct APICallCounterTests {
 
   // MARK: - snapshot atomicity (P10)
 
-  @Test("snapshot returns consistent count + limit in a single hop")
-  func snapshotIsConsistent() async {
+  /// Two consecutive snapshot() calls on an idle actor return the same value.
+  /// This is not a concurrency stress test — concurrent atomicity is covered
+  /// by snapshotAtomicUnderConcurrentMutations. Renamed from snapshotIsConsistent
+  /// to reflect what is actually verified.
+  @Test("snapshot() is deterministic on an idle actor")
+  func snapshotIsDeterministicOnIdle() async {
     let counter = APICallCounter()
     await counter.record()
     let s1 = await counter.snapshot()
@@ -182,13 +183,6 @@ struct APICallCounterTests {
         }
       }
     }
-  }
-
-  @Test("snapshot limit always equals hourlyLimit constant")
-  func snapshotLimitMatchesConstant() async {
-    let counter = APICallCounter()
-    let snap = await counter.snapshot()
-    #expect(snap.limit == APICallCounter.hourlyLimit)
   }
 
   // MARK: - Idle-gap regression
