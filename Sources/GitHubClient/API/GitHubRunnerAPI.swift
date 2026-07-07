@@ -68,6 +68,11 @@ public func fetchRunners(
     scopeString: String,
     transport: any GitHubTransportProtocol = currentTransport
 ) async -> [GitHubRunner]? {
+    // `nil` return on parse failure is intentional — an unparseable scopeString is a
+    // caller programming error, not a runtime or network failure. No log is emitted
+    // here by design: the `nil` return is the signal that forces the caller to handle
+    // the bad input. Compare with the decode/network failures in fetchRunners(scope:)
+    // above, which are runtime conditions and do warrant a log.
     guard let scope = Scope.parse(scopeString) else { return nil }
     return await fetchRunners(scope: scope, transport: transport)
 }
