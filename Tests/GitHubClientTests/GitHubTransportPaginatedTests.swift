@@ -370,10 +370,17 @@ final class GitHubTransportPaginatedTests {
   /// Verifies:
   /// - Partial items from page 1 are returned (not nil)
   /// - `setCalled` is true — the injected spy (not the global) was armed
-  /// - `clearCalled` is true — clear() fired after the page-1 2xx response
-  /// - **Ordering**: clear() is recorded before set() in `callOrder`, confirming
-  ///   the page-1 success clears the limiter before the page-2 429 re-arms it.
+  /// - `clearCalled` is true — clearIfNotLimited() fired after the page-1 2xx response
+  /// - **Ordering**: clearIfNotLimited() is recorded before set() in `callOrder`,
+  ///   confirming the page-1 success clears the limiter before the page-2 429 re-arms it.
   ///   This would catch a regression where the arm-before-clear order is reversed.
+  ///
+  ///   `callOrder` after a normal two-page run looks like:
+  ///   `["clearIfNotLimited", "clear", "set"]`
+  ///   The ordering assertion keys on `"clearIfNotLimited"` (the protocol call
+  ///   the transport actually makes on a 2xx) rather than `"clear"` (an internal
+  ///   delegation detail). This makes the assertion resilient to a future refactor
+  ///   that inlines clearIfNotLimited() instead of delegating to clear().
   ///
   /// - Note: 429 is chosen over 403 because the GitHub API uses 429 exclusively
   ///   for genuine rate limits. The stub includes a `Retry-After: 60` header so
@@ -414,18 +421,26 @@ final class GitHubTransportPaginatedTests {
     #expect(wasSetCalled)
     let wasClearCalled = await spy.clearCalled
     #expect(wasClearCalled)
-    // clear() IS called after page 1 success (2xx response clears the limiter).
+    // Ordering assertion: clearIfNotLimited() must appear before set() in callOrder.
     //
-    // Ordering assertion: clear() must be recorded before set() in callOrder.
-    // clear() fires when page 1 returns 200; set() fires when page 2 returns 429.
-    // A regression that reverses the order (set before clear) would mean the
-    // rate-limit arm from page 2 was immediately undone by the page-1 clear.
+    // The transport calls clearIfNotLimited() after every 2xx response and set()
+    // after every rate-limit response. For a two-page run where page 1 is 200 and
+    // page 2 is 429, the expected callOrder is:
+    //   ["clearIfNotLimited", "clear", "set"]
+    //
+    // Keying on "clearIfNotLimited" (not "clear") tests the protocol boundary —
+    // the call the transport actually makes — rather than an internal delegation
+    // detail. If clearIfNotLimited() is ever inlined, "clear" may disappear from
+    // callOrder while "clearIfNotLimited" remains, keeping this assertion valid.
     let order = await spy.callOrder
-    let clearIndex = order.firstIndex(of: "clear")
-    let setIndex = order.firstIndex(of: "set")
-    #expect(
-      clearIndex != nil && setIndex != nil && clearIndex! < setIndex!,
-      "clear() must be recorded before set() — page-1 2xx clears, page-2 429 arms")
+    if let clearIfNotLimitedIndex = order.firstIndex(of: "clearIfNotLimited"),
+       let setIndex = order.firstIndex(of: "set") {
+      #expect(
+        clearIfNotLimitedIndex < setIndex,
+        "clearIfNotLimited() must be recorded before set() — page-1 2xx clears, page-2 429 arms")
+    } else {
+      Issue.record("callOrder missing expected entries — got: \(order)")
+    }
   }
 
   // MARK: - Transient network error returns partial results
