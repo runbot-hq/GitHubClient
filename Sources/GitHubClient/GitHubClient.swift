@@ -16,6 +16,16 @@
 //       logger: MyLogger()
 //   )
 //
+// Custom scopes (optional — defaults to OAuthService.defaultScopes):
+//
+//   let github = GitHubClient(
+//       clientID: "your-client-id",
+//       clientSecret: "your-client-secret",
+//       service: "com.example.myapp",
+//       account: "github-oauth-token",
+//       scopes: [GitHubScopes.repo, GitHubScopes.readUser]
+//   )
+//
 // Tests inject mocks via the secondary init:
 //
 //   let github = GitHubClient(
@@ -82,6 +92,9 @@ public final class GitHubClient {
     ///   - clientSecret: The GitHub OAuth app client secret.
     ///   - service: The keychain service name (e.g. your app's bundle identifier).
     ///   - account: The keychain account name (e.g. `"github-oauth-token"`).
+    ///   - scopes: The OAuth scopes to request during sign-in. Defaults to
+    ///     `OAuthService.defaultScopes`. Must not be empty. Use `GitHubScopes`
+    ///     constants for type safety and discoverability.
     ///   - logger: Optional logger for diagnostic messages.
     @MainActor
     public init(
@@ -89,6 +102,7 @@ public final class GitHubClient {
         clientSecret: String,
         service: String,
         account: String,
+        scopes: [String] = OAuthService.defaultScopes,
         logger: (any GitHubLogger)? = nil
     ) {
         let store = KeychainTokenStore(service: service, account: account, logger: logger)
@@ -97,6 +111,7 @@ public final class GitHubClient {
             clientID: clientID,
             clientSecret: clientSecret,
             tokenStore: store,
+            scopes: scopes,
             logger: logger,
             session: .shared,
             onTokenSaved: { cache.invalidate() },
@@ -136,6 +151,10 @@ public final class GitHubClient {
     /// - Note: Does **not** touch `sharedGitHubTransport`. Test call sites
     ///   always pass `transport:` explicitly at the API function call site
     ///   and must never rely on the global.
+    ///
+    /// - Note: Does **not** accept a `scopes:` parameter — it takes
+    ///   `any OAuthServiceProtocol` directly, which already encapsulates
+    ///   scope configuration. No changes needed here.
     ///
     /// - Parameters:
     ///   - oauthService: A mock or stub conforming to `OAuthServiceProtocol`.
