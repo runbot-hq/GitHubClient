@@ -352,12 +352,13 @@ private struct OAuthTokenResponse: Decodable {
     // swiftlint:disable:next missing_docs
     let errorDescription: String?
 
-    // swiftlint:disable:next missing_docs
+            // swiftlint:disable missing_docs
     private enum CodingKeys: String, CodingKey {
         case accessToken = "access_token" // skipcq: SCT-A000
         case error
         case errorDescription = "error_description"
     }
+    // swiftlint:enable missing_docs
 
     // swiftlint:disable:next missing_docs
     var debugKeys: [String] {
@@ -381,10 +382,11 @@ private struct OAuthTokenRequest: Encodable {
     // swiftlint:disable:next missing_docs
     let code: String
 
-    // swiftlint:disable:next missing_docs
+            // swiftlint:disable missing_docs
     private enum CodingKeys: String, CodingKey {
         case clientID = "client_id" // skipcq: SCT-A000
         case clientSecret = "client_secret" // skipcq: SCT-A000
         case code
     }
+    // swiftlint:enable missing_docs
 }
