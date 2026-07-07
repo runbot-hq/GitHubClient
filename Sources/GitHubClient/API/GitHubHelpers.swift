@@ -13,7 +13,6 @@ public func fetchUserOrgs(
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
-    // swiftlint:disable:next missing_docs
     struct Org: Decodable { let login: String }
     guard let orgs = try? JSONDecoder().decode([Org].self, from: data) else { return [] }
     return orgs.map(\.login)
