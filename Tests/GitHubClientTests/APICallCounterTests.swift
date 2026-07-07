@@ -304,7 +304,7 @@ struct APICallCounterTests {
       #expect(await counter.recordedCount == 1)
     }
 
-    // MARK: fetchActiveRuns
+    // MARK: fetchActiveRuns — happy path
 
     @Test("fetchActiveRuns() increments counter once per status query (2 total)")
     func fetchActiveRunsIncrementsTwice() async {
@@ -315,6 +315,51 @@ struct APICallCounterTests {
       stub200array("\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)")
       _ = await fetchActiveRuns(scope: .org(org), transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 2)
+    }
+
+    // MARK: fetchActiveRuns — nil-exit counter invariants
+    //
+    // These two tests restore coverage that existed in the old MockTransport
+    // suite (fetchActiveRunsSkipsCounterOnPartialNilResult and
+    // fetchActiveRunsReturnsNoTokenWhenFirstStatusReturnsEmptyThenNil).
+    //
+    // The invariant: fetchActiveRuns must not over-count when apiPaginated
+    // returns nil mid-loop or on the first call. record() only fires inside
+    // interpretHTTPResponse on a real 2xx, so an unstubbed URL causes
+    // StubURLProtocol to return a connection error, apiPaginated returns nil,
+    // and the guard-let in fetchActiveRuns triggers the early exit without
+    // ever reaching a record() call for that iteration.
+
+    @Test("fetchActiveRuns() counter == 1 when second status query returns nil (.rateLimited exit)")
+    func fetchActiveRunsCounterStopsAtOneOnRateLimitedEarlyExit() async {
+      let counter = MockAPICallCounter()
+      let ps = GitHubConstants.activeRunsPageSize
+      // Stub only in_progress — queued is left unstubbed so apiPaginated
+      // returns nil, triggering the .rateLimited(partialResults) early exit.
+      stub200array("\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)")
+      let result = await fetchActiveRuns(
+        scope: .org(org), transport: makeTransport(counter: counter))
+      if case .rateLimited = result { /* expected */ } else {
+        Issue.record("expected .rateLimited, got \(result)")
+      }
+      #expect(
+        await counter.recordedCount == 1,
+        "only the successful in_progress hit should be counted; the nil queued exit must not add a second hit")
+    }
+
+    @Test("fetchActiveRuns() counter == 0 when first status query returns nil (.noToken exit)")
+    func fetchActiveRunsCounterIsZeroOnNoTokenEarlyExit() async {
+      let counter = MockAPICallCounter()
+      // Both status URLs are unstubbed — first apiPaginated returns nil
+      // immediately, fetchActiveRuns returns .noToken without any record() call.
+      let result = await fetchActiveRuns(
+        scope: .org(org), transport: makeTransport(counter: counter))
+      if case .noToken = result { /* expected */ } else {
+        Issue.record("expected .noToken, got \(result)")
+      }
+      #expect(
+        await counter.recordedCount == 0,
+        "a nil first-page result must not increment the counter")
     }
 
     // MARK: fetchJobs
