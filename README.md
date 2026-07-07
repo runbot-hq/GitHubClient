@@ -17,6 +17,9 @@ A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls 
 ![Periphery](https://github.com/runbot-hq/GitHubClient/actions/workflows/periphery.yml/badge.svg)
 [![Greptile](https://img.shields.io/badge/🦎%20AI%20Review-Greptile-6C47FF?logoColor=white)](https://greptile.com)
 
+> **Note:** CI workflows are defined but not yet active — the Actions runners are not wired up yet.
+> PRs will show a `pending` merge status with no check runs attached; this is expected and not a build failure.
+
 ## Features
 
 - 🔐 **Dual authentication** — OAuth Authorization Code flow for interactive users; `GH_TOKEN` / `GITHUB_TOKEN` env var for CI and automation. Same call site, no branching

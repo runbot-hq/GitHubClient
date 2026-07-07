@@ -1,28 +1,20 @@
 // GitHubRequestBuilder.swift
 // GitHubClient
-
 import Foundation
 
-/// Module-level constant allocated once; avoids a fresh `CharacterSet` allocation
-/// on every `resolveURL` call and pagination iteration.
+/// Characters to strip when trimming leading and trailing slashes from endpoint strings.
 private let slashCharacterSet = CharacterSet(charactersIn: "/")
 
 // MARK: - URL helpers
 
 /// Resolves an endpoint string to a full GitHub API URL string.
-/// Absolute URLs (starting with "http") are returned unchanged;
-/// relative paths are prefixed with `GitHubConstants.apiBase`.
 public func resolveURL(_ endpoint: String) -> String {
-    endpoint.hasPrefix("http")
-        ? endpoint
-        : "\(GitHubConstants.apiBase)/\(endpoint.trimmingCharacters(in: slashCharacterSet))"
+    endpoint.hasPrefix("http") ? endpoint : "\(GitHubConstants.apiBase)/\(endpoint.trimmingCharacters(in: slashCharacterSet))"
 }
 
 // MARK: - Request factories
 
-/// Builds a `URLRequest` with the headers common to all GitHub API requests:
-/// `Authorization: Bearer`, `X-GitHub-Api-Version`.
-/// Only called by `makeRequest` and `makeRawRequest` in this file.
+/// Builds a `URLRequest` with the Authorization and API-version headers shared by all GitHub REST calls.
 private func makeBaseRequest(url: URL, token: String, timeout: TimeInterval) -> URLRequest {
     var req = URLRequest(url: url, timeoutInterval: timeout)
     req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -30,7 +22,7 @@ private func makeBaseRequest(url: URL, token: String, timeout: TimeInterval) -> 
     return req
 }
 
-/// Builds a pre-configured `URLRequest` with the standard `application/vnd.github+json` Accept header.
+/// Builds a `URLRequest` with the `application/vnd.github+json` Accept header.
 public func makeRequest(url: URL, token: String, timeout: TimeInterval) -> URLRequest {
     var req = makeBaseRequest(url: url, token: token, timeout: timeout)
     req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -38,13 +30,9 @@ public func makeRequest(url: URL, token: String, timeout: TimeInterval) -> URLRe
 }
 
 /// Builds a `URLRequest` with the `application/vnd.github.v3.raw` Accept header.
-/// Used for log endpoints that 302-redirect to raw S3 content.
-///
-/// # S3 redirect safety
-/// The `Authorization: Bearer` header is sent only to api.github.com.
-/// Apple's URLSession strips it before following a cross-origin redirect
-/// (RFC 7235 / Apple URLSession behaviour), so the Bearer token is never
-/// forwarded to S3. No custom redirect delegate is required.
+/// Used for log and raw-file endpoints that redirect to S3.
+/// `URLSession` follows the redirect automatically and the Accept header is preserved,
+/// so the S3 response body is the raw bytes rather than a JSON envelope.
 public func makeRawRequest(url: URL, token: String, timeout: TimeInterval) -> URLRequest {
     var req = makeBaseRequest(url: url, token: token, timeout: timeout)
     req.setValue("application/vnd.github.v3.raw", forHTTPHeaderField: "Accept")

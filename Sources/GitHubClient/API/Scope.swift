@@ -1,6 +1,5 @@
 // Scope.swift
 // GitHubClient
-
 import Foundation
 
 // MARK: - Scope

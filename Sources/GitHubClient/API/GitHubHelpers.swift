@@ -3,21 +3,9 @@
 import Foundation
 import os
 
-// MARK: - URL helpers
-
-// `scopeFromHtmlUrl(_:)` is defined in GitHubURLParsing.swift in this module.
-
 // MARK: - User orgs and repos
 
 /// Returns the login names of all GitHub organisations the authenticated user belongs to.
-///
-/// - Parameter transport: The network transport to use. Defaults to `currentTransport`
-///   (wired at launch by `GitHubClient.init`). Pass a mock in tests.
-///
-/// - Note: `= currentTransport` is evaluated at each call site, not at declaration time.
-///   Swift evaluates default parameter expressions when the function is called, so this
-///   always picks up the live `@TaskLocal` value — including any `withTransport` override
-///   in scope at the moment of the call.
 @concurrent
 public func fetchUserOrgs(
     transport: any GitHubTransportProtocol = currentTransport
@@ -25,22 +13,12 @@ public func fetchUserOrgs(
     guard let data = await transport.apiPaginated(
         "\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)"
     ) else { return [] }
-    struct Org: Decodable {
-        let login: String
-    }
+    struct Org: Decodable { let login: String }
     guard let orgs = try? JSONDecoder().decode([Org].self, from: data) else { return [] }
     return orgs.map(\.login)
 }
 
 /// Returns the `owner/repo` full names of all repositories visible to the authenticated user.
-///
-/// - Parameter transport: The network transport to use. Defaults to `currentTransport`
-///   (wired at launch by `GitHubClient.init`). Pass a mock in tests.
-///
-/// - Note: `= currentTransport` is evaluated at each call site, not at declaration time.
-///   Swift evaluates default parameter expressions when the function is called, so this
-///   always picks up the live `@TaskLocal` value — including any `withTransport` override
-///   in scope at the moment of the call.
 @concurrent
 public func fetchUserRepos(
     transport: any GitHubTransportProtocol = currentTransport
@@ -50,9 +28,7 @@ public func fetchUserRepos(
     ) else { return [] }
     struct Repo: Decodable {
         let fullName: String
-        enum CodingKeys: String, CodingKey {
-            case fullName = "full_name"
-        }
+        enum CodingKeys: String, CodingKey { case fullName = "full_name" }
     }
     guard let repos = try? JSONDecoder().decode([Repo].self, from: data) else { return [] }
     return repos.map(\.fullName)
@@ -60,24 +36,13 @@ public func fetchUserRepos(
 
 // MARK: - Step log
 
-/// Compiled regular expression for stripping ANSI escape sequences from log output.
-/// Safety: NSRegularExpression is immutable after initialisation — concurrent reads are safe.
+/// Pre-compiled regular expression for stripping ANSI escape sequences from CI log output.
+/// Compiled once at module load to avoid repeated allocation on every log fetch.
 private let ansiRegex: NSRegularExpression? = try? NSRegularExpression(
     pattern: "\u{001B}\\[[0-9;]*[A-Za-z]"
 )
 
 /// Fetches the log for a single step via the transport layer's `raw()` method.
-///
-/// - Parameters:
-///   - jobID: The numeric GitHub job ID.
-///   - stepNumber: The 1-based step index within the job.
-///   - scopeString: A scope string such as `"repos/acme/my-repo"`.
-///   - transport: The network transport to use. Defaults to `currentTransport`.
-///
-/// - Note: `= currentTransport` is evaluated at each call site, not at declaration time.
-///   Swift evaluates default parameter expressions when the function is called, so this
-///   always picks up the live `@TaskLocal` value — including any `withTransport` override
-///   in scope at the moment of the call.
 @concurrent
 public func fetchStepLog(
     jobID: Int,
@@ -97,11 +62,16 @@ public func fetchStepLog(
     }
     let endpoint = "\(scope.apiPrefix)/actions/jobs/\(jobID)/logs"
     transport.logger?.log("fetchStepLog › fetching \(endpoint) step=\(stepNumber)", category: "transport")
-    guard let raw = await fetchAndDecodeStepLog(endpoint: endpoint, jobID: jobID, transport: transport) else { return nil }
+    guard let raw = await fetchAndDecodeStepLog(endpoint: endpoint, jobID: jobID, transport: transport) else {
+        return nil
+    }
     return parseStepLog(raw, stepNumber: stepNumber, logger: transport.logger)
 }
 
-/// Fetches raw log data from `endpoint`, decodes it as UTF-8, and validates the response.
+/// Fetches raw log bytes from `endpoint` and decodes them as UTF-8.
+/// GitHub’s log endpoint redirects to S3; `URLSession` follows the redirect automatically
+/// and returns the raw log text. A response body starting with `{` indicates a GitHub
+/// error object was returned instead of log content and is treated as a failure.
 @concurrent
 private func fetchAndDecodeStepLog(
     endpoint: String,
@@ -129,7 +99,9 @@ private func fetchAndDecodeStepLog(
     return raw
 }
 
-/// Parses a raw log string into sections delimited by `##[group]` markers.
+/// Extracts the log section for `stepNumber` from a raw multi-group log string.
+/// If the log contains no `##[group]` markers the full cleaned log is returned.
+/// If `stepNumber` is out of range the full cleaned log is returned as a fallback.
 private func parseStepLog(
     _ raw: String,
     stepNumber: Int,
@@ -146,7 +118,7 @@ private func parseStepLog(
     guard index >= 0, index < sections.count else {
         logger?.log(
             "parseStepLog › stepNumber \(stepNumber) out of range "
-                + "(sections=\(sections.count)), returning full log",
+            + "(sections=\(sections.count)), returning full log",
             category: "transport")
         return cleaned
     }
@@ -156,6 +128,7 @@ private func parseStepLog(
 }
 
 /// Splits a cleaned log string into sections delimited by `##[group]` markers.
+/// Each section starts at the marker line and ends just before the next marker.
 private func buildLogSections(from cleaned: String) -> [String] {
     let lines = cleaned.components(separatedBy: "\n")
     var sections: [String] = []
@@ -174,7 +147,8 @@ private func buildLogSections(from cleaned: String) -> [String] {
     return sections
 }
 
-/// Strips ANSI escape sequences from a string using the pre-compiled `ansiRegex`.
+/// Removes ANSI escape sequences from `input` using the pre-compiled `ansiRegex`.
+/// Returns `input` unchanged if `ansiRegex` failed to compile at module load time.
 private func stripAnsi(_ input: String) -> String {
     guard let ansiRegex else { return input }
     let range = NSRange(input.startIndex..., in: input)
