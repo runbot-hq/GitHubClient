@@ -74,7 +74,6 @@ func extractNextURL(from header: String?) -> String? {
 }
 
 /// Strips RFC 8288 angle-bracket delimiters from a `Link` header URL segment.
-// swiftlint:disable:next missing_docs
 private func extractURL(from segment: String) -> String? {
     let trimmed = segment.trimmingCharacters(in: .whitespaces)
     guard trimmed.hasPrefix("<"), trimmed.hasSuffix(">") else { return nil }
