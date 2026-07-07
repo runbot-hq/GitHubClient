@@ -21,7 +21,7 @@ public struct GitHubTransport: GitHubTransportProtocol {
   // MARK: - Stored properties
 
   /// JSON decoder — stateless after `init`, safe for concurrent reads.
-  internal let decoder: JSONDecoder
+  public let decoder: JSONDecoder
 
   /// JSON encoder — stateless after `init`, safe for concurrent reads.
   internal let encoder: JSONEncoder
