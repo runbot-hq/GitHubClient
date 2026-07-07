@@ -8,10 +8,7 @@ import Foundation
 // MARK: - OAuthServiceScopesTests
 
 /// Tests for the configurable scopes API introduced in #44.
-///
 /// All tests use `MockTokenStore` to avoid Keychain access.
-/// The empty-array guard test expects a `precondition` failure;
-/// see inline comment for the chosen approach.
 @Suite("OAuthService — configurable scopes")
 @MainActor
 struct OAuthServiceScopesTests {
@@ -31,8 +28,8 @@ struct OAuthServiceScopesTests {
     /// Verifies that an `OAuthService` created without an explicit `scopes`
     /// argument encodes all five default scopes in the correct order.
     ///
-    /// This is a regression guard: if `OAuthService.defaultScopes` is ever
-    /// accidentally modified, this test will catch it before it ships.
+    /// Regression guard: if `OAuthService.defaultScopes` is ever accidentally
+    /// modified, this test will catch it before it ships.
     @Test("default scopes produce the correct scope query item")
     func defaultScopesAreEncodedCorrectly() throws {
         let store = MockTokenStore()
@@ -42,7 +39,6 @@ struct OAuthServiceScopesTests {
             tokenStore: store
             // scopes: omitted — should default to OAuthService.defaultScopes
         )
-
         let scope = try #require(scopeQueryItem(for: service))
         #expect(scope == "repo read:org admin:org manage_runners:org workflow")
     }
@@ -60,44 +56,21 @@ struct OAuthServiceScopesTests {
             tokenStore: store,
             scopes: [GitHubScopes.readUser, GitHubScopes.repo]
         )
-
         let scope = try #require(scopeQueryItem(for: service))
         #expect(scope == "read:user repo")
     }
 
-    // MARK: - Test 3: empty scopes precondition
+    // MARK: - Test 3: empty scopes precondition (NOT executable in-process)
 
-    /// Verifies that passing an empty `scopes` array to `OAuthService.init`
-    /// triggers a `precondition` failure.
+    /// The `precondition(!scopes.isEmpty)` in `OAuthService.init` cannot be
+    /// tested in-process with Swift Testing — calling it would send SIGTRAP to
+    /// the test runner, terminating the entire suite.
     ///
-    /// Swift Testing does not yet ship a built-in `#expectPreconditionFailure`
-    /// macro, so we use `withKnownIssue` with `isIntermittent: false` to
-    /// document that this test intentionally crashes the process in debug builds.
+    /// To validate this guard, use one of:
+    /// - A dedicated subprocess test (spawn a child process, assert non-zero exit).
+    /// - An XCTest target with `XCTAssertPreconditionFailure` (e.g. via PointFree’s
+    ///   `XCTestDynamicOverlay` or a custom signal handler).
     ///
-    /// In CI, run this test only under a sanitiser-enabled scheme or via a
-    /// dedicated subprocess test runner that treats process exit as a pass.
-    /// Alternatively, gate on `#if DEBUG` if the project disables `precondition`
-    /// in release builds via `-Ounchecked`.
-    @Test("empty scopes array raises a precondition failure")
-    func emptyScopesRaisesPrecondition() {
-        // `precondition` terminates the process — we cannot catch it in-process.
-        // This test is intentionally marked as a known issue so the suite does
-        // not fail on the fact that we cannot directly assert the crash.
-        // To validate this path, run the target under `XCTest` with
-        // `XCTAssertPreconditionFailure` (from `XCTestExtras` or equivalent),
-        // or use a subprocess approach.
-        withKnownIssue(
-            "precondition failure cannot be caught in-process with Swift Testing",
-            isIntermittent: false
-        ) {
-            let store = MockTokenStore()
-            // This line should trigger precondition(!scopes.isEmpty) in OAuthService.init.
-            _ = OAuthService(
-                clientID: "test-client-id",
-                clientSecret: "test-client-secret",
-                tokenStore: store,
-                scopes: [] // ← must not be empty
-            )
-        }
-    }
+    /// The guard itself is documented and visible at:
+    /// `Sources/GitHubClient/Auth/OAuthService.swift` — `OAuthService.init`.
 }
