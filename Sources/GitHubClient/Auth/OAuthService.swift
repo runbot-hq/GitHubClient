@@ -25,7 +25,6 @@ import Foundation
 /// Manages OAuth state and behaviour. No AppKit dependency.
 @MainActor
 public final class OAuthService: OAuthServiceProtocol {
-
     /// Shared `JSONDecoder` — reused across token-exchange decode calls.
     private let decoder = JSONDecoder()
     /// Shared `JSONEncoder` — reused across token-exchange encode calls.
@@ -113,9 +112,7 @@ public final class OAuthService: OAuthServiceProtocol {
     /// safe on the main thread at current call sites (settings appear on user
     /// interaction, not in animation/layout loops). If this is ever used in a
     /// tight render loop, cache the result at the call site instead.
-    public var isAuthenticated: Bool {
-        tokenStore.load() != nil
-    }
+    public var isAuthenticated: Bool { tokenStore.load() != nil }
 
     /// `true` when any usable GitHub token is available — OAuth token,
     /// `GH_TOKEN`, or `GITHUB_TOKEN` environment variable.
@@ -134,7 +131,7 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Registered sign-out continuations keyed by UUID — one per active consumer.
     private var signOutContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
 
-    /// Returns a new `AsyncStream<Void>` that fires once per `signOut()` call.
+    /// Returns a new `AsyncStream` that fires once per `signOut()` call.
     public func makeSignOutStream() -> AsyncStream<Void> {
         let id = UUID()
         let (stream, cont) = AsyncStream<Void>.makeStream()
@@ -152,7 +149,7 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Registered sign-in continuations keyed by UUID — one per active consumer.
     private var signInContinuations: [UUID: AsyncStream<Bool>.Continuation] = [:]
 
-    /// Returns a new `AsyncStream<Bool>` that fires once per sign-in attempt (`true` = success).
+    /// Returns a new `AsyncStream` that fires once per sign-in attempt (`true` = success).
     public func makeSignInStream() -> AsyncStream<Bool> {
         let id = UUID()
         let (stream, cont) = AsyncStream<Bool>.makeStream()
@@ -236,8 +233,7 @@ public final class OAuthService: OAuthServiceProtocol {
         let safeURL = "\(url.scheme ?? "")://\(url.host ?? "")"
         logger?.log("OAuthService › handleCallback — url=\(safeURL)", category: "transport")
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let code = comps.queryItems?.first(where: { $0.name == "code" })?.value
-        else {
+              let code = comps.queryItems?.first(where: { $0.name == "code" })?.value else {
             logger?.log("OAuthService › handleCallback — missing code param, calling fireSignIn(false)", category: "transport")
             fireSignIn(false)
             return
@@ -349,16 +345,21 @@ public final class OAuthService: OAuthServiceProtocol {
 /// Response body from the GitHub OAuth token exchange.
 /// GitHub returns HTTP 200 even on failure, so both `accessToken` and `error` are optional.
 private struct OAuthTokenResponse: Decodable {
+    // swiftlint:disable:next missing_docs
     let accessToken: String?
+    // swiftlint:disable:next missing_docs
     let error: String?
+    // swiftlint:disable:next missing_docs
     let errorDescription: String?
 
+    // swiftlint:disable:next missing_docs
     private enum CodingKeys: String, CodingKey {
         case accessToken = "access_token" // skipcq: SCT-A000
         case error
         case errorDescription = "error_description"
     }
 
+    // swiftlint:disable:next missing_docs
     var debugKeys: [String] {
         var keys: [String] = []
         if accessToken != nil { keys.append("access_token") } // skipcq: SCT-A000
@@ -373,10 +374,14 @@ private struct OAuthTokenResponse: Decodable {
 // periphery:ignore
 /// OAuth token-exchange request body for the GitHub API.
 private struct OAuthTokenRequest: Encodable {
+    // swiftlint:disable:next missing_docs
     let clientID: String
+    // swiftlint:disable:next missing_docs
     let clientSecret: String
+    // swiftlint:disable:next missing_docs
     let code: String
 
+    // swiftlint:disable:next missing_docs
     private enum CodingKeys: String, CodingKey {
         case clientID = "client_id" // skipcq: SCT-A000
         case clientSecret = "client_secret" // skipcq: SCT-A000
