@@ -4,6 +4,14 @@
 // Unit tests for `GitHubClient` — the facade that owns and wires
 // OAuthService, GitHubTransport, and TokenCache.
 //
+// Architecture note: `GitHubClient` is a pure DI facade with no logic
+// of its own beyond property storage and wiring. These tests verify:
+//   1. Injection wiring (properties point to the injected mocks)
+//   2. Behavioural forwarding (calls on client reach the mock and record correctly)
+//
+// Mock correctness tests (testing the mock itself) are intentionally
+// excluded — they belong in MockSanityTests if ever needed.
+//
 // These tests use the test-init injection path exclusively; no Keychain
 // or network access occurs.
 
@@ -80,9 +88,50 @@ struct GitHubClientTests {
         #expect(oauth.signOutCallCount == 1)
     }
 
-    // MARK: - transport forwarding
+    // MARK: - makeSignInURL forwarding (behavioural)
 
-    /// `cancelRun` is forwarded to the mock and recorded.
+    /// `makeSignInURL()` called via the client reaches the OAuth service and
+    /// increments its call count — verifying the call is truly forwarded.
+    @Test @MainActor
+    func client_makeSignInURL_isForwardedToOAuthService() {
+        let (client, oauth, _) = makeSUT()
+        _ = client.oauthService.makeSignInURL()
+        #expect(oauth.makeSignInURLCallCount == 1)
+    }
+
+    /// When `signInURLToReturn` is configured on the mock, `makeSignInURL()`
+    /// called through the client returns that exact URL.
+    @Test @MainActor
+    func client_makeSignInURL_returnsConfiguredURL() {
+        let (client, oauth, _) = makeSUT()
+        let expected = URL(string: "https://github.com/login/oauth/authorize?client_id=test")!
+        oauth.signInURLToReturn = expected
+        let result = client.oauthService.makeSignInURL()
+        #expect(result == expected)
+    }
+
+    // MARK: - transport forwarding (behavioural)
+
+    /// `cancelRun` called via the client returns the transport's actual result
+    /// (not a hardcoded default), confirming real forwarding not a stub.
+    @Test @MainActor
+    func client_cancelRun_returnsTransportResult() async {
+        let (client, _, transport) = makeSUT()
+        transport.onCancelRun = { _, _ in true }
+        let result = await client.transport.cancelRun(runID: 99, scope: "owner/repo")
+        #expect(result == true)
+    }
+
+    /// When `onCancelRun` is NOT wired, `cancelRun` via the client returns
+    /// `false` — confirming the transport's own default propagates through.
+    @Test @MainActor
+    func client_cancelRun_propagatesTransportDefault() async {
+        let (client, _, _) = makeSUT()
+        let result = await client.transport.cancelRun(runID: 1, scope: "owner/repo")
+        #expect(result == false)
+    }
+
+    /// `cancelRun` is forwarded to the mock and the call is recorded.
     @Test @MainActor
     func transport_cancelRun_isRecorded() async {
         let (client, _, transport) = makeSUT()
@@ -103,24 +152,6 @@ struct GitHubClientTests {
         let data = await client.transport.apiAsync("/repos/owner/repo")
         #expect(data == expected)
         #expect(transport.apiAsyncEndpoints == ["/repos/owner/repo"])
-    }
-
-    // MARK: - MockTransport defaults
-
-    /// Default `cancelRun` returns `false` without explicit wiring.
-    @Test @MainActor
-    func mockTransport_cancelRun_defaultReturnsFalse() async {
-        let transport = MockTransport()
-        let result = await transport.cancelRun(runID: 1, scope: "owner/repo")
-        #expect(result == false)
-    }
-
-    /// Default `apiAsync` returns `nil` without explicit wiring.
-    @Test @MainActor
-    func mockTransport_apiAsync_defaultReturnsNil() async {
-        let transport = MockTransport()
-        let data = await transport.apiAsync("/any")
-        #expect(data == nil)
     }
 
     // MARK: - MockOAuthService defaults
