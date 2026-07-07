@@ -14,6 +14,13 @@ import Foundation
 ///   Default `timeout` values match the legacy free-function defaults so that
 ///   existing call sites require no changes when migrated.
 public protocol GitHubTransportProtocol: Sendable {
+    /// The JSON decoder used to decode API responses.
+    ///
+    /// Exposed as a protocol requirement so call sites can decode responses
+    /// consistently without downcasting to the concrete `GitHubTransport` type.
+    /// Conformers should return the same decoder instance they use internally
+    /// so that any configured strategies (date, key, etc.) are applied uniformly.
+    var decoder: JSONDecoder { get }
     /// The logger used for transport-layer diagnostics, or `nil` if none was provided.
     /// Exposed on the protocol so host apps can forward it to `configureGHLogger(_:)`
     /// without downcasting to the concrete `GitHubTransport` type.

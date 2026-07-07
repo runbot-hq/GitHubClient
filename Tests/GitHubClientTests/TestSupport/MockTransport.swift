@@ -38,6 +38,10 @@ final class MockTransport: GitHubTransportProtocol, @unchecked Sendable {
 
     // MARK: - GitHubTransportProtocol
 
+    /// Returns a plain `JSONDecoder()` — sufficient for mock use since
+    /// `MockTransport` returns pre-encoded `Data` fixtures that do not
+    /// depend on any custom decoding strategy.
+    var decoder: JSONDecoder { JSONDecoder() }
     var logger: (any GitHubLogger)? { nil }
 
     func apiAsync(_ endpoint: String, timeout: TimeInterval) async -> Data? {

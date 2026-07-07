@@ -320,10 +320,7 @@ public func fetchActiveRuns(
         // apiPaginated returns a flat JSON array — decode directly as [GitHubWorkflowRun].
         // Do NOT use a {"workflow_runs":[...]} wrapper here: apiPaginated strips the
         // GitHub API envelope and encodes only the array items into the returned Data.
-        // Use transport.decoder for consistency with all other decode call sites in
-        // this module — avoids silent divergence if decoder is later configured.
-        if let runs = try? (transport as? GitHubTransport)?.decoder.decode([GitHubWorkflowRun].self, from: data)
-            ?? JSONDecoder().decode([GitHubWorkflowRun].self, from: data) {
+        if let runs = try? transport.decoder.decode([GitHubWorkflowRun].self, from: data) {
             for run in runs where seenIDs.insert(run.id).inserted {
                 allRuns.append(run)
             }
@@ -351,6 +348,5 @@ public func fetchJobs(
     let endpoint = "\(scope.apiPrefix)/actions/runs/\(runID)/jobs?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
     struct Response: Decodable { let jobs: [GitHubJob] }
-    let decoder = (transport as? GitHubTransport)?.decoder ?? JSONDecoder()
-    return (try? decoder.decode(Response.self, from: data))?.jobs ?? []
+    return (try? transport.decoder.decode(Response.self, from: data))?.jobs ?? []
 }
