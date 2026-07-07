@@ -15,6 +15,7 @@
 //   8. record() trims buffer to hourlyLimit at >5,000 entries.
 //   9. purge() retains entries exactly at the 60-minute boundary (inclusive).
 //  10. purge() evicts entries just beyond the 60-minute boundary (exclusive).
+//  11. record() trims to hourlyLimit when buffer is at exactly hourlyLimit before the call.
 import Foundation
 import Testing
 
@@ -75,6 +76,46 @@ struct APICallCounterTests {
     await counter.record()
     let snap = await counter.snapshot()
     #expect(snap.count == APICallCounter.hourlyLimit)
+  }
+
+  /// Verifies the exact-boundary case of `record()`'s trim guard:
+  /// `if timestamps.count > Self.hourlyLimit`.
+  ///
+  /// `recordTrimsToHourlyLimit` seeds `hourlyLimit + 10` entries, which is
+  /// already **over** the limit before `record()` is called. This test seeds
+  /// exactly `hourlyLimit` entries — the buffer is full but not yet over —
+  /// then calls `record()` once.
+  ///
+  /// After the append, `timestamps.count == hourlyLimit + 1`, which is
+  /// strictly greater than `hourlyLimit`, so the trim fires:
+  ///   `timestamps = Array(timestamps.suffix(hourlyLimit))`
+  ///
+  /// The suffix slice keeps the **newest** `hourlyLimit` entries, evicting
+  /// only the oldest seeded entry (index 0). The result must be
+  /// `count == hourlyLimit`, not `hourlyLimit + 1`.
+  ///
+  /// This test would catch a regression where the guard is changed to
+  /// `>=` (which would trim one call too early, preventing the counter
+  /// from ever reaching the limit) or to `> hourlyLimit + 1` (which would
+  /// allow the buffer to grow one entry beyond the cap).
+  @Test("record() at exact hourlyLimit boundary trims back to hourlyLimit")
+  func recordAtExactHourlyLimit_trimsToLimit() async {
+    let counter = APICallCounter()
+    let now = ContinuousClock.now
+    // Seed exactly hourlyLimit fresh timestamps (buffer full, not over).
+    let full = (0..<APICallCounter.hourlyLimit).map {
+      now.advanced(by: .milliseconds($0))
+    }
+    await counter.seed(timestamps: full)
+
+    // One more record() call tips the buffer to hourlyLimit + 1, triggering trim.
+    await counter.record()
+
+    let snap = await counter.snapshot()
+    // Must be trimmed back to exactly hourlyLimit, not hourlyLimit + 1.
+    #expect(
+      snap.count == APICallCounter.hourlyLimit,
+      "record() must trim the buffer to hourlyLimit when it reaches hourlyLimit + 1 entries")
   }
 
   // MARK: - fraction clamping
