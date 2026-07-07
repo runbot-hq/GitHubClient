@@ -154,41 +154,13 @@ struct GitHubClientTests {
         #expect(transport.apiAsyncEndpoints == ["/repos/owner/repo"])
     }
 
-    // MARK: - MockOAuthService defaults
-
-    /// Default `isAuthenticated` is `false`.
-    @Test @MainActor
-    func mockOAuth_isAuthenticated_defaultFalse() {
-        let oauth = MockOAuthService()
-        #expect(oauth.isAuthenticated == false)
-    }
-
-    /// `makeSignInURL()` returns `nil` by default and increments the call count.
-    @Test @MainActor
-    func mockOAuth_makeSignInURL_defaultNil() {
-        let oauth = MockOAuthService()
-        let url = oauth.makeSignInURL()
-        #expect(url == nil)
-        #expect(oauth.makeSignInURLCallCount == 1)
-    }
-
-    /// `makeSignInURL()` returns the configured URL when `signInURLToReturn` is set.
-    @Test @MainActor
-    func mockOAuth_makeSignInURL_returnsConfiguredURL() {
-        let oauth = MockOAuthService()
-        oauth.signInURLToReturn = URL(string: "https://github.com/login/oauth/authorize?client_id=test")
-        let url = oauth.makeSignInURL()
-        #expect(url == oauth.signInURLToReturn)
-    }
-
-    /// `signOut()` increments `signOutCallCount` on each call.
-    @Test @MainActor
-    func mockOAuth_signOut_countAccumulates() {
-        let oauth = MockOAuthService()
-        oauth.signOut()
-        oauth.signOut()
-        #expect(oauth.signOutCallCount == 2)
-    }
+    // MARK: - MockOAuthService stream seams
+    //
+    // These two tests are kept because they exercise the AsyncStream delivery
+    // mechanism that client-facing sign-in/sign-out observers depend on.
+    // Pure mock-default tests (isAuthenticated, makeSignInURL, signOut defaults)
+    // were removed — those test MockOAuthService itself, not GitHubClient.
+    // If mock self-tests are ever needed, add them to MockSanityTests.
 
     /// `triggerSignIn(true)` delivers a `true` event to an active stream consumer.
     @Test @MainActor
