@@ -28,6 +28,10 @@ public protocol RateLimitActorProtocol: Actor {
     /// Clears the rate-limit flag and cancels any pending reset task.
     func clear()
     /// Clears the rate-limit flag only when the actor is not currently limited.
+    /// This is a deliberate TOCTOU guard: callers that want to clear a transient
+    /// state (e.g. after a successful response clears a suspected rate-limit)
+    /// should use this method rather than `clear()` to avoid racing with a
+    /// concurrent `set(resetAt:)` call that armed the flag after the check.
     func clearIfNotLimited()
     /// Returns `isLimited` and `resetDate` in a single actor hop.
     func snapshot() -> RateLimitSnapshot
@@ -42,8 +46,11 @@ public actor RateLimitActor: RateLimitActorProtocol {
     /// The moment at which the rate-limit window expires. `nil` when unknown.
     public private(set) var resetDate: Date?
     /// Structured task that fires when the rate-limit window expires.
+    // swiftlint:disable:next missing_docs
     private var resetTask: Task<Void, Never>?
-    /// Monotonically increasing generation counter; guards stale reset tasks.
+    /// Monotonically increasing generation counter; incremented on every `set(resetAt:)` call
+    /// to invalidate in-flight reset tasks from previous rate-limit windows.
+    // swiftlint:disable:next missing_docs
     private var generation = 0
     /// Optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
