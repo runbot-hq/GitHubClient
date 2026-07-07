@@ -46,13 +46,11 @@ func handleRateLimitResponse(
 }
 
 /// Returns `"secondary"` for 429s or `Retry-After`; `"primary"` for quota-exhausted 403s.
-// swiftlint:disable:next missing_docs
 private func rateLimitKind(retryAfter: Double?, statusCode: Int) -> String {
     retryAfter != nil || statusCode == 429 ? "secondary" : "primary"
 }
 
 /// Computes the absolute reset timestamp from rate-limit response headers.
-// swiftlint:disable:next missing_docs
 private func resetTimestamp(retryAfter: Double?, resetHeader: TimeInterval?) -> TimeInterval? {
     if let retryAfter { return Date().timeIntervalSince1970 + retryAfter }
     return resetHeader
