@@ -62,14 +62,15 @@ public actor RateLimitActor: RateLimitActorProtocol {
 
     /// Arms the rate-limit flag and schedules an automatic reset.
     public func set(resetAt: TimeInterval?) {
+        let now = Date.now
         let delay: TimeInterval
         if let ts = resetAt {
-            let secondsUntilReset = ts - Date.now.timeIntervalSince1970
+            let secondsUntilReset = ts - now.timeIntervalSince1970
             delay = min(max(secondsUntilReset, 5), 7200)
         } else {
             delay = 3600
         }
-        let date = Date.now.addingTimeInterval(delay)
+        let date = now.addingTimeInterval(delay)
         logger?.log("RateLimitActor › arming: delay=\(Int(delay))s resetDate=\(date)", category: "transport")
         generation &+= 1
         let capturedGeneration = generation
