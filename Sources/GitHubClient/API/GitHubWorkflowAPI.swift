@@ -291,14 +291,12 @@ public enum GitHubRunsFetchResult: Sendable {
 ///   is misclassified as `.rateLimited`. Both are known limitations tracked
 ///   in #1950 (typed `ExecuteResult` on the transport protocol).
 ///
-/// - Note: **Rate-limit budget change (PR #37).** Before PR #37, `fetchActiveRuns`
-///   was counted as **1** logical operation (record() was called once after the
-///   for-loop). After PR #37, record() fires inside `interpretHTTPResponse` on
-///   every 2xx response, so a **fully successful** invocation registers **2** hits
-///   against the hourly budget — one for the `in_progress` query and one for the
-///   `queued` query. Early exits record only the pages that completed: **0** hits
-///   on `.noToken`, **1** hit on `.rateLimited`. Callers that track or display the
-///   counter value should account for this.
+/// - Important: **Call-counter budget —** the call counter fires inside the transport
+///   layer on every successful HTTP response (2xx), not once per logical invocation
+///   of this function. A fully successful call (both `in_progress` and `queued` pages
+///   complete) registers **2** hits against the hourly budget. Early exits record only
+///   the pages that completed: **0** hits on `.noToken`, **1** hit on `.rateLimited`.
+///   Callers that display or gate on the counter value should account for this.
 ///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
