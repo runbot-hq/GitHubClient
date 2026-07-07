@@ -273,9 +273,9 @@ final class GitHubTransportPaginatedTests {
   /// and must NOT arm the rate-limit actor (clear() IS called because execute()
   /// clears on any 2xx before the decode step).
   ///
-  /// paginatedReturnsNilOnNonArrayBodyFirstPage was removed in #1500 — it was a
-  /// functional duplicate of this test with identical stub, result, and spy assertions.
-  @Test func paginatedNonArrayFirstPageDoesNotArmRateLimiter() async {
+  /// Renamed from paginatedNonArrayFirstPageDoesNotArmRateLimiter: the test also
+  /// asserts result == nil, which the old name did not reflect.
+  @Test func paginatedNonArrayFirstPage_returnsNilAndDoesNotArmRateLimiter() async {
     StubURLProtocol.reset()
     let pageURL = "\(apiBase)orgs/test/actions/runners"
 
@@ -367,9 +367,13 @@ final class GitHubTransportPaginatedTests {
 
   /// A genuine 429 rate-limit mid-pagination arms the spy and returns partial items.
   ///
-  /// Verifies: `.rateLimited` path returns collected items (not nil), and
-  /// `SpyRateLimitActor.setCalled` is true — confirming the injected actor
-  /// (not the global) was armed.
+  /// Verifies:
+  /// - Partial items from page 1 are returned (not nil)
+  /// - `setCalled` is true — the injected spy (not the global) was armed
+  /// - `clearCalled` is true — clear() fired after the page-1 2xx response
+  /// - **Ordering**: clear() is recorded before set() in `callOrder`, confirming
+  ///   the page-1 success clears the limiter before the page-2 429 re-arms it.
+  ///   This would catch a regression where the arm-before-clear order is reversed.
   ///
   /// - Note: 429 is chosen over 403 because the GitHub API uses 429 exclusively
   ///   for genuine rate limits. The stub includes a `Retry-After: 60` header so
@@ -411,6 +415,17 @@ final class GitHubTransportPaginatedTests {
     let wasClearCalled = await spy.clearCalled
     #expect(wasClearCalled)
     // clear() IS called after page 1 success (2xx response clears the limiter).
+    //
+    // Ordering assertion: clear() must be recorded before set() in callOrder.
+    // clear() fires when page 1 returns 200; set() fires when page 2 returns 429.
+    // A regression that reverses the order (set before clear) would mean the
+    // rate-limit arm from page 2 was immediately undone by the page-1 clear.
+    let order = await spy.callOrder
+    let clearIndex = order.firstIndex(of: "clear")
+    let setIndex = order.firstIndex(of: "set")
+    #expect(
+      clearIndex != nil && setIndex != nil && clearIndex! < setIndex!,
+      "clear() must be recorded before set() — page-1 2xx clears, page-2 429 arms")
   }
 
   // MARK: - Transient network error returns partial results

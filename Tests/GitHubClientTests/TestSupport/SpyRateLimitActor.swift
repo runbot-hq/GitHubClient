@@ -31,6 +31,11 @@ actor SpyRateLimitActor: RateLimitActorProtocol {
     private(set) var setCalled = false
     private(set) var clearCalled = false
 
+    /// Ordered log of method calls: each entry is "clear", "clearIfNotLimited",
+    /// or "set". Use this to assert on call ordering, not just presence.
+    /// `reset()` clears this array alongside the boolean flags.
+    private(set) var callOrder: [String] = []
+
     func setUp(isLimited: Bool) {
         self.isLimited = isLimited
     }
@@ -39,12 +44,14 @@ actor SpyRateLimitActor: RateLimitActorProtocol {
         setCalled = true
         isLimited = true
         resetDate = resetAt.map { Date(timeIntervalSince1970: $0) }
+        callOrder.append("set")
     }
 
     func clear() {
         clearCalled = true
         isLimited = false
         resetDate = nil
+        callOrder.append("clear")
     }
 
     /// Clears the rate-limit flag only when not currently limited.
@@ -71,5 +78,6 @@ actor SpyRateLimitActor: RateLimitActorProtocol {
         resetDate = nil
         setCalled = false
         clearCalled = false
+        callOrder = []
     }
 }
