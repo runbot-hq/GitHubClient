@@ -42,7 +42,12 @@ public actor APICallCounter: APICallCounterProtocol {
     public static let shared = APICallCounter()
     /// GitHub authenticated REST rate limit per rolling hour.
     public static let hourlyLimit = 5_000
-    /// Rolling buffer of call instants in ascending order. Internal so tests can inspect it directly.
+    /// Rolling buffer of call instants in ascending order.
+    ///
+    /// - Invariant: Elements are always sorted ascending. `record()` only ever
+    ///   appends `.now` to the tail, preserving this order. `purge()` relies on
+    ///   this invariant — it uses `drop(while:)` which is a prefix-drop, not a
+    ///   filter, and produces incorrect results if the buffer is unsorted.
     var timestamps: [ContinuousClock.Instant] = []
     /// Creates a new `APICallCounter` instance.
     public init() {}
@@ -53,6 +58,12 @@ public actor APICallCounter: APICallCounterProtocol {
     public func record() {
         purge()
         timestamps.append(.now)
+        // Defence-in-depth safety ceiling — not the primary eviction mechanism.
+        // purge() (called above) handles time-based eviction and should keep the
+        // buffer well below hourlyLimit under normal operation. This cap exists
+        // solely to bound memory in the degenerate case where purge() is somehow
+        // bypassed or the clock stalls. It is count-based by design: a time-based
+        // check here would duplicate purge() logic for no benefit.
         if timestamps.count > Self.hourlyLimit {
             timestamps = Array(timestamps.suffix(Self.hourlyLimit))
         }
@@ -67,15 +78,15 @@ public actor APICallCounter: APICallCounterProtocol {
     // MARK: - Private
 
     /// Evicts timestamps outside the rolling 60-minute window.
-    /// Uses `>=` so an instant at exactly the cutoff boundary is retained (inclusive window).
-    /// When no timestamp meets the cutoff all entries are stale and the buffer is cleared.
+    ///
+    /// Relies on the ascending-order invariant of `timestamps` — see its declaration.
+    ///
+    /// Boundary: elements at exactly `cutoff` are retained. `drop(while: { $0 < cutoff })`
+    /// stops at the first element where `$0 >= cutoff`, which is identical to the
+    /// previous `firstIndex(where: { $0 >= cutoff })` inclusive boundary.
     private func purge() {
         let cutoff = ContinuousClock.now - .seconds(3_600)
-        if let idx = timestamps.firstIndex(where: { $0 >= cutoff }) {
-            if idx > 0 { timestamps.removeFirst(idx) }
-        } else {
-            timestamps.removeAll()
-        }
+        timestamps = Array(timestamps.drop(while: { $0 < cutoff }))
     }
 }
 

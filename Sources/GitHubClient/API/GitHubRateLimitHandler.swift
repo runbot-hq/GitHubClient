@@ -62,14 +62,15 @@ public actor RateLimitActor: RateLimitActorProtocol {
 
     /// Arms the rate-limit flag and schedules an automatic reset.
     public func set(resetAt: TimeInterval?) {
+        let now = Date.now
         let delay: TimeInterval
         if let ts = resetAt {
-            let secondsUntilReset = ts - Date().timeIntervalSince1970
+            let secondsUntilReset = ts - now.timeIntervalSince1970
             delay = min(max(secondsUntilReset, 5), 7200)
         } else {
             delay = 3600
         }
-        let date = Date().addingTimeInterval(delay)
+        let date = now.addingTimeInterval(delay)
         logger?.log("RateLimitActor › arming: delay=\(Int(delay))s resetDate=\(date)", category: "transport")
         generation &+= 1
         let capturedGeneration = generation
@@ -127,13 +128,21 @@ public var ghIsRateLimited: Bool {
 }
 
 /// Clears the rate-limit flag.
-nonisolated(nonsending)
+///
+/// - Note: `@concurrent` is the canonical Swift 6.2 spelling of `nonisolated(nonsending)`
+///   per SE-0431. It is intentional on a free function delegating to an actor — it means
+///   the function carries no actor isolation and can be called from any context.
+@concurrent
 public func clearGhRateLimit() async {
     await rateLimitActor.clear()
 }
 
 /// Returns a `RateLimitSnapshot` in a single actor hop.
-nonisolated(nonsending)
+///
+/// - Note: `@concurrent` is the canonical Swift 6.2 spelling of `nonisolated(nonsending)`
+///   per SE-0431. It is intentional on a free function delegating to an actor — it means
+///   the function carries no actor isolation and can be called from any context.
+@concurrent
 public func ghRateLimitSnapshot() async -> RateLimitSnapshot {
     await rateLimitActor.snapshot()
 }
