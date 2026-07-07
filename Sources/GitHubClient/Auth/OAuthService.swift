@@ -203,7 +203,7 @@ public final class OAuthService: OAuthServiceProtocol {
         comps.queryItems = [
             URLQueryItem(name: "client_id", value: clientID),
             URLQueryItem(name: "redirect_uri", value: redirectURI),
-            URLQueryItem(name: "scope", value: scopes),
+            URLQueryItem(name: "scope", value: scopes.joined(separator: " ")),
             URLQueryItem(name: "state", value: state)
         ]
         guard let url = comps.url else {
