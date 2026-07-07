@@ -770,6 +770,23 @@ final class GitHubTransportPaginatedTests {
 
   // MARK: - 503 server error mid-pagination returns partial results
 
+  /// A 503 Service Unavailable mid-pagination must return the items collected
+  /// so far — not nil — and must not arm the rate-limit actor.
+  ///
+  /// This exercises the partial-result preservation path for 5xx errors: unlike
+  /// auth failures (401, 403) which discard all accumulated items and return nil,
+  /// a server error mid-pagination is treated as a stopping condition that preserves
+  /// whatever was successfully fetched before the error.
+  ///
+  /// Mechanism: page 1 succeeds (200 + Link header, one item). Page 2 returns 503.
+  /// The pagination loop exits via the server-error branch and returns `allItems`
+  /// containing the one item from page 1.
+  ///
+  /// Four assertions:
+  /// - `result != nil` — partial items are preserved, not discarded
+  /// - `items.count == 1` — exactly the item from page 1
+  /// - `spy.setCalled == false` — a server error is not a rate-limit event
+  /// - `spy.clearCalled == true` — page 1 returned 200, so clearIfNotLimited() fired
   @Test func paginatedReturnsPartialResultsOnServerError503MidPagination() async {
     StubURLProtocol.reset()
     let page1URL = "\(apiBase)orgs/test/actions/runners"

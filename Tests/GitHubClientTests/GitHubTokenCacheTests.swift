@@ -189,6 +189,12 @@ struct GitHubTokenCacheTests {
   /// of which Task wins the first write to the cache.
   ///
   /// Mechanism:
+  /// - CI always injects `GITHUB_TOKEN` into the runner environment. Both token
+  ///   env vars are stripped synchronously before the task group runs and restored
+  ///   synchronously after it completes, so the only resolution path exercised is
+  ///   the `MockTokenStore`. No async helper is used — the strip/restore brackets
+  ///   the `await withTaskGroup` call directly, eliminating any suspension-point
+  ///   race between env mutation and env restore.
   /// - A fresh `TokenCache` backed by a `MockTokenStore` seeded with
   ///   `"concurrent-token"` is created. The cache is initially empty.
   /// - 50 Tasks are spawned concurrently. All of them race to call `token()`
@@ -207,62 +213,33 @@ struct GitHubTokenCacheTests {
   ///   the 50 Tasks spawned inside this test body — those Tasks are intentional
   ///   intra-test concurrency exercising `TokenCache`'s thread-safety. There is
   ///   no contradiction: `.serialized` controls inter-test scheduling only.
-  ///
-  /// - Note: `withCleanEnvAsync` is used to strip CI env vars (GitHub Actions
-  ///   always injects `GITHUB_TOKEN`) so the only resolution path exercised is
-  ///   the `MockTokenStore`, keeping the assertion deterministic.
   @Test func token_concurrentCalls_allReturnSameToken() async {
-    await withCleanEnvAsync {
-      let cache = makeCache(storeToken: "concurrent-token")
-      let taskCount = 50
+    // Strip CI-injected env vars synchronously before any token() call is made.
+    let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
+    let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
+    unsetenv("GH_TOKEN")
+    unsetenv("GITHUB_TOKEN")
 
-      let results = await withTaskGroup(of: String?.self, returning: [String?].self) { group in
-        for _ in 0 ..< taskCount {
-          group.addTask { cache.token() }
-        }
-        var collected: [String?] = []
-        for await result in group {
-          collected.append(result)
-        }
-        return collected
+    let cache = makeCache(storeToken: "concurrent-token")
+    let taskCount = 50
+
+    let results = await withTaskGroup(of: String?.self, returning: [String?].self) { group in
+      for _ in 0 ..< taskCount {
+        group.addTask { cache.token() }
       }
-
-      // Every concurrent caller must receive the expected token — no nil, no divergence.
-      #expect(results.count == taskCount)
-      #expect(results.allSatisfy { $0 == "concurrent-token" })
+      var collected: [String?] = []
+      for await result in group {
+        collected.append(result)
+      }
+      return collected
     }
+
+    // Restore env vars synchronously — no suspension point between strip and restore.
+    if let prevGH { setenv("GH_TOKEN", prevGH, 1) } else { unsetenv("GH_TOKEN") }
+    if let prevGitHub { setenv("GITHUB_TOKEN", prevGitHub, 1) } else { unsetenv("GITHUB_TOKEN") }
+
+    // Every concurrent caller must receive the expected token — no nil, no divergence.
+    #expect(results.count == taskCount)
+    #expect(results.allSatisfy { $0 == "concurrent-token" })
   }
-}
-
-// MARK: - Async env helpers
-
-/// Async variant of `withCleanEnv` for use in `async` test bodies.
-/// Strips both token env vars, runs `body`, then restores the previous values.
-///
-/// - NOTE: `setenv`/`unsetenv` are POSIX calls that mutate the **process-global**
-///   environment. Because this is an `async` function, the Swift runtime may
-///   resume `body` (and the restore lines that follow it) on a different thread
-///   than the one that ran the unset lines. Between `await body()` returning and
-///   the restore executing, a thread in a *different* suite could briefly observe
-///   the stripped variables.
-///
-///   This is safe today because `GitHubTokenCacheTests` is the **only suite in
-///   this test target** that reads `GH_TOKEN` or `GITHUB_TOKEN` — no cross-suite
-///   observation is possible. It becomes a latent flakiness trap if any future
-///   suite does.
-///
-///   The structurally correct fix is to make this function and its `body` parameter
-///   non-async: `token()` is synchronous, so the env mutation, body call, and
-///   restore can all run without any suspension point. `.serialized` at target
-///   level is NOT the right fix — it prevents inter-test interleaving but does
-///   not close the within-test thread-resume window between `await body()` and
-///   the restore lines. See issue #47 for the full remediation plan.
-private func withCleanEnvAsync(_ body: () async -> Void) async {
-  let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
-  let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
-  unsetenv("GH_TOKEN")
-  unsetenv("GITHUB_TOKEN")
-  await body()
-  if let prevGH { setenv("GH_TOKEN", prevGH, 1) } else { unsetenv("GH_TOKEN") }
-  if let prevGitHub { setenv("GITHUB_TOKEN", prevGitHub, 1) } else { unsetenv("GITHUB_TOKEN") }
 }
