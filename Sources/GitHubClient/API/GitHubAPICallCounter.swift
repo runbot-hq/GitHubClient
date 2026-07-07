@@ -58,6 +58,12 @@ public actor APICallCounter: APICallCounterProtocol {
     public func record() {
         purge()
         timestamps.append(.now)
+        // Defence-in-depth safety ceiling — not the primary eviction mechanism.
+        // purge() (called above) handles time-based eviction and should keep the
+        // buffer well below hourlyLimit under normal operation. This cap exists
+        // solely to bound memory in the degenerate case where purge() is somehow
+        // bypassed or the clock stalls. It is count-based by design: a time-based
+        // check here would duplicate purge() logic for no benefit.
         if timestamps.count > Self.hourlyLimit {
             timestamps = Array(timestamps.suffix(Self.hourlyLimit))
         }
