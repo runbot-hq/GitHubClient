@@ -213,9 +213,11 @@ struct ScopeFromHtmlUrlTests {
     #expect(scopeFromHtmlUrl(nil) == nil)
   }
 
-  /// Empty string produces nil from URL(string:) on all platforms, so
-  /// scopeFromHtmlUrl must return nil — consistent with the nil-input boundary.
+  /// Empty string: anchor the Foundation contract that URL(string: "") returns nil
+  /// explicitly, so a future SDK change that makes it non-nil surfaces here rather
+  /// than as a confusing downstream mismatch in scopeFromHtmlUrl's return value.
   @Test func consistencyWithScopeFromUrl_emptyString() {
+    #expect(URL(string: "") == nil, "Foundation contract: URL(string: \"\") must be nil")
     #expect(scopeFromHtmlUrl("") == nil)
   }
 }

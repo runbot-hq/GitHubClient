@@ -189,14 +189,12 @@ struct GitHubTokenCacheTests {
   /// of which Task wins the first write to the cache.
   ///
   /// Mechanism:
-  /// - CI always injects `GITHUB_TOKEN` into the runner environment. Both token
-  ///   env vars are stripped synchronously before the task group runs and restored
-  ///   synchronously after it completes, so the only resolution path exercised is
-  ///   the `MockTokenStore`. No async helper is used — the strip/restore brackets
-  ///   the `await withTaskGroup` call directly, eliminating any suspension-point
-  ///   race between env mutation and env restore.
   /// - A fresh `TokenCache` backed by a `MockTokenStore` seeded with
   ///   `"concurrent-token"` is created. The cache is initially empty.
+  /// - `resolveFromStore()` has priority 2 — it is always consulted before the
+  ///   env-var path. Because the store is seeded, any CI-injected GITHUB_TOKEN
+  ///   or GH_TOKEN is irrelevant: the store result wins regardless of what env
+  ///   vars are present. No env manipulation is needed or performed.
   /// - 50 Tasks are spawned concurrently. All of them race to call `token()`
   ///   on the same instance. Because the cache is empty on the first call,
   ///   multiple Tasks may enter `resolveFromStore()` concurrently — exactly
@@ -214,12 +212,6 @@ struct GitHubTokenCacheTests {
   ///   intra-test concurrency exercising `TokenCache`'s thread-safety. There is
   ///   no contradiction: `.serialized` controls inter-test scheduling only.
   @Test func token_concurrentCalls_allReturnSameToken() async {
-    // Strip CI-injected env vars synchronously before any token() call is made.
-    let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
-    let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
-    unsetenv("GH_TOKEN")
-    unsetenv("GITHUB_TOKEN")
-
     let cache = makeCache(storeToken: "concurrent-token")
     let taskCount = 50
 
@@ -233,10 +225,6 @@ struct GitHubTokenCacheTests {
       }
       return collected
     }
-
-    // Restore env vars synchronously — no suspension point between strip and restore.
-    if let prevGH { setenv("GH_TOKEN", prevGH, 1) } else { unsetenv("GH_TOKEN") }
-    if let prevGitHub { setenv("GITHUB_TOKEN", prevGitHub, 1) } else { unsetenv("GITHUB_TOKEN") }
 
     // Every concurrent caller must receive the expected token — no nil, no divergence.
     #expect(results.count == taskCount)
