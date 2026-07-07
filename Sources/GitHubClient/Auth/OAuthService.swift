@@ -345,19 +345,19 @@ public final class OAuthService: OAuthServiceProtocol {
 /// Response body from the GitHub OAuth token exchange.
 /// GitHub returns HTTP 200 even on failure, so both `accessToken` and `error` are optional.
 private struct OAuthTokenResponse: Decodable {
-    // swiftlint:disable:next missing_docs
+    /// The OAuth access token returned on success, or `nil` if GitHub returned an error.
     let accessToken: String?
-    // swiftlint:disable:next missing_docs
+    /// The OAuth error code returned by GitHub on failure (e.g. `"bad_verification_code"`).
     let error: String?
-    // swiftlint:disable:next missing_docs
+    /// Human-readable description of the OAuth error, if present.
     let errorDescription: String?
-    // swiftlint:disable:next missing_docs
+    /// Maps Swift property names to the snake_case JSON keys used by the GitHub API.
     private enum CodingKeys: String, CodingKey {
         case accessToken = "access_token" // skipcq: SCT-A000
         case error
         case errorDescription = "error_description"
     }
-    // swiftlint:disable:next missing_docs
+    /// Returns the JSON key names of fields present in this response, for diagnostic logging.
     var debugKeys: [String] {
         var keys: [String] = []
         if accessToken != nil { keys.append("access_token") } // skipcq: SCT-A000
@@ -372,13 +372,13 @@ private struct OAuthTokenResponse: Decodable {
 // periphery:ignore
 /// OAuth token-exchange request body for the GitHub API.
 private struct OAuthTokenRequest: Encodable {
-    // swiftlint:disable:next missing_docs
+    /// The GitHub OAuth app client ID.
     let clientID: String
-    // swiftlint:disable:next missing_docs
+    /// The GitHub OAuth app client secret.
     let clientSecret: String
-    // swiftlint:disable:next missing_docs
+    /// The one-time authorization code received in the OAuth redirect callback.
     let code: String
-    // swiftlint:disable:next missing_docs
+    /// Maps Swift property names to the snake_case JSON keys expected by the GitHub API.
     private enum CodingKeys: String, CodingKey {
         case clientID = "client_id" // skipcq: SCT-A000
         case clientSecret = "client_secret" // skipcq: SCT-A000
