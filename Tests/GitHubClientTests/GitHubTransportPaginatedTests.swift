@@ -57,11 +57,6 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
   nonisolated(unsafe) private static var stubs: [String: Stub] = [:]
   nonisolated(unsafe) private static var errorStubs: [String: ErrorStub] = [:]
 
-  /// Keys that must survive `reset()`. Populated by `pin(_:)` and cleared by `unpin(_:)`.
-  /// Used by `TransportIncrementGuard` to protect its stubs from concurrent
-  /// `reset()` calls issued by `GitHubTransportPaginatedTests`.
-  nonisolated(unsafe) private static var pinnedKeys: Set<String> = []
-
   static func register(_ stub: Stub, for url: String) {
     lock.withLock { stubs[url] = stub }
   }
@@ -70,22 +65,10 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     lock.withLock { errorStubs[url] = stub }
   }
 
-  /// Marks `url` as pinned so that `reset()` will not remove it.
-  static func pin(_ url: String) {
-    lock.withLock { pinnedKeys.insert(url) }
-  }
-
-  /// Removes the pin for `url`, allowing future `reset()` calls to remove it.
-  static func unpin(_ url: String) {
-    lock.withLock { pinnedKeys.remove(url) }
-  }
-
-  /// Clears all non-pinned stubs from the registry.
-  /// Pinned keys (registered via `pin(_:)`) are preserved across resets.
   static func reset() {
     lock.withLock {
-      stubs = stubs.filter { pinnedKeys.contains($0.key) }
-      errorStubs = errorStubs.filter { pinnedKeys.contains($0.key) }
+      stubs = [:]
+      errorStubs = [:]
     }
   }
 
