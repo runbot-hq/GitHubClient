@@ -175,6 +175,13 @@ public struct GitHubTransport: GitHubTransportProtocol {
   ///   is recorded so the two pieces of state stay consistent from the caller’s
   ///   perspective. Both are nanosecond in-memory actor operations; `async let` child-task
   ///   allocation overhead would exceed any latency gain here.
+  ///
+  /// 3xx and the (200..<300) guard:
+  /// - The status range includes 3xx in principle, but URLSession follows redirects
+  ///   automatically and never surfaces a 3xx response to this completion handler.
+  ///   A 304 Not Modified is only returned when a conditional GET includes an
+  ///   `If-None-Match` / `If-Modified-Since` header — none of which this client sends.
+  ///   In practice this guard can only be reached by a 2xx; the wider range is harmless.
   private func interpretHTTPResponse(
     _ response: URLResponse,
     data: Data,

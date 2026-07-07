@@ -23,6 +23,12 @@ actor MockAPICallCounter: APICallCounterProtocol {
     }
 
     /// Returns a snapshot using `recordedCount` as the count.
+    ///
+    /// - Note: This is a spy — `snapshot().count` returns `recordedCount` directly
+    ///   with no timestamp-based expiry simulation. It will not match the real
+    ///   `APICallCounter`’s 60-minute rolling-window behaviour. Do not use
+    ///   `snapshot()` in tests that seed timestamps and assert on expiry; use
+    ///   `recordedCount` directly instead.
     func snapshot() -> APICallCounterSnapshot {
         APICallCounterSnapshot(count: recordedCount, limit: APICallCounter.hourlyLimit)
     }

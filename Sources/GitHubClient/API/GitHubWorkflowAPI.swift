@@ -298,6 +298,14 @@ public enum GitHubRunsFetchResult: Sendable {
 ///   the pages that completed: **0** hits on `.noToken`, **1** hit on `.rateLimited`.
 ///   Callers that display or gate on the counter value should account for this.
 ///
+/// - Note: **Counter / result-count divergence on decode failure —** `callCounter.record()`
+///   fires inside the transport on the HTTP hit, before this function decodes the body.
+///   If `transport.decoder.decode([GitHubWorkflowRun].self, from: data)` throws, the
+///   counter has already incremented but `allRuns` receives no new entries from that page.
+///   The final `.success(allRuns)` may therefore contain fewer runs than
+///   `counter.snapshot().count` implies. This is intentional and documented as non-fatal
+///   (see the `catch` block below); callers must not treat the difference as a counter bug.
+///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
 ///   - transport: The network transport to use. Defaults to `currentTransport`
@@ -327,12 +335,14 @@ public func fetchActiveRuns(
         } catch {
             // Decode failure on a successful 2xx page is intentionally non-fatal.
             // The HTTP request succeeded — this is an API shape change or decoder
-            // misconfiguration, not a network or auth condition. The logger call above
-            // surfaces it for diagnostics. Returning a typed error to the caller is
-            // not possible without a signature change, and the caller's correct
-            // response (show available runs) is identical to an empty result set.
-            // The loop continues so a decode failure on one status page does not
-            // discard successfully decoded runs from the other.
+            // misconfiguration, not a network or auth condition. Returning a typed
+            // error to the caller is not possible without a signature change, and
+            // the caller's correct response (show available runs) is identical to
+            // an empty result set. The loop continues so a decode failure on one
+            // status page does not discard successfully decoded runs from the other.
+            // Note: callCounter.record() already fired in the transport layer for
+            // this HTTP hit, so counter.snapshot().count may exceed allRuns.count
+            // after this path — see the doc comment above. This is expected, not a bug.
             transport.logger?.log(
                 "fetchActiveRuns › decode failed for status=\(status): \(error)",
                 category: "transport"
