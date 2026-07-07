@@ -127,13 +127,13 @@ public var ghIsRateLimited: Bool {
 }
 
 /// Clears the rate-limit flag.
-nonisolated(nonsending)
+@concurrent
 public func clearGhRateLimit() async {
     await rateLimitActor.clear()
 }
 
 /// Returns a `RateLimitSnapshot` in a single actor hop.
-nonisolated(nonsending)
+@concurrent
 public func ghRateLimitSnapshot() async -> RateLimitSnapshot {
     await rateLimitActor.snapshot()
 }
