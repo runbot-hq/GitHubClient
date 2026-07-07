@@ -42,7 +42,12 @@ public actor APICallCounter: APICallCounterProtocol {
     public static let shared = APICallCounter()
     /// GitHub authenticated REST rate limit per rolling hour.
     public static let hourlyLimit = 5_000
-    /// Rolling buffer of call instants in ascending order. Internal so tests can inspect it directly.
+    /// Rolling buffer of call instants in ascending order.
+    ///
+    /// - Invariant: Elements are always sorted ascending. `record()` only ever
+    ///   appends `.now` to the tail, preserving this order. `purge()` relies on
+    ///   this invariant — it uses `drop(while:)` which is a prefix-drop, not a
+    ///   filter, and produces incorrect results if the buffer is unsorted.
     var timestamps: [ContinuousClock.Instant] = []
     /// Creates a new `APICallCounter` instance.
     public init() {}
@@ -67,6 +72,8 @@ public actor APICallCounter: APICallCounterProtocol {
     // MARK: - Private
 
     /// Evicts timestamps outside the rolling 60-minute window.
+    ///
+    /// Relies on the ascending-order invariant of `timestamps` — see its declaration.
     private func purge() {
         let cutoff = ContinuousClock.now - .seconds(3_600)
         timestamps = Array(timestamps.drop(while: { $0 < cutoff }))
