@@ -10,8 +10,8 @@
 //   4. snapshot() is atomic — consistent count + limit in one hop (P10).
 //   5. APICallCounterSnapshot is Equatable and Sendable.
 //   6. snapshot() returns zero after all timestamps expire (idle-gap regression).
-//   7. fetchRunners() / fetchActiveRuns() / fetchJobs() / fetchUserOrgs() /
-//      fetchUserRepos() increment on non-nil AND skip on nil transport result.
+//   7. GitHubTransport increments the injected callCounter on every 2xx response.
+//      Each successful HTTP page counts as one hit, regardless of HTTP verb.
 //   8. record() trims buffer to hourlyLimit at >5,000 entries.
 //   9. purge() retains entries exactly at the 60-minute boundary (inclusive).
 //  10. purge() evicts entries just beyond the 60-minute boundary (exclusive).
@@ -25,7 +25,6 @@ struct APICallCounterTests {
 
   // MARK: - Defaults
 
-  /// Verifies that a newly initialised `APICallCounter` reports a count of zero and exposes the correct hourly limit.
   @Test("fresh actor starts at count zero")
   func freshActorStartsAtZero() async {
     let counter = APICallCounter()
@@ -34,7 +33,6 @@ struct APICallCounterTests {
     #expect(snap.limit == APICallCounter.hourlyLimit)
   }
 
-  /// Verifies that `snapshot().fraction` is `0.0` on a fresh actor with no recorded calls.
   @Test("fresh actor fraction is zero")
   func freshActorFractionIsZero() async {
     let counter = APICallCounter()
@@ -44,7 +42,6 @@ struct APICallCounterTests {
 
   // MARK: - record()
 
-  /// Verifies that each sequential `record()` call increments the snapshot count by exactly one.
   @Test("record() increments count by one per call")
   func recordIncrementsCount() async {
     let counter = APICallCounter()
@@ -55,7 +52,6 @@ struct APICallCounterTests {
     #expect(snap.count == 3)
   }
 
-  /// Verifies that 20 concurrent `record()` calls from a `TaskGroup` all land in the actor without losing any increment.
   @Test("record() from concurrent tasks all land in the count")
   func recordConcurrentTasks() async {
     let counter = APICallCounter()
@@ -68,7 +64,6 @@ struct APICallCounterTests {
     #expect(snap.count == 20)
   }
 
-  /// Verifies that `record()` caps the internal buffer at `hourlyLimit` when the seeded timestamp count exceeds that limit.
   @Test("record() trims buffer to hourlyLimit when entries exceed it")
   func recordTrimsToHourlyLimit() async {
     let counter = APICallCounter()
@@ -84,28 +79,24 @@ struct APICallCounterTests {
 
   // MARK: - fraction clamping
 
-  /// Verifies that `fraction` returns `0.0` rather than `NaN` when `limit` is zero, preventing propagation of invalid float values.
   @Test("fraction returns 0.0 when limit is zero to prevent NaN propagation")
   func fractionWithZeroLimitIsZero() {
     let snap = APICallCounterSnapshot(count: 42, limit: 0)
     #expect(snap.fraction == 0.0)
   }
 
-  /// Verifies that `fraction` is clamped to `1.0` and never exceeds it, even when `count` is larger than `limit`.
   @Test("fraction is clamped to 1.0 when count exceeds limit")
   func fractionClampedToOne() {
     let snap = APICallCounterSnapshot(count: 9_999, limit: APICallCounter.hourlyLimit)
     #expect(snap.fraction == 1.0)
   }
 
-  /// Verifies that `fraction` is clamped to `0.0` and never goes negative when `count` is a negative value.
   @Test("fraction is clamped to 0.0 when count is negative")
   func fractionClampedToZeroForNegativeCount() {
     let snap = APICallCounterSnapshot(count: -1, limit: APICallCounter.hourlyLimit)
     #expect(snap.fraction == 0.0)
   }
 
-  /// Verifies that `fraction` is exactly `0.5` when `count` equals `hourlyLimit / 2`.
   @Test("fraction is exactly 0.5 at half the limit")
   func fractionAtHalf() {
     let snap = APICallCounterSnapshot(
@@ -113,7 +104,6 @@ struct APICallCounterTests {
     #expect(snap.fraction == 0.5)
   }
 
-  /// Verifies that `fraction` stays within `[0.0, 1.0]` across a representative spread of count values.
   @Test("fraction stays within [0, 1] for any count")
   func fractionBounded() {
     for count in [0, 1, 2_500, 5_000, 7_500, 10_000] {
@@ -125,8 +115,6 @@ struct APICallCounterTests {
 
   // MARK: - snapshot atomicity (P10)
 
-  /// Verifies the P10 single-hop atomicity contract: `count` and `limit` are captured together
-  /// in one actor hop, so the returned snapshot is internally self-consistent.
   @Test("snapshot returns consistent count + limit in a single hop")
   func snapshotIsConsistent() async {
     let counter = APICallCounter()
@@ -136,7 +124,6 @@ struct APICallCounterTests {
     #expect(s1 == s2)
   }
 
-  /// Exercises the P10 atomicity guarantee under concurrent mutation.
   @Test("snapshot() count+limit are consistent under concurrent record() mutations")
   func snapshotAtomicUnderConcurrentMutations() async {
     let counter = APICallCounter()
@@ -156,7 +143,6 @@ struct APICallCounterTests {
     }
   }
 
-  /// Verifies that `snapshot().limit` always matches the `APICallCounter.hourlyLimit` constant, regardless of recorded calls.
   @Test("snapshot limit always equals hourlyLimit constant")
   func snapshotLimitMatchesConstant() async {
     let counter = APICallCounter()
@@ -166,7 +152,6 @@ struct APICallCounterTests {
 
   // MARK: - Idle-gap regression
 
-  /// Verifies that `snapshot()` returns a count of zero after seeded timestamps have fully expired, covering the idle-gap regression from #1511.
   @Test("snapshot() returns zero after all timestamps expire without a record() call")
   func snapshotPurgesIdleStaleEntries() async {
     let counter = APICallCounter()
@@ -178,13 +163,6 @@ struct APICallCounterTests {
 
   // MARK: - Boundary regression
 
-  /// Regression test for purge() inclusive-boundary semantics.
-  ///
-  /// Uses `now - 3_599 s` (1 second inside the 60-minute window) rather than
-  /// exactly `now - 3_600 s` to provide a 1-second buffer against clock jitter
-  /// during test execution. The window is inclusive, so an entry at the boundary
-  /// must be retained; the buffer ensures a slow machine doesn't accidentally
-  /// push the seeded timestamp past the cutoff before `snapshot()` runs.
   @Test("purge() retains entry seeded exactly at the 60-minute boundary")
   func snapshotRetainsEntryExactlyAtCutoffBoundary() async {
     let counter = APICallCounter()
@@ -195,12 +173,6 @@ struct APICallCounterTests {
       snap.count == 1, "entry at exactly the cutoff boundary must be retained (inclusive window)")
   }
 
-  /// Regression test for purge() exclusive-boundary eviction.
-  ///
-  /// Uses `now - 3_601 s` (1 second past the 60-minute cutoff) rather than
-  /// exactly `now - 3_600 s` to provide a 1-second buffer against clock jitter.
-  /// An entry this far past the boundary must always be evicted regardless of
-  /// minor timing variance during test execution.
   @Test("purge() evicts entry seeded just beyond the 60-minute boundary")
   func snapshotEvictsEntryBeyondCutoff() async {
     let counter = APICallCounter()
@@ -212,7 +184,6 @@ struct APICallCounterTests {
 
   // MARK: - APICallCounterSnapshot struct
 
-  /// Verifies that two `APICallCounterSnapshot` instances with identical fields compare equal, and differ when any field differs.
   @Test("APICallCounterSnapshot is Equatable")
   func snapshotEquatable() {
     let a = APICallCounterSnapshot(count: 42, limit: 5_000)
@@ -222,7 +193,6 @@ struct APICallCounterTests {
     #expect(a != c)
   }
 
-  /// Compile-time conformance check for `APICallCounterSnapshot.Sendable`.
   @Test("APICallCounterSnapshot is Sendable across task boundary")
   func snapshotSendable() async {
     let counter = APICallCounter()
@@ -234,226 +204,396 @@ struct APICallCounterTests {
     #expect(transferred.limit == snap.limit)
   }
 
-  // MARK: - Transport increment guard
+  // MARK: - Transport-layer counter (TransportIncrementGuard)
   //
-  // These tests share the module-level `apiCallCounter` actor and each call
-  // `reset()` on it. They are run .serialized to prevent concurrent scheduling
-  // from interleaving a reset from one test with the record/snapshot of another.
+  // Verifies that GitHubTransport.interpretHTTPResponse() increments the
+  // injected callCounter on every 2xx response, using StubURLProtocol
+  // (defined in GitHubTransportPaginatedTests.swift) as the network shim.
   //
-  // Nil-path tests are intentionally omitted for fetchJobs, fetchUserOrgs, and
-  // fetchUserRepos: record() sits after a `guard let data = ... else { return }`,
-  // making it structurally unreachable on a nil transport result. Testing that
-  // would be testing Swift, not this module.
+  // URLSession isolation
+  // --------------------
+  // Each test builds a private URLSession using
+  // URLSessionConfiguration.ephemeral with protocolClasses = [StubURLProtocol]
+  // injected directly. This session is fully self-contained and never touches
+  // URLSession.shared or the registerClass/unregisterClass lifecycle owned by
+  // GitHubTransportPaginatedTests.
   //
-  // fetchActiveRuns is different: record() is placed after the for-loop, so the
-  // nil path requires driving two separate mock responses — one non-nil (first
-  // status) and one nil (second status). Two nil-path variants are covered:
+  // Why no StubURLProtocol.reset() calls?
+  // --------------------------------------
+  // reset() wipes the entire process-global stub registry. The two suites
+  // (GitHubTransportPaginatedTests + TransportIncrementGuard) run concurrently;
+  // calling reset() here raced against in-flight stub lookups in
+  // GitHubTransportPaginatedTests and was the original source of flakiness.
+  // It is safe to omit reset() here because every stub URL in this suite
+  // uses the org "counter-test", which never appears in
+  // GitHubTransportPaginatedTests — so there are zero key collisions and
+  // no isolation benefit from calling reset().
   //
-  //   • fetchActiveRunsSkipsCounterOnPartialNilResult — first call returns a
-  //     non-empty run list (allRuns becomes non-empty), second returns nil →
-  //     .rateLimited(partialRuns). Counter must NOT increment.
+  // Why does MockAPICallCounter expose reset() if it isn't called here?
+  // --------------------------------------------------------------------
+  // MockAPICallCounter.reset() is a test-spy convenience method, not part
+  // of APICallCounterProtocol. It exists for tests that reuse a single spy
+  // instance across multiple assertions (e.g. if a future test verifies
+  // count before and after a second call). It is intentionally not called
+  // here because each test instantiates a fresh MockAPICallCounter(),
+  // making reset() redundant. If APICallCounterProtocol gains new
+  // requirements, MockAPICallCounter will need to be updated, but reset()
+  // itself does not create coupling to the protocol.
   //
-  //   • fetchActiveRunsReturnsNoTokenWhenFirstStatusReturnsEmptyThenNil — first
-  //     call returns valid but empty JSON (allRuns stays empty), second returns
-  //     nil → .noToken. Counter must NOT increment.
+  // Stub data shapes
+  // ----------------
+  // apiPaginated decodes each HTTP response body as [AnyJSON] (a flat JSON
+  // array). Stubs for endpoints that go through apiPaginated must return a
+  // bare JSON array — NOT a dict wrapper like {"workflow_runs":[]}.
+  // All three paginated functions decode the flat array directly:
+  //   fetchActiveRuns  — [GitHubWorkflowRun] directly (no envelope)
+  //   fetchJobs        — [GitHubJob] directly (no envelope)
+  //   fetchRunners     — [GitHubRunner] directly (no envelope)
   //
-  // These two variants are distinct code paths inside the same guard branch
-  // and must be tested separately.
+  // fetchRunners   — apiPaginated — stub: [{runner object}]
+  // fetchActiveRuns — apiPaginated — stub: [] (per status)
+  // fetchJobs      — apiPaginated — stub: [{job object}]
+  // fetchUserOrgs  — apiPaginated — stub: []
+  // fetchUserRepos — apiPaginated — stub: []
+  // post verb      — transport.post — stub: 201 empty body
+  //
+  // fetchUserOrgs / fetchUserRepos stub URL construction
+  // ----------------------------------------------------
+  // Stub URLs mirror the exact endpoint string the production functions pass
+  // to apiPaginated — i.e. the same GitHubConstants interpolation used in
+  // GitHubHelpers.swift. Do NOT use trimmingCharacters(in:) + base string
+  // concatenation: that indirection works today only because the trim rescues
+  // a double-slash, but would silently break if apiBase or the path constants
+  // ever change shape.
+  //
+  // How nil is forced for early-exit tests
+  // ---------------------------------------
+  // StubURLProtocol.canInit returns false for URLs that have no registered
+  // stub or error stub. Unregistered URLs therefore fall through to the
+  // underlying URLSession networking, which is non-deterministic in CI.
+  // To force a deterministic nil return from apiPaginated, use
+  // StubURLProtocol.registerError(.init(error: URLError(.notConnectedToInternet)))
+  // for any URL that must produce a network-error response. registerError
+  // causes canInit to return true, StubURLProtocol intercepts the request,
+  // and startLoading fires client.urlProtocol(didFailWithError:)—
+  // guaranteed to map to .networkError inside execute() and nil inside
+  // apiPaginated, regardless of real network reachability.
+  //
+  // .rateLimited vs .noToken branch selection in fetchActiveRuns
+  // -------------------------------------------------------------
+  // fetchActiveRuns returns .noToken when allRuns.isEmpty at the nil guard,
+  // and .rateLimited(partialRuns) only when allRuns is non-empty.
+  // The fetchActiveRunsCounterStopsAtOneOnRateLimitedEarlyExit test stubs
+  // in_progress with oneRunJSON — a flat array containing one GitHubWorkflowRun
+  // object with only the fields required by its Decodable init. This makes
+  // allRuns non-empty after the first successful page, so when queued hits a
+  // network error the nil guard correctly takes .rateLimited(partialRuns).
+  // A bare [] body leaves allRuns empty and takes .noToken instead.
+  //
+  // oneRunJSON fields match GitHubWorkflowRun.CodingKeys exactly:
+  //   id, name, status, conclusion(optional), head_branch, head_sha,
+  //   html_url, created_at, updated_at.
+  // No other fields (repository, run_number, workflow_id, event) are needed
+  // or present on GitHubWorkflowRun.
+  //
+  // .rateLimited vs .permissionDenied for 403 responses
+  // -----------------------------------------------------
+  // handleRateLimitResponse returns true (→ .rateLimited) only when the 403
+  // carries rate-limit signals: X-RateLimit-Remaining: 0 or a Retry-After
+  // header. A plain 403 with neither header returns false (→ .permissionDenied).
+  // counterNotIncrementedOnPermissionDenied403 exercises the .permissionDenied
+  // path specifically (plain 403, no rate-limit headers). The suite does not
+  // currently exercise the .rateLimited 403 path (X-RateLimit-Remaining: 0),
+  // which is out of scope for this PR.
+  //
+  // .serialized prevents tests within this suite from racing on the
+  // shared stub registry.
+  // final class is required for stored properties.
 
   @Suite("TransportIncrementGuard", .serialized)
-  struct TransportIncrementGuard {
+  final class TransportIncrementGuard {
 
-    /// Verifies that `fetchRunners` increments `apiCallCounter` when the transport returns non-nil data.
-    @Test("fetchRunners() increments counter when transport returns non-nil data")
-    func fetchRunnersIncrementsCounterOnNonNilResult() async {
-      await apiCallCounter.reset()
-      let mock = MockTransport()
-      let payload = makeRunnersJSON()
-      mock.onApiPaginated = { _, _ in payload }
-      _ = await fetchRunners(scopeString: "orgs/test", transport: mock)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 1)
+    // Distinct org — never appears in GitHubTransportPaginatedTests.
+    private let org = "counter-test"
+
+    // Private URLSession with StubURLProtocol injected via protocolClasses.
+    // Fully self-contained; does not depend on URLProtocol.registerClass /
+    // unregisterClass.
+    private let stubSession: URLSession = {
+      let config = URLSessionConfiguration.ephemeral
+      config.protocolClasses = [StubURLProtocol.self]
+      return URLSession(configuration: config)
+    }()
+
+    private func makeTransport(counter: MockAPICallCounter) -> GitHubTransport {
+      GitHubTransport(
+        session: stubSession,
+        tokenProvider: { "test-token" },
+        callCounter: counter)
     }
 
-    /// Verifies that `fetchActiveRuns` increments `apiCallCounter` exactly once per invocation
-    /// regardless of the number of statuses iterated internally (currently two: "in_progress"
-    /// and "queued"). Adding a third status must not change this count — record() is called
-    /// once after the loop, not once per status.
-    @Test("fetchActiveRuns() increments counter exactly once per invocation")
-    func fetchActiveRunsIncrementsCounterOnNonNilResult() async {
-      await apiCallCounter.reset()
-      let mock = MockTransport()
-      let payload = makeRunsJSON()
-      mock.onApiPaginated = { _, _ in payload }
-      _ = await fetchActiveRuns(scope: .org("test"), transport: mock)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 1)
+    // Stub a 200 response returning a bare JSON array — required by apiPaginated.
+    private func stub200array(_ url: String) {
+      StubURLProtocol.register(.init(data: Data("[]".utf8), statusCode: 200, headers: [:]), for: url)
     }
 
-    /// Verifies that `fetchActiveRuns` does NOT increment `apiCallCounter` when the first
-    /// status ("in_progress") returns a non-empty run list and the second ("queued") returns nil.
-    ///
-    /// Because `allRuns` is non-empty when the nil guard fires, the function returns
-    /// `.rateLimited(partialRuns)` — not `.noToken`. This is the genuine partial-success
-    /// path. The counter must NOT be incremented because `record()` is only reached after
-    /// the loop completes normally.
-    ///
-    /// - Note: `makeRunsJSONWithRun()` is used (not `makeRunsJSON()`) to ensure `allRuns`
-    ///   is non-empty after decoding the first response. Using the empty-array fixture here
-    ///   would leave `allRuns` empty and produce `.noToken` instead — that path is covered
-    ///   by `fetchActiveRunsReturnsNoTokenWhenFirstStatusReturnsEmptyThenNil` below.
-    @Test("fetchActiveRuns() does not increment counter on partial nil (second status returns nil, allRuns non-empty → .rateLimited)")
-    func fetchActiveRunsSkipsCounterOnPartialNilResult() async {
-      await apiCallCounter.reset()
-      let mock = MockTransport()
-      // First call (in_progress): non-empty run list so allRuns is non-empty.
-      // Second call (queued): nil → guard fires → .rateLimited(partialRuns).
-      var callCount = 0
-      mock.onApiPaginated = { _, _ in
-        callCount += 1
-        return callCount == 1 ? makeRunsJSONWithRun() : nil
-      }
-      let result = await fetchActiveRuns(scope: .org("test"), transport: mock)
-      guard case .rateLimited = result else {
+    private func stubError(_ url: String, statusCode: Int) {
+      StubURLProtocol.register(
+        .init(data: Data("{\"message\":\"error\"}".utf8), statusCode: statusCode, headers: [:]),
+        for: url)
+    }
+
+    // Force a deterministic network-error nil from apiPaginated for a given URL.
+    // Uses registerError so canInit returns true and StubURLProtocol intercepts
+    // the request — never falling through to real networking.
+    private func stubNetworkError(_ url: String) {
+      StubURLProtocol.registerError(
+        .init(error: URLError(.notConnectedToInternet)),
+        for: url)
+    }
+
+    // A minimal flat JSON array containing one GitHubWorkflowRun object.
+    // Fields match GitHubWorkflowRun.CodingKeys exactly — no extra fields.
+    // Used to make allRuns non-empty so .rateLimited is reachable in the
+    // early-exit counter test.
+    private static let oneRunJSON = Data("""
+      [{"id":1,"name":"CI","status":"in_progress",\
+      "head_branch":"main","head_sha":"abc",\
+      "html_url":"https://github.com/counter-test/r/actions/runs/1",\
+      "created_at":"2024-01-01T00:00:00Z",\
+      "updated_at":"2024-01-01T00:00:00Z"}]
+      """.utf8)
+
+    // A minimal flat JSON array containing one GitHubJob object.
+    // Fields satisfy GitHubJob's custom Decodable init (id, run_id, name, status required;
+    // steps omitted — falls back to [] via the try? guard in the init).
+    private static let oneJobJSON = Data("""
+      [{"id":1,"run_id":1,"name":"build","status":"completed"}]
+      """.utf8)
+
+    // A minimal flat JSON array containing one GitHubRunner object.
+    // All five fields are required by GitHubRunner's synthesised Decodable init.
+    private static let oneRunnerJSON = Data("""
+      [{"id":1,"name":"my-runner","status":"online","busy":false,"labels":[]}]
+      """.utf8)
+
+    private var base: String { GitHubConstants.apiBase + "/" }
+
+    // MARK: fetchRunners
+
+    @Test("fetchRunners() increments counter once and returns decoded runners")
+    func fetchRunnersIncrementsCounter() async {
+      let counter = MockAPICallCounter()
+      let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
+      StubURLProtocol.register(
+        .init(data: Self.oneRunnerJSON, statusCode: 200, headers: [:]), for: url)
+      let runners = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 1)
+      #expect(runners.count == 1, "fetchRunners must return the decoded runner, not [] — verify apiPaginated flat-array decode is used (no keyed wrapper)")
+    }
+
+    // MARK: fetchActiveRuns — happy path
+
+    @Test("fetchActiveRuns() increments counter once per status query (2 total)")
+    func fetchActiveRunsIncrementsTwice() async {
+      let counter = MockAPICallCounter()
+      let ps = GitHubConstants.activeRunsPageSize
+      // Must be bare [] arrays — apiPaginated rejects dict bodies.
+      stub200array("\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)")
+      stub200array("\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)")
+      _ = await fetchActiveRuns(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 2)
+    }
+
+    // MARK: fetchActiveRuns — nil-exit counter invariants
+    //
+    // Both tests use stubNetworkError() — not an unregistered URL — to force a
+    // deterministic nil from apiPaginated.
+    //
+    // The .rateLimited test stubs in_progress with oneRunJSON (one decodable run)
+    // so allRuns is non-empty before the nil guard fires on queued — the only way
+    // to reach the .rateLimited(partialRuns) branch. A bare [] body would leave
+    // allRuns empty and take .noToken instead.
+
+    @Test("fetchActiveRuns() counter == 1 when second status query returns nil (.rateLimited exit)")
+    func fetchActiveRunsCounterStopsAtOneOnRateLimitedEarlyExit() async {
+      let counter = MockAPICallCounter()
+      let ps = GitHubConstants.activeRunsPageSize
+      let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
+      let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
+      // in_progress returns one run — allRuns becomes non-empty, counter gets 1 hit.
+      StubURLProtocol.register(
+        .init(data: Self.oneRunJSON, statusCode: 200, headers: [:]),
+        for: inProgressURL)
+      // queued returns a network error — apiPaginated returns nil, allRuns
+      // is non-empty → .rateLimited(partialRuns) branch. No counter hit.
+      stubNetworkError(queuedURL)
+      let result = await fetchActiveRuns(
+        scope: .org(org), transport: makeTransport(counter: counter))
+      if case .rateLimited = result { /* expected */ } else {
         Issue.record("expected .rateLimited, got \(result)")
-        return
       }
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 0, "counter must not increment when the loop exits early via .rateLimited")
+      #expect(
+        await counter.recordedCount == 1,
+        "only the successful in_progress hit should be counted; the network-error queued exit must not add a second hit")
     }
 
-    /// Verifies that `fetchActiveRuns` returns `.noToken` and does NOT increment
-    /// `apiCallCounter` when the first status returns valid but empty JSON (so `allRuns`
-    /// stays empty) and the second status returns nil.
-    ///
-    /// Because `allRuns.isEmpty` is true when the nil guard fires, the function takes
-    /// the `return .noToken` branch. This is distinct from the `.rateLimited` path above.
-    @Test("fetchActiveRuns() returns .noToken and skips counter when first status returns empty JSON then second returns nil")
-    func fetchActiveRunsReturnsNoTokenWhenFirstStatusReturnsEmptyThenNil() async {
-      await apiCallCounter.reset()
-      let mock = MockTransport()
-      // First call: valid but empty run list (allRuns stays empty).
-      // Second call: nil → guard fires → allRuns.isEmpty → .noToken.
-      var callCount = 0
-      mock.onApiPaginated = { _, _ in
-        callCount += 1
-        return callCount == 1 ? makeRunsJSON() : nil
-      }
-      let result = await fetchActiveRuns(scope: .org("test"), transport: mock)
-      guard case .noToken = result else {
+    @Test("fetchActiveRuns() counter == 0 when first status query returns nil (.noToken exit)")
+    func fetchActiveRunsCounterIsZeroOnNoTokenEarlyExit() async {
+      let counter = MockAPICallCounter()
+      let ps = GitHubConstants.activeRunsPageSize
+      let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
+      let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
+      // in_progress returns a network error — fetchActiveRuns hits the nil guard
+      // with allRuns still empty and returns .noToken immediately. No record() call.
+      stubNetworkError(inProgressURL)
+      // queuedURL is registered but structurally unreachable: fetchActiveRuns
+      // returns .noToken after the first nil guard fires and never reaches the
+      // second loop iteration. The stub is present only to ensure StubURLProtocol
+      // intercepts the URL if the early-exit logic ever regresses, rather than
+      // falling through to real networking.
+      stubNetworkError(queuedURL)
+      let result = await fetchActiveRuns(
+        scope: .org(org), transport: makeTransport(counter: counter))
+      if case .noToken = result { /* expected */ } else {
         Issue.record("expected .noToken, got \(result)")
-        return
       }
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 0, "counter must not increment when the loop exits early via .noToken")
+      #expect(
+        await counter.recordedCount == 0,
+        "a network-error first-page result must not increment the counter")
     }
 
-    /// Verifies that `fetchJobs` increments `apiCallCounter` when the transport returns non-nil data.
-    @Test("fetchJobs() increments counter when transport returns non-nil data")
-    func fetchJobsIncrementsCounterOnNonNilResult() async {
-      await apiCallCounter.reset()
-      let mock = MockTransport()
-      let payload = makeJobsJSON()
-      mock.onApiPaginated = { _, _ in payload }
-      _ = await fetchJobs(runID: 1, scope: .repo(owner: "test", name: "repo"), transport: mock)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 1)
+    // MARK: fetchJobs
+
+    @Test("fetchJobs() increments counter once and returns decoded jobs")
+    func fetchJobsIncrementsCounter() async {
+      let counter = MockAPICallCounter()
+      let url =
+        "\(base)repos/\(org)/myrepo/actions/runs/1/jobs?per_page=\(GitHubConstants.maxPageSize)"
+      StubURLProtocol.register(
+        .init(data: Self.oneJobJSON, statusCode: 200, headers: [:]), for: url)
+      let jobs = await fetchJobs(
+        runID: 1, scope: .repo(owner: org, name: "myrepo"),
+        transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 1)
+      #expect(jobs.count == 1, "fetchJobs must return the decoded job, not [] — verify apiPaginated flat-array decode is used (no keyed wrapper)")
     }
 
-    /// Verifies that `fetchUserOrgs` increments `apiCallCounter` when the transport returns non-nil data.
-    @Test("fetchUserOrgs() increments counter when transport returns non-nil data")
-    func fetchUserOrgsIncrementsCounterOnNonNilResult() async {
-      await apiCallCounter.reset()
-      let mock = MockTransport()
-      let payload = makeOrgsJSON()
-      mock.onApiPaginated = { _, _ in payload }
-      _ = await fetchUserOrgs(transport: mock)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 1)
+    // MARK: fetchUserOrgs
+
+    // Stub URL mirrors the exact endpoint string fetchUserOrgs passes to apiPaginated
+    // (GitHubHelpers.swift). Do not use path-trimming + base concatenation —
+    // see "fetchUserOrgs / fetchUserRepos stub URL construction" above.
+    @Test("fetchUserOrgs() increments counter once per successful HTTP response")
+    func fetchUserOrgsIncrementsCounter() async {
+      let counter = MockAPICallCounter()
+      stub200array(
+        "\(GitHubConstants.apiBase)\(GitHubConstants.userOrgsPath)?per_page=\(GitHubConstants.maxPageSize)"
+      )
+      _ = await fetchUserOrgs(transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 1)
     }
 
-    /// Verifies that `fetchUserRepos` increments `apiCallCounter` when the transport returns non-nil data.
-    @Test("fetchUserRepos() increments counter when transport returns non-nil data")
-    func fetchUserReposIncrementsCounterOnNonNilResult() async {
-      await apiCallCounter.reset()
-      let mock = MockTransport()
-      let payload = makeReposJSON()
-      mock.onApiPaginated = { _, _ in payload }
-      _ = await fetchUserRepos(transport: mock)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 1)
+    // MARK: fetchUserRepos
+
+    // Stub URL mirrors the exact endpoint string fetchUserRepos passes to apiPaginated
+    // (GitHubHelpers.swift). Do not use path-trimming + base concatenation —
+    // see "fetchUserOrgs / fetchUserRepos stub URL construction" above.
+    @Test("fetchUserRepos() increments counter once per successful HTTP response")
+    func fetchUserReposIncrementsCounter() async {
+      let counter = MockAPICallCounter()
+      stub200array(
+        "\(GitHubConstants.apiBase)\(GitHubConstants.userReposPath)?sort=updated&per_page=\(GitHubConstants.maxPageSize)"
+      )
+      _ = await fetchUserRepos(transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 1)
     }
 
-    /// Verifies that `fetchRunners` does NOT increment `apiCallCounter` when the transport returns nil.
-    @Test("fetchRunners() does not increment counter when transport returns nil")
-    func fetchRunnersSkipsCounterOnNilResult() async {
-      await apiCallCounter.reset()
-      let mock = MockTransport()
-      _ = await fetchRunners(scopeString: "orgs/test", transport: mock)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 0)
+    // MARK: mutation verb — POST
+
+    // This test directly proves the core correctness claim of PR #37:
+    // all HTTP verbs are now counted via interpretHTTPResponse, not just
+    // GET-like methods that flow through apiPaginated.
+    // A 201 Created response is used because POST endpoints (e.g. runner
+    // registration token) commonly return 201, and interpretHTTPResponse
+    // treats the full 200..<300 range as 2xx success.
+    @Test("POST 2xx response increments counter once")
+    func postVerbIncrementsCounter() async {
+      let counter = MockAPICallCounter()
+      let endpoint = "orgs/\(org)/actions/runners/registration-token"
+      let url = "\(base)\(endpoint)"
+      StubURLProtocol.register(
+        .init(data: Data("{\"token\":\"abc\",\"expires_at\":\"2099-01-01T00:00:00Z\"}".utf8),
+              statusCode: 201,
+              headers: [:]),
+        for: url)
+      _ = await makeTransport(counter: counter).post(endpoint, body: nil)
+      #expect(
+        await counter.recordedCount == 1,
+        "a 201 Created POST response must increment the counter once via interpretHTTPResponse")
     }
 
-    /// Verifies that `fetchActiveRuns` does NOT increment `apiCallCounter` when the
-    /// first status ("in_progress") returns nil, causing an immediate `.noToken` return.
-    @Test("fetchActiveRuns() does not increment counter when first status returns nil")
-    func fetchActiveRunsSkipsCounterOnNilResult() async {
-      await apiCallCounter.reset()
-      let mock = MockTransport()
-      _ = await fetchActiveRuns(scope: .org("test"), transport: mock)
-      let snap = await apiCallCounter.snapshot()
-      #expect(snap.count == 0)
+    // MARK: non-2xx does not increment
+
+    @Test("counter is not incremented on 404 response")
+    func counterNotIncrementedOn404() async {
+      let counter = MockAPICallCounter()
+      let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
+      stubError(url, statusCode: 404)
+      _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 0)
+    }
+
+    // A plain 403 with no rate-limit headers (no X-RateLimit-Remaining: 0,
+    // no Retry-After) maps to .permissionDenied in interpretHTTPResponse —
+    // not .rateLimited. handleRateLimitResponse returns false, the 403/429
+    // branch returns .permissionDenied, and callCounter.record() is never
+    // reached. This is the correct behaviour: a permission error did not
+    // consume a successful API quota slot.
+    @Test("counter is not incremented on 403 permission-denied response (no rate-limit headers)")
+    func counterNotIncrementedOnPermissionDenied403() async {
+      let counter = MockAPICallCounter()
+      let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
+      // stubError returns {"message":"error"} with no rate-limit headers —
+      // handleRateLimitResponse returns false → .permissionDenied path.
+      stubError(url, statusCode: 403)
+      _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 0)
+    }
+
+    @Test("counter is not incremented on 429 response (secondary rate-limit signal)")
+    func counterNotIncrementedOn429() async {
+      let counter = MockAPICallCounter()
+      let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
+      stubError(url, statusCode: 429)
+      _ = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
+      #expect(await counter.recordedCount == 0)
+    }
+
+    // MARK: multi-page
+
+    @Test("counter increments once per page for multi-page paginated responses")
+    func counterIncrementsPerPage() async {
+      let counter = MockAPICallCounter()
+      let page1URL = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
+      let page2URL =
+        "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)&page=2"
+      StubURLProtocol.register(
+        .init(
+          data: Data(
+            "[{\"id\":1,\"name\":\"r1\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
+          statusCode: 200,
+          headers: ["Link": "<\(page2URL)>; rel=\"next\""]),
+        for: page1URL)
+      StubURLProtocol.register(
+        .init(
+          data: Data(
+            "[{\"id\":2,\"name\":\"r2\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
+          statusCode: 200, headers: [:]),
+        for: page2URL)
+      _ = await makeTransport(counter: counter).apiPaginated(
+        "orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)")
+      #expect(await counter.recordedCount == 2)
     }
   }
-}
-
-// MARK: - JSON fixture helpers
-
-/// Minimal valid runners list JSON for `fetchRunners` decode path.
-private func makeRunnersJSON() -> Data {
-  Data("{\"runners\":[]}".utf8)
-}
-
-/// Minimal valid workflow runs list JSON for `fetchActiveRuns` decode path — empty array.
-/// Produces an `allRuns`-empty result after decoding.
-private func makeRunsJSON() -> Data {
-  Data("{\"workflow_runs\":[]}".utf8)
-}
-
-/// Minimal valid workflow runs list JSON containing one run, for `fetchActiveRuns` tests
-/// that need `allRuns` to be non-empty after decoding the first status response.
-/// All required fields are present; optional fields are omitted.
-private func makeRunsJSONWithRun() -> Data {
-  Data("""
-  {"workflow_runs":[{
-    "id":1,
-    "name":"CI",
-    "status":"in_progress",
-    "conclusion":null,
-    "head_branch":"main",
-    "head_sha":"abc123",
-    "html_url":"https://github.com/test/repo/actions/runs/1",
-    "created_at":"2026-07-06T00:00:00Z",
-    "updated_at":"2026-07-06T00:00:00Z"
-  }]}
-  """.utf8)
-}
-
-/// Minimal valid jobs list JSON for `fetchJobs` decode path.
-private func makeJobsJSON() -> Data {
-  Data("{\"jobs\":[]}".utf8)
-}
-
-/// Minimal valid orgs list JSON for `fetchUserOrgs` decode path.
-/// The GitHub /user/orgs endpoint returns a top-level JSON array (not a keyed wrapper
-/// like /actions/runners). This bare `[]` is intentional and matches the real API shape.
-private func makeOrgsJSON() -> Data {
-  Data("[]".utf8)
-}
-
-/// Minimal valid repos list JSON for `fetchUserRepos` decode path.
-/// The GitHub /user/repos endpoint returns a top-level JSON array (not a keyed wrapper
-/// like /actions/runners). This bare `[]` is intentional and matches the real API shape.
-private func makeReposJSON() -> Data {
-  Data("[]".utf8)
 }

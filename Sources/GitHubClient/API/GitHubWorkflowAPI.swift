@@ -113,7 +113,12 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
         startedAt = try container.decodeIfPresent(String.self, forKey: .startedAt)
         completedAt = try container.decodeIfPresent(String.self, forKey: .completedAt)
         createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
-        // Queued jobs have no steps array in the API response — fall back to []
+        // `try?` here is intentional, not a silent-failure smell.
+        // The GitHub API omits the `steps` key entirely for queued jobs — it is
+        // not an empty array but an absent key. `decodeIfPresent` returns `nil`
+        // for an absent key, and `try?` converts a malformed-but-present array
+        // to `nil` as well. Both cases correctly fall back to `[]`.
+        // This is a known API shape difference, not a decode bug.
         steps = (try? container.decodeIfPresent([GitHubStep].self, forKey: .steps)) ?? []
     }
 
@@ -268,11 +273,38 @@ public enum GitHubRunsFetchResult: Sendable {
 
 /// Fetches active (queued + in_progress) workflow runs for a scope.
 ///
-/// Counts as one logical API operation regardless of how many status queries
-/// are issued internally — `apiCallCounter.record()` is called once per
-/// invocation when the loop completes. This includes cases where both status
-/// queries return valid but empty data; early exits via `.noToken` or
-/// `.rateLimited` do not increment the counter.
+/// Each `transport.apiPaginated` call records its own hits in the transport layer
+/// (one count per successful HTTP page). No manual `apiCallCounter.record()` is needed.
+///
+/// `apiPaginated` returns a flat JSON array encoded as `Data`. This function decodes
+/// that directly as `[GitHubWorkflowRun]` — **not** via a `{"workflow_runs":[...]}` wrapper.
+/// The GitHub REST API wraps runs in a `workflow_runs` key, but `apiPaginated` strips the
+/// envelope and returns only the array items, so no wrapper is needed here.
+///
+/// - Note: **Nil-transport heuristic —** `transport.apiPaginated` collapses all
+///   failure modes (no token, rate limit, 401/403, network error) to `nil` because
+///   the current transport API does not expose a typed result. The heuristic is:
+///   nil on the **first** page (when `allRuns` is still empty) is surfaced as
+///   `.noToken` to prompt sign-in; nil on a **subsequent** page is surfaced as
+///   `.rateLimited` so callers keep the partial results. This means a rate-limit
+///   hit on the first page is misclassified as `.noToken`, and a 401 mid-loop
+///   is misclassified as `.rateLimited`. Both are known limitations tracked
+///   in #1950 (typed `ExecuteResult` on the transport protocol).
+///
+/// - Important: **Call-counter budget —** the call counter fires inside the transport
+///   layer on every successful HTTP response (2xx), not once per logical invocation
+///   of this function. A fully successful call (both `in_progress` and `queued` pages
+///   complete) registers **2** hits against the hourly budget. Early exits record only
+///   the pages that completed: **0** hits on `.noToken`, **1** hit on `.rateLimited`.
+///   Callers that display or gate on the counter value should account for this.
+///
+/// - Note: **Counter / result-count divergence on decode failure —** `callCounter.record()`
+///   fires inside the transport on the HTTP hit, before this function decodes the body.
+///   If `transport.decoder.decode([GitHubWorkflowRun].self, from: data)` throws, the
+///   counter has already incremented but `allRuns` receives no new entries from that page.
+///   The final `.success(allRuns)` may therefore contain fewer runs than
+///   `counter.snapshot().count` implies. This is intentional and documented as non-fatal
+///   (see the `catch` block below); callers must not treat the difference as a counter bug.
 ///
 /// - Parameters:
 ///   - scope: The org or repo scope to query.
@@ -289,39 +321,46 @@ public func fetchActiveRuns(
     for status in statuses {
         let endpoint = "\(scope.apiPrefix)/actions/runs?status=\(status)&per_page=\(GitHubConstants.activeRunsPageSize)"
         guard let data = await transport.apiPaginated(endpoint) else {
-            // `transport.apiPaginated` returns `nil` for all failure modes: no token,
-            // rate limit, 401/403, and network errors. We cannot distinguish them
-            // here because the transport collapses all failures to `nil`.
-            //
-            // Heuristic: nil on the first page (allRuns still empty) is almost
-            // always a token/auth issue, so we surface `.noToken` to prompt
-            // sign-in. Nil after at least one page is surfaced as `.rateLimited`
-            // so callers can use the partial results rather than discarding them.
-            //
-            // Known gap: a rate-limit or network drop on the very first page is
-            // misclassified as `.noToken`; a 401 mid-loop surfaces as
-            // `.rateLimited(partialResults)`. Both were true before the extraction
-            // and require the transport to expose a typed ExecuteResult to fix
-            // properly. Tracked in #1950.
+            // See the nil-transport heuristic note in the function doc comment above.
             if allRuns.isEmpty { return .noToken } else { return .rateLimited(allRuns) }
         }
-        struct Response: Decodable {
-            let workflowRuns: [GitHubWorkflowRun]
-            enum CodingKeys: String, CodingKey { case workflowRuns = "workflow_runs" }
-        }
-        if let decoded = try? JSONDecoder().decode(Response.self, from: data) {
-            for run in decoded.workflowRuns where seenIDs.insert(run.id).inserted {
+        // apiPaginated returns a flat JSON array — decode directly as [GitHubWorkflowRun].
+        // Do NOT use a {"workflow_runs":[...]} wrapper here: apiPaginated strips the
+        // GitHub API envelope and encodes only the array items into the returned Data.
+        do {
+            let runs = try transport.decoder.decode([GitHubWorkflowRun].self, from: data)
+            for run in runs where seenIDs.insert(run.id).inserted {
                 allRuns.append(run)
             }
+        } catch {
+            // Decode failure on a successful 2xx page is intentionally non-fatal.
+            // The HTTP request succeeded — this is an API shape change or decoder
+            // misconfiguration, not a network or auth condition. Returning a typed
+            // error to the caller is not possible without a signature change, and
+            // the caller's correct response (show available runs) is identical to
+            // an empty result set. The loop continues so a decode failure on one
+            // status page does not discard successfully decoded runs from the other.
+            // Note: callCounter.record() already fired in the transport layer for
+            // this HTTP hit, so counter.snapshot().count may exceed allRuns.count
+            // after this path — see the doc comment above. This is expected, not a bug.
+            transport.logger?.log(
+                "fetchActiveRuns › decode failed for status=\(status): \(error)",
+                category: "transport"
+            )
         }
     }
-    // Record once per logical invocation — the two-status fan-out is an
-    // implementation detail, same as pagination pages being invisible to the counter.
-    await apiCallCounter.record()
     return .success(allRuns)
 }
 
 /// Fetches all jobs for a given workflow run ID.
+///
+/// Each `transport.apiPaginated` call records its own hits in the transport layer
+/// (one count per successful HTTP page). No manual `apiCallCounter.record()` is needed.
+///
+/// `apiPaginated` returns a flat JSON array encoded as `Data`. This function decodes
+/// that directly as `[GitHubJob]` — **not** via a `{"jobs":[...]}` wrapper.
+/// The GitHub REST API wraps jobs in a `jobs` key, but `apiPaginated` strips the
+/// envelope and returns only the array items, so no wrapper is needed here.
 ///
 /// - Parameters:
 ///   - runID: The numeric GitHub workflow run ID.
@@ -336,9 +375,16 @@ public func fetchJobs(
 ) async -> [GitHubJob] {
     let endpoint = "\(scope.apiPrefix)/actions/runs/\(runID)/jobs?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
-    // guard above ensures this is only reached on non-nil data.
-    // Nil-path test intentionally omitted — record() is structurally unreachable on nil.
-    await apiCallCounter.record()
-    struct Response: Decodable { let jobs: [GitHubJob] }
-    return (try? JSONDecoder().decode(Response.self, from: data))?.jobs ?? []
+    // apiPaginated returns a flat JSON array — decode directly as [GitHubJob].
+    // Do NOT use a {"jobs":[...]} wrapper here: apiPaginated strips the
+    // GitHub API envelope and encodes only the array items into the returned Data.
+    do {
+        return try transport.decoder.decode([GitHubJob].self, from: data)
+    } catch {
+        transport.logger?.log(
+            "fetchJobs › decode failed for runID=\(runID): \(error)",
+            category: "transport"
+        )
+        return []
+    }
 }
