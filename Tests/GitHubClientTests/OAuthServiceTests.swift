@@ -102,11 +102,12 @@ struct OAuthServiceMakeSignInURLTests {
         let state2 = URLComponents(url: url2, resolvingAgainstBaseURL: false)?
             .queryItems?.first(where: { $0.name == "state" })?.value
         #expect(state1 != state2, "Each call must produce a fresh nonce")
-        // Only the second state should be accepted in handleCallback
-        session.stubbedResult = .success(successPayload())
+        // state1 is stale — handleCallback hits the state-mismatch guard and fires fireSignIn(false)
+        // synchronously before ever reaching exchangeCode. stubbedResult is not set here because
+        // the network path is never reached; the rejection happens at the CSRF guard layer.
         let stream = svc.makeSignInStream()
         var iter = stream.makeAsyncIterator()
-        svc.handleCallback(callbackURL(state: state1)) // stale nonce — should be rejected
+        svc.handleCallback(callbackURL(state: state1)) // stale nonce — rejected at CSRF guard
         let result = await iter.next()
         #expect(result == false)
     }
@@ -134,6 +135,9 @@ struct OAuthServiceCSRFTests {
         svc.handleCallback(callbackURL(code: nil, state: state))
         let result1 = await iter1.next()
         #expect(result1 == false)
+        // A fresh stream is required for the second assertion: each makeSignInStream() call
+        // creates an independent AsyncStream. iter1 has already consumed its one value above
+        // and will not receive any further events — reusing it here would hang indefinitely.
         // Second callback: valid code + same state — nonce must be nil now, so this also fails.
         let stream2 = svc.makeSignInStream()
         var iter2 = stream2.makeAsyncIterator()
