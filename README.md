@@ -174,6 +174,46 @@ if let url = github.oauthService.makeSignInURL() {
 github.oauthService.handleCallback(url)
 ```
 
+### OAuth scopes
+
+Scopes control what permissions are requested from the user during sign-in. Pass a `scopes:` array to `GitHubClient.init` using the typed constants in `GitHubScopes`.
+
+**Default scopes** (used when `scopes:` is omitted):
+
+| Constant | GitHub scope | Access granted |
+|---|---|---|
+| `GitHubScopes.repo` | `repo` | Full read/write access to code, commits, pull requests |
+| `GitHubScopes.readOrg` | `read:org` | Read-only access to org membership and teams |
+| `GitHubScopes.adminOrg` | `admin:org` | Full admin access to org membership and teams |
+| `GitHubScopes.manageRunnersOrg` | `manage_runners:org` | Manage self-hosted runners in an org |
+| `GitHubScopes.workflow` | `workflow` | Manage and trigger GitHub Actions workflows |
+
+**Request only what you need** — for a read-only tool, narrow the scopes at init time:
+
+```swift
+let github = GitHubClient(
+    clientID: "your-client-id",
+    clientSecret: "your-client-secret",
+    service: "com.yourapp.github",
+    account: "github-oauth-token",
+    scopes: [GitHubScopes.readOrg, GitHubScopes.repo]
+)
+```
+
+**Extend the defaults** when you need an extra scope (e.g. reading user profile data):
+
+```swift
+let github = GitHubClient(
+    clientID: "your-client-id",
+    clientSecret: "your-client-secret",
+    service: "com.yourapp.github",
+    account: "github-oauth-token",
+    scopes: GitHubScopes.default + [GitHubScopes.readUser]
+)
+```
+
+See the [GitHub OAuth scopes documentation](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps) for the full list of available scopes.
+
 ### Environment token (CI / automation)
 
 Export `GH_TOKEN` or `GITHUB_TOKEN` — the library picks it up automatically with no additional configuration.
