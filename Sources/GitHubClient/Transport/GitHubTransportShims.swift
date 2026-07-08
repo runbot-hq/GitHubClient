@@ -64,31 +64,6 @@ nonisolated public func withTransport<T: Sendable>(
     try await $taskLocalTransport.withValue(transport, operation: operation)
 }
 
-// MARK: - HTTP verb shims
-//
-// Call-site-compatible free functions delegating to `currentTransport`.
-// TODO(#1513-cleanup): remove each shim as its callers are migrated.
-
-/// Sends a POST to `endpoint`. Returns response `Data` or `nil`.
-@concurrent
-@discardableResult
-public func urlSessionPost(_ endpoint: String, body: Data? = nil, timeout: TimeInterval = 30) async -> Data? {
-    await currentTransport.post(endpoint, body: body, timeout: timeout)
-}
-
-/// Sends a PUT with `body` to `endpoint`. Returns response `Data` or `nil`.
-@concurrent
-public func urlSessionPut(_ endpoint: String, body: Data, timeout: TimeInterval = 30) async -> Data? {
-    await currentTransport.put(endpoint, body: body, timeout: timeout)
-}
-
-/// Sends a DELETE to `endpoint`. Returns `true` on 2xx.
-@concurrent
-@discardableResult
-public func urlSessionDelete(_ endpoint: String, timeout: TimeInterval = 30) async -> Bool {
-    await currentTransport.delete(endpoint, timeout: timeout)
-}
-
 // MARK: - Domain shims
 
 /// Thin GET alias used widely across the module.
