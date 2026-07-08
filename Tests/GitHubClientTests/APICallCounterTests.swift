@@ -608,19 +608,10 @@ struct APICallCounterTests {
       let page1URL = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
       let page2URL =
         "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)&page=2"
-      StubURLProtocol.register(
-        .init(
-           Data(
-            "[{\"id\":1,\"name\":\"r1\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
-          statusCode: 200,
-          headers: ["Link": "<\(page2URL)>; rel=\"next\""]),
-        for: page1URL)
-      StubURLProtocol.register(
-        .init(
-           Data(
-            "[{\"id\":2,\"name\":\"r2\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
-          statusCode: 200, headers: [:]),
-        for: page2URL)
+      let runner1 = Data("[{\"id\":1,\"name\":\"r1\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8)
+      let runner2 = Data("[{\"id\":2,\"name\":\"r2\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8)
+      StubURLProtocol.register(.init( runner1, statusCode: 200, headers: ["Link": "<\(page2URL)>; rel=\"next\""]), for: page1URL)
+      StubURLProtocol.register(.init( runner2, statusCode: 200, headers: [:]), for: page2URL)
       _ = await makeTransport(counter: counter).apiPaginated(
         "orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)")
       #expect(await counter.recordedCount == 2)
