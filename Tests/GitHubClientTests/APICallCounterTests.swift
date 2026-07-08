@@ -610,14 +610,14 @@ struct APICallCounterTests {
         "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)&page=2"
       StubURLProtocol.register(
         .init(
-           Data(
+          data: Data(
             "[{\"id\":1,\"name\":\"r1\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
           statusCode: 200,
           headers: ["Link": "<\(page2URL)>; rel=\"next\""]),
         for: page1URL)
       StubURLProtocol.register(
         .init(
-           Data(
+          data: Data(
             "[{\"id\":2,\"name\":\"r2\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
           statusCode: 200, headers: [:]),
         for: page2URL)
