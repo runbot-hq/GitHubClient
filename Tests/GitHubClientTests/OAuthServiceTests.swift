@@ -89,7 +89,7 @@ struct OAuthServiceMakeSignInURLTests {
     }
 
     @Test("Calling makeSignInURL twice replaces pendingState (last-write-wins)")
-    func callingTwiceReplacesPendingState() throws {
+    func callingTwiceReplacesPendingState() async throws {
         let store = SpyTokenStore()
         let session = MockURLSession()
         let svc = makeService(store: store, session: session)

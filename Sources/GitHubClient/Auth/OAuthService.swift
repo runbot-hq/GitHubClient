@@ -55,7 +55,7 @@ public final class OAuthService: OAuthServiceProtocol {
     private let logger: (any GitHubLogger)?
     /// The `URLSession` used for token-exchange network calls. Defaults to `.shared`.
     /// Injected at init time so tests can supply a mock session without swizzling.
-    private let session: URLSession
+    private let session: any URLSessionProtocol
     /// Called after a successful `tokenStore.save()` — e.g. to invalidate a `TokenCache`.
     private let onTokenSaved: (() -> Void)?
     /// Called on every `signOut()` — e.g. to invalidate a `TokenCache`. Invoked regardless of
@@ -73,8 +73,8 @@ public final class OAuthService: OAuthServiceProtocol {
     ///     scopes array is a programming error, not a runtime condition).
     ///     Use `GitHubScopes` constants for type safety and discoverability.
     ///   - logger: Optional logger for diagnostic messages.
-    ///   - session: The `URLSession` used for token-exchange requests. Defaults to `.shared`.
-    ///     Inject a custom session in tests to avoid real network calls.
+    ///   - session: The `URLSessionProtocol` used for token-exchange requests. Defaults to `URLSession.shared`.
+    ///     Inject a `MockURLSession` in tests to avoid real network calls.
     ///   - onTokenSaved: Optional callback invoked after a successful token save.
     ///     Use this to invalidate an external cache (e.g. `TokenCache.invalidate()`).
     ///     Defaults to `nil` — existing call sites are unaffected.
@@ -87,7 +87,7 @@ public final class OAuthService: OAuthServiceProtocol {
         tokenStore: any TokenStore,
         scopes: [String] = GitHubScopes.default,
         logger: (any GitHubLogger)? = nil,
-        session: URLSession = .shared,
+        session: any URLSessionProtocol = URLSession.shared,
         onTokenSaved: (() -> Void)? = nil,
         onTokenDeleted: (() -> Void)? = nil
     ) {
