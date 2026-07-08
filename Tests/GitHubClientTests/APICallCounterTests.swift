@@ -307,7 +307,7 @@ struct APICallCounterTests {
   // stub or error stub. Unregistered URLs therefore fall through to the
   // underlying URLSession networking, which is non-deterministic in CI.
   // To force a deterministic nil return from apiPaginated, use
-  // StubURLProtocol.registerError(.init(error: URLError(.notConnectedToInternet)))
+  // IsolatedStubURLProtocol.registerError(.init(error: URLError(.notConnectedToInternet)))
   // for any URL that must produce a network-error response. registerError
   // causes canInit to return true, StubURLProtocol intercepts the request,
   // and startLoading fires client.urlProtocol(didFailWithError:)—
@@ -354,7 +354,7 @@ struct APICallCounterTests {
     // unregisterClass.
     private let stubSession: URLSession = {
       let config = URLSessionConfiguration.ephemeral
-      config.protocolClasses = [StubURLProtocol.self]
+      config.protocolClasses = [IsolatedStubURLProtocol.self]
       return URLSession(configuration: config)
     }()
 
@@ -367,11 +367,11 @@ struct APICallCounterTests {
 
     // Stub a 200 response returning a bare JSON array — required by apiPaginated.
     private func stub200array(_ url: String) {
-      StubURLProtocol.register(.init(data: Data("[]".utf8), statusCode: 200, headers: [:]), for: url)
+      IsolatedStubURLProtocol.register(.init(data: Data("[]".utf8), statusCode: 200, headers: [:]), for: url)
     }
 
     private func stubError(_ url: String, statusCode: Int) {
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Data("{\"message\":\"error\"}".utf8), statusCode: statusCode, headers: [:]),
         for: url)
     }
@@ -380,7 +380,7 @@ struct APICallCounterTests {
     // Uses registerError so canInit returns true and StubURLProtocol intercepts
     // the request — never falling through to real networking.
     private func stubNetworkError(_ url: String) {
-      StubURLProtocol.registerError(
+      IsolatedStubURLProtocol.registerError(
         .init(error: URLError(.notConnectedToInternet)),
         for: url)
     }
@@ -418,7 +418,7 @@ struct APICallCounterTests {
     func fetchRunnersIncrementsCounter() async {
       let counter = MockAPICallCounter()
       let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Self.oneRunnerJSON, statusCode: 200, headers: [:]), for: url)
       let runners = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
@@ -455,7 +455,7 @@ struct APICallCounterTests {
       let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
       let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
       // in_progress returns one run — allRuns becomes non-empty, counter gets 1 hit.
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Self.oneRunJSON, statusCode: 200, headers: [:]),
         for: inProgressURL)
       // queued returns a network error — apiPaginated returns nil, allRuns
@@ -503,7 +503,7 @@ struct APICallCounterTests {
       let counter = MockAPICallCounter()
       let url =
         "\(base)repos/\(org)/myrepo/actions/runs/1/jobs?per_page=\(GitHubConstants.maxPageSize)"
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Self.oneJobJSON, statusCode: 200, headers: [:]), for: url)
       let jobs = await fetchJobs(
         runID: 1, scope: .repo(owner: org, name: "myrepo"),
@@ -555,7 +555,7 @@ struct APICallCounterTests {
       let counter = MockAPICallCounter()
       let endpoint = "orgs/\(org)/actions/runners/registration-token"
       let url = "\(base)\(endpoint)"
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Data("{\"token\":\"abc\",\"expires_at\":\"2099-01-01T00:00:00Z\"}".utf8),
               statusCode: 201,
               headers: [:]),
@@ -608,14 +608,14 @@ struct APICallCounterTests {
       let page1URL = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
       let page2URL =
         "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)&page=2"
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(
           data: Data(
             "[{\"id\":1,\"name\":\"r1\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
           statusCode: 200,
           headers: ["Link": "<\(page2URL)>; rel=\"next\""]),
         for: page1URL)
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(
           data: Data(
             "[{\"id\":2,\"name\":\"r2\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
