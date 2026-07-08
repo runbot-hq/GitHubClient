@@ -116,17 +116,26 @@ struct OAuthServiceMakeSignInURLTests {
 @MainActor
 struct OAuthServiceCSRFTests {
 
-    @Test("Missing code fires sign-in failure")
+    @Test("Missing code fires sign-in failure and exhausts the nonce")
     func missingCode() async throws {
-        let svc = makeService()
+        let session = MockURLSession()
+        session.stubbedResult = .success(successPayload())
+        let svc = makeService(session: session)
         let url = try #require(svc.makeSignInURL())
         let state = URLComponents(url: url, resolvingAgainstBaseURL: false)?
             .queryItems?.first(where: { $0.name == "state" })?.value
-        let stream = svc.makeSignInStream()
-        var iter = stream.makeAsyncIterator()
+        // First callback: no code — must fire false and consume the nonce.
+        let stream1 = svc.makeSignInStream()
+        var iter1 = stream1.makeAsyncIterator()
         svc.handleCallback(callbackURL(code: nil, state: state))
-        let result = await iter.next()
-        #expect(result == false)
+        let result1 = await iter1.next()
+        #expect(result1 == false)
+        // Second callback: valid code + same state — nonce must be nil now, so this also fails.
+        let stream2 = svc.makeSignInStream()
+        var iter2 = stream2.makeAsyncIterator()
+        svc.handleCallback(callbackURL(code: "abc", state: state))
+        let result2 = await iter2.next()
+        #expect(result2 == false, "pendingState must be nil after the codeless callback — nonce must not be reusable")
     }
 
     @Test("Missing state fires sign-in failure")

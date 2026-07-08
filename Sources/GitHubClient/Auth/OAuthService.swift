@@ -53,7 +53,7 @@ public final class OAuthService: OAuthServiceProtocol {
     private let tokenStore: any TokenStore
     /// Optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
-    /// The `URLSession` used for token-exchange network calls. Defaults to `.shared`.
+    /// The `URLSessionProtocol` used for token-exchange network calls. Defaults to `URLSession.shared`.
     /// Injected at init time so tests can supply a mock session without swizzling.
     private let session: any URLSessionProtocol
     /// Called after a successful `tokenStore.save()` — e.g. to invalidate a `TokenCache`.
@@ -235,6 +235,7 @@ public final class OAuthService: OAuthServiceProtocol {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let code = comps.queryItems?.first(where: { $0.name == "code" })?.value else {
             logger?.log("OAuthService › handleCallback — missing code param, calling fireSignIn(false)", category: "transport")
+            pendingState = nil
             fireSignIn(false)
             return
         }
