@@ -74,7 +74,7 @@ private func errorPayload(error: String = "bad_verification_code") -> Data {
 
 // MARK: - makeSignInURL
 
-@Suite("OAuthService — makeSignInURL")
+@Suite("OAuthService — makeSignInURL", .serialized)
 @MainActor
 struct OAuthServiceMakeSignInURLTests {
 
@@ -112,7 +112,7 @@ struct OAuthServiceMakeSignInURLTests {
 
 // MARK: - handleCallback CSRF guard
 
-@Suite("OAuthService — handleCallback CSRF guard")
+@Suite("OAuthService — handleCallback CSRF guard", .serialized)
 @MainActor
 struct OAuthServiceCSRFTests {
 
@@ -176,7 +176,7 @@ struct OAuthServiceCSRFTests {
 
 // MARK: - exchangeCode
 
-@Suite("OAuthService — exchangeCode")
+@Suite("OAuthService — exchangeCode", .serialized)
 @MainActor
 struct OAuthServiceExchangeCodeTests {
 
@@ -266,7 +266,7 @@ struct OAuthServiceExchangeCodeTests {
 
 // MARK: - signOut
 
-@Suite("OAuthService — signOut")
+@Suite("OAuthService — signOut", .serialized)
 @MainActor
 struct OAuthServiceSignOutTests {
 
@@ -301,7 +301,7 @@ struct OAuthServiceSignOutTests {
 
 // MARK: - Multicast streams
 
-@Suite("OAuthService — multicast streams")
+@Suite("OAuthService — multicast streams", .serialized)
 @MainActor
 struct OAuthServiceStreamTests {
 
@@ -341,7 +341,7 @@ struct OAuthServiceStreamTests {
 
 // MARK: - Auth state
 
-@Suite("OAuthService — auth state")
+@Suite("OAuthService — auth state", .serialized)
 @MainActor
 struct OAuthServiceAuthStateTests {
 
