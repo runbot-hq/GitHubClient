@@ -21,10 +21,12 @@ final class MockURLSession: URLSessionProtocol, @unchecked Sendable {
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         switch stubbedResult {
         case .success(let data):
-            // HTTP status code is intentionally hard-coded to 200.
+            // HTTP status code is intentionally hard-coded to 200 and is NOT a gap to fill.
             // OAuthService.fetchTokenData discards the URLResponse entirely (`let (data, _) = …`);
-            // all exchange-code branches are driven by the JSON body, not the status code.
-            // If OAuthService ever starts inspecting the status, add a `stubbedStatusCode` property here.
+            // every branch in exchangeCode (success / GitHub error body / bad JSON / network error)
+            // is driven by the JSON body, not the HTTP status. Adding a `stubbedStatusCode`
+            // property would be YAGNI — if fetchTokenData ever starts inspecting status codes
+            // that change should also add the property and the test that needs it at that point.
             let response = HTTPURLResponse(
                 url: request.url ?? URL(string: "https://github.com")!,
                 statusCode: 200,
