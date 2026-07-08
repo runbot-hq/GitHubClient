@@ -16,5 +16,7 @@ public protocol URLSessionProtocol: Sendable {
 
 // MARK: - URLSession + URLSessionProtocol
 
-/// Retroactive conformance of `URLSession` to `URLSessionProtocol`.
+/// Conformance of `URLSession` to `URLSessionProtocol`.
+/// Note: this is NOT a retroactive conformance — both the protocol and the conformance
+/// are declared in this module (`GitHubClient`). `@retroactive` does not apply here.
 extension URLSession: URLSessionProtocol {}
