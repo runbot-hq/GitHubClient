@@ -56,20 +56,10 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
   private static let lock = NSLock()
   nonisolated(unsafe) private static var stubs: [String: Stub] = [:]
   nonisolated(unsafe) private static var errorStubs: [String: ErrorStub] = [:]
-  /// Stubs that survive `reset()`. Use for tests that run concurrently with
-  /// suites that call `reset()` between their own tests (e.g. TransportIncrementGuard).
-  nonisolated(unsafe) private static var permanentStubs: [String: Stub] = [:]
+
 
   static func register(_ stub: Stub, for url: String) {
     lock.withLock { stubs[url] = stub }
-  }
-
-  static func registerPermanent(_ stub: Stub, for url: String) {
-    lock.withLock { permanentStubs[url] = stub }
-  }
-
-  static func unregisterPermanent(for url: String) {
-    lock.withLock { permanentStubs.removeValue(forKey: url) }
   }
 
   static func registerError(_ stub: ErrorStub, for url: String) {
@@ -86,7 +76,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
 
   override class func canInit(with request: URLRequest) -> Bool {
     let key = request.url?.absoluteString ?? ""
-    return lock.withLock { stubs[key] != nil || errorStubs[key] != nil || permanentStubs[key] != nil }
+    return lock.withLock { stubs[key] != nil || errorStubs[key] != nil }
   }
   override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
@@ -99,7 +89,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
       return
     }
 
-    let stub = StubURLProtocol.lock.withLock { StubURLProtocol.stubs[key] ?? StubURLProtocol.permanentStubs[key] }
+    let stub = StubURLProtocol.lock.withLock { StubURLProtocol.stubs[key] }
     guard let stub else {
       client?.urlProtocol(self, didFailWithError: URLError(.fileDoesNotExist))
       return
