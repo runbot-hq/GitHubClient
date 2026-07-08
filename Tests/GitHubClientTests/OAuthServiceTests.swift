@@ -8,6 +8,8 @@ import Foundation
 // MARK: - Helpers
 
 /// `TokenStore` double that can be configured to fail `delete()`, used for best-effort sign-out tests.
+/// Safe as `@unchecked Sendable` because all accesses in this file occur from
+/// `@MainActor` serialized test suites.
 private final class SpyTokenStore: TokenStore, @unchecked Sendable {
     private var stored: String?
     var deleteCallCount = 0
@@ -124,6 +126,8 @@ struct OAuthServiceCSRFTests {
         let url = try #require(svc.makeSignInURL())
         let state = URLComponents(url: url, resolvingAgainstBaseURL: false)?
             .queryItems?.first(where: { $0.name == "state" })?.value
+        // Regression test: the no-code callback must also clear pendingState,
+        // preventing the same nonce from being reused by a later callback.
         // First callback: no code — must fire false and consume the nonce.
         let stream1 = svc.makeSignInStream()
         var iter1 = stream1.makeAsyncIterator()
@@ -166,8 +170,8 @@ struct OAuthServiceCSRFTests {
         session.stubbedResult = .success(successPayload())
         let svc = makeService(session: session)
         let url = try #require(svc.makeSignInURL())
-        let state = URLComponents(url: url, resolvingAgainstBaseURL: false)!
-            .queryItems!.first(where: { $0.name == "state" })!.value!
+        let comps = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let state = try #require(comps.queryItems?.first(where: { $0.name == "state" })?.value)
 
         // First call — legitimate, should succeed
         let stream1 = svc.makeSignInStream()
@@ -379,8 +383,8 @@ struct OAuthServiceAuthStateTests {
     func hasAnyTokenFromEnvVar() throws {
         // ProcessInfo.processInfo.environment is read-only; we exercise the same
         // branch by confirming the property reads the live env at call time.
-        // If GH_TOKEN or GITHUB_TOKEN is already set in this process the branch
-        // is trivially true — skip rather than give a false green.
+        // CI injects GH_TOKEN=test-ci-token, so CI always exercises the true branch.
+        // Local runs without GH_TOKEN/GITHUB_TOKEN exercise the false baseline branch.
         let env = ProcessInfo.processInfo.environment
         if env["GH_TOKEN"] != nil || env["GITHUB_TOKEN"] != nil {
             // Env var already present — hasAnyToken will return true from the env branch.
