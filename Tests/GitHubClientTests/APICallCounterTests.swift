@@ -242,27 +242,26 @@ struct APICallCounterTests {
   // MARK: - Transport-layer counter (TransportIncrementGuard)
   //
   // Verifies that GitHubTransport.interpretHTTPResponse() increments the
-  // injected callCounter on every 2xx response, using StubURLProtocol
-  // (defined in GitHubTransportPaginatedTests.swift) as the network shim.
+  // injected callCounter on every 2xx response, using IsolatedStubURLProtocol
+  // as the network shim. IsolatedStubURLProtocol has its own static registry
+  // completely separate from StubURLProtocol used in GitHubTransportPaginatedTests.
   //
   // URLSession isolation
   // --------------------
   // Each test builds a private URLSession using
-  // URLSessionConfiguration.ephemeral with protocolClasses = [StubURLProtocol]
+  // URLSessionConfiguration.ephemeral with protocolClasses = [IsolatedStubURLProtocol]
   // injected directly. This session is fully self-contained and never touches
   // URLSession.shared or the registerClass/unregisterClass lifecycle owned by
   // GitHubTransportPaginatedTests.
   //
-  // Why no StubURLProtocol.reset() calls?
-  // --------------------------------------
-  // reset() wipes the entire process-global stub registry. The two suites
-  // (GitHubTransportPaginatedTests + TransportIncrementGuard) run concurrently;
-  // calling reset() here raced against in-flight stub lookups in
-  // GitHubTransportPaginatedTests and was the original source of flakiness.
-  // It is safe to omit reset() here because every stub URL in this suite
-  // uses the org "counter-test", which never appears in
-  // GitHubTransportPaginatedTests — so there are zero key collisions and
-  // no isolation benefit from calling reset().
+  // Why IsolatedStubURLProtocol instead of StubURLProtocol?
+  // --------------------------------------------------------
+  // The two suites (GitHubTransportPaginatedTests + TransportIncrementGuard)
+  // run concurrently. GitHubTransportPaginatedTests calls StubURLProtocol.reset()
+  // at the top of every test, wiping the process-global stub registry. Using
+  // IsolatedStubURLProtocol gives TransportIncrementGuard its own registry
+  // that reset() never touches — eliminating the flake entirely.
+  // IsolatedStubURLProtocol.reset() is called in init() before each test.
   //
   // Why does MockAPICallCounter expose reset() if it isn't called here?
   // --------------------------------------------------------------------
@@ -303,13 +302,13 @@ struct APICallCounterTests {
   //
   // How nil is forced for early-exit tests
   // ---------------------------------------
-  // StubURLProtocol.canInit returns false for URLs that have no registered
+  // IsolatedStubURLProtocol.canInit returns false for URLs that have no registered
   // stub or error stub. Unregistered URLs therefore fall through to the
   // underlying URLSession networking, which is non-deterministic in CI.
   // To force a deterministic nil return from apiPaginated, use
-  // StubURLProtocol.registerError(.init(error: URLError(.notConnectedToInternet)))
+  // IsolatedStubURLProtocol.registerError(.init(error: URLError(.notConnectedToInternet)))
   // for any URL that must produce a network-error response. registerError
-  // causes canInit to return true, StubURLProtocol intercepts the request,
+  // causes canInit to return true, IsolatedStubURLProtocol intercepts the request,
   // and startLoading fires client.urlProtocol(didFailWithError:)—
   // guaranteed to map to .networkError inside execute() and nil inside
   // apiPaginated, regardless of real network reachability.
@@ -346,15 +345,21 @@ struct APICallCounterTests {
   @Suite("TransportIncrementGuard", .serialized)
   final class TransportIncrementGuard {
 
+    init() {
+      // Reset the isolated stub registry before each test so stubs from a
+      // prior test cannot intercept requests in the next one.
+      IsolatedStubURLProtocol.reset()
+    }
+
     // Distinct org — never appears in GitHubTransportPaginatedTests.
     private let org = "counter-test"
 
-    // Private URLSession with StubURLProtocol injected via protocolClasses.
+    // Private URLSession with IsolatedStubURLProtocol injected via protocolClasses.
     // Fully self-contained; does not depend on URLProtocol.registerClass /
     // unregisterClass.
     private let stubSession: URLSession = {
       let config = URLSessionConfiguration.ephemeral
-      config.protocolClasses = [StubURLProtocol.self]
+      config.protocolClasses = [IsolatedStubURLProtocol.self]
       return URLSession(configuration: config)
     }()
 
@@ -367,20 +372,20 @@ struct APICallCounterTests {
 
     // Stub a 200 response returning a bare JSON array — required by apiPaginated.
     private func stub200array(_ url: String) {
-      StubURLProtocol.register(.init(data: Data("[]".utf8), statusCode: 200, headers: [:]), for: url)
+      IsolatedStubURLProtocol.register(.init(data: Data("[]".utf8), statusCode: 200, headers: [:]), for: url)
     }
 
     private func stubError(_ url: String, statusCode: Int) {
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Data("{\"message\":\"error\"}".utf8), statusCode: statusCode, headers: [:]),
         for: url)
     }
 
     // Force a deterministic network-error nil from apiPaginated for a given URL.
-    // Uses registerError so canInit returns true and StubURLProtocol intercepts
+    // Uses registerError so canInit returns true and IsolatedStubURLProtocol intercepts
     // the request — never falling through to real networking.
     private func stubNetworkError(_ url: String) {
-      StubURLProtocol.registerError(
+      IsolatedStubURLProtocol.registerError(
         .init(error: URLError(.notConnectedToInternet)),
         for: url)
     }
@@ -418,7 +423,7 @@ struct APICallCounterTests {
     func fetchRunnersIncrementsCounter() async {
       let counter = MockAPICallCounter()
       let url = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Self.oneRunnerJSON, statusCode: 200, headers: [:]), for: url)
       let runners = await fetchRunners(scope: .org(org), transport: makeTransport(counter: counter))
       #expect(await counter.recordedCount == 1)
@@ -455,7 +460,7 @@ struct APICallCounterTests {
       let inProgressURL = "\(base)orgs/\(org)/actions/runs?status=in_progress&per_page=\(ps)"
       let queuedURL = "\(base)orgs/\(org)/actions/runs?status=queued&per_page=\(ps)"
       // in_progress returns one run — allRuns becomes non-empty, counter gets 1 hit.
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Self.oneRunJSON, statusCode: 200, headers: [:]),
         for: inProgressURL)
       // queued returns a network error — apiPaginated returns nil, allRuns
@@ -482,7 +487,7 @@ struct APICallCounterTests {
       stubNetworkError(inProgressURL)
       // queuedURL is registered but structurally unreachable: fetchActiveRuns
       // returns .noToken after the first nil guard fires and never reaches the
-      // second loop iteration. The stub is present only to ensure StubURLProtocol
+      // second loop iteration. The stub is present only to ensure IsolatedStubURLProtocol
       // intercepts the URL if the early-exit logic ever regresses, rather than
       // falling through to real networking.
       stubNetworkError(queuedURL)
@@ -503,7 +508,7 @@ struct APICallCounterTests {
       let counter = MockAPICallCounter()
       let url =
         "\(base)repos/\(org)/myrepo/actions/runs/1/jobs?per_page=\(GitHubConstants.maxPageSize)"
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Self.oneJobJSON, statusCode: 200, headers: [:]), for: url)
       let jobs = await fetchJobs(
         runID: 1, scope: .repo(owner: org, name: "myrepo"),
@@ -555,7 +560,7 @@ struct APICallCounterTests {
       let counter = MockAPICallCounter()
       let endpoint = "orgs/\(org)/actions/runners/registration-token"
       let url = "\(base)\(endpoint)"
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(data: Data("{\"token\":\"abc\",\"expires_at\":\"2099-01-01T00:00:00Z\"}".utf8),
               statusCode: 201,
               headers: [:]),
@@ -608,14 +613,14 @@ struct APICallCounterTests {
       let page1URL = "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)"
       let page2URL =
         "\(base)orgs/\(org)/actions/runners?per_page=\(GitHubConstants.maxPageSize)&page=2"
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(
           data: Data(
             "[{\"id\":1,\"name\":\"r1\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),
           statusCode: 200,
           headers: ["Link": "<\(page2URL)>; rel=\"next\""]),
         for: page1URL)
-      StubURLProtocol.register(
+      IsolatedStubURLProtocol.register(
         .init(
           data: Data(
             "[{\"id\":2,\"name\":\"r2\",\"status\":\"online\",\"busy\":false,\"labels\":[]}]".utf8),

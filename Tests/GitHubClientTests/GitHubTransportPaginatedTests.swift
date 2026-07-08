@@ -57,6 +57,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
   nonisolated(unsafe) private static var stubs: [String: Stub] = [:]
   nonisolated(unsafe) private static var errorStubs: [String: ErrorStub] = [:]
 
+
   static func register(_ stub: Stub, for url: String) {
     lock.withLock { stubs[url] = stub }
   }

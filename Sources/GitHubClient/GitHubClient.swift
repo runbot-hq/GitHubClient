@@ -1,5 +1,6 @@
 // GitHubClient.swift
 // GitHubClient
+import Foundation
 
 // MARK: - GitHubClient
 //
@@ -103,7 +104,7 @@ public final class GitHubClient {
             tokenStore: store,
             scopes: scopes,
             logger: logger,
-            session: .shared,
+            session: URLSession.shared,
             onTokenSaved: { cache.invalidate() },
             onTokenDeleted: { cache.invalidate() }
         )

@@ -53,9 +53,9 @@ public final class OAuthService: OAuthServiceProtocol {
     private let tokenStore: any TokenStore
     /// Optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
-    /// The `URLSession` used for token-exchange network calls. Defaults to `.shared`.
+    /// The `URLSessionProtocol` used for token-exchange network calls. Defaults to `URLSession.shared`.
     /// Injected at init time so tests can supply a mock session without swizzling.
-    private let session: URLSession
+    private let session: any URLSessionProtocol
     /// Called after a successful `tokenStore.save()` — e.g. to invalidate a `TokenCache`.
     private let onTokenSaved: (() -> Void)?
     /// Called on every `signOut()` — e.g. to invalidate a `TokenCache`. Invoked regardless of
@@ -73,8 +73,8 @@ public final class OAuthService: OAuthServiceProtocol {
     ///     scopes array is a programming error, not a runtime condition).
     ///     Use `GitHubScopes` constants for type safety and discoverability.
     ///   - logger: Optional logger for diagnostic messages.
-    ///   - session: The `URLSession` used for token-exchange requests. Defaults to `.shared`.
-    ///     Inject a custom session in tests to avoid real network calls.
+    ///   - session: The `URLSessionProtocol` used for token-exchange requests. Defaults to `URLSession.shared`.
+    ///     Inject a `MockURLSession` in tests to avoid real network calls.
     ///   - onTokenSaved: Optional callback invoked after a successful token save.
     ///     Use this to invalidate an external cache (e.g. `TokenCache.invalidate()`).
     ///     Defaults to `nil` — existing call sites are unaffected.
@@ -87,7 +87,7 @@ public final class OAuthService: OAuthServiceProtocol {
         tokenStore: any TokenStore,
         scopes: [String] = GitHubScopes.default,
         logger: (any GitHubLogger)? = nil,
-        session: URLSession = .shared,
+        session: any URLSessionProtocol = URLSession.shared,
         onTokenSaved: (() -> Void)? = nil,
         onTokenDeleted: (() -> Void)? = nil
     ) {
@@ -235,6 +235,12 @@ public final class OAuthService: OAuthServiceProtocol {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let code = comps.queryItems?.first(where: { $0.name == "code" })?.value else {
             logger?.log("OAuthService › handleCallback — missing code param, calling fireSignIn(false)", category: "transport")
+            // Bug fix (PR #55): clear the nonce even on a codeless callback.
+            // Without this, a codeless redirect (no `code` param) left pendingState
+            // populated, allowing a second callback with the same state to reuse the
+            // nonce — a potential CSRF vector. All other guard branches already nil
+            // pendingState before returning; this aligns the missing-code path.
+            pendingState = nil
             fireSignIn(false)
             return
         }
