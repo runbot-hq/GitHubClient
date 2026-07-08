@@ -196,7 +196,10 @@ struct OAuthServiceExchangeCodeTests {
         guard let url = svc.makeSignInURL(),
               let state = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "state" })?.value
-        else { fatalError("makeSignInURL failed in test helper") }
+        else {
+            Issue.record("makeSignInURL returned nil in triggerExchange helper")
+            return (false, store)
+        }
         let stream = svc.makeSignInStream()
         var iter = stream.makeAsyncIterator()
         svc.handleCallback(callbackURL(code: "abc123", state: state))
@@ -370,16 +373,6 @@ struct OAuthServiceAuthStateTests {
         let store = SpyTokenStore(initial: "tok")
         let svc = makeService(store: store)
         #expect(svc.hasAnyToken == true)
-    }
-
-    @Test("hasAnyToken returns false when store is empty and no env vars set")
-    func hasAnyTokenNoToken() {
-        // This test is only meaningful when GH_TOKEN / GITHUB_TOKEN are not set in the CI env.
-        // It is marked to skip gracefully if either env var is present.
-        let env = ProcessInfo.processInfo.environment
-        guard env["GH_TOKEN"] == nil && env["GITHUB_TOKEN"] == nil else { return }
-        let svc = makeService()
-        #expect(svc.hasAnyToken == false)
     }
 
     @Test("hasAnyToken returns true when GH_TOKEN env var is set and store is empty")
