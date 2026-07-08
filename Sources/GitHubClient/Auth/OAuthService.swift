@@ -235,6 +235,11 @@ public final class OAuthService: OAuthServiceProtocol {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let code = comps.queryItems?.first(where: { $0.name == "code" })?.value else {
             logger?.log("OAuthService › handleCallback — missing code param, calling fireSignIn(false)", category: "transport")
+            // Bug fix (PR #55): clear the nonce even on a codeless callback.
+            // Without this, a codeless redirect (no `code` param) left pendingState
+            // populated, allowing a second callback with the same state to reuse the
+            // nonce — a potential CSRF vector. All other guard branches already nil
+            // pendingState before returning; this aligns the missing-code path.
             pendingState = nil
             fireSignIn(false)
             return
