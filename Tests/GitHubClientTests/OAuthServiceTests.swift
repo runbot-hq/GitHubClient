@@ -346,8 +346,8 @@ struct OAuthServiceStreamTests {
         var iter1 = stream1.makeAsyncIterator()
         var iter2 = stream2.makeAsyncIterator()
         svc.signOut()
-        let r1 = await iter1.next()
-        let r2 = await iter2.next()
+        let r1: Void? = await iter1.next()
+        let r2: Void? = await iter2.next()
         #expect(r1 != nil)
         #expect(r2 != nil)
     }
