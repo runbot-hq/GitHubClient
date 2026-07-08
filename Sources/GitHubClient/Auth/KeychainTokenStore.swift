@@ -11,8 +11,10 @@ import Security
 /// `kSecAttrAccessibleAfterFirstUnlock` on every write, which:
 ///
 /// - Forces all operations through the modern Data Protection Keychain,
-///   avoiding the legacy CSSM-based keychain and its associated
-///   `CSSMERR_DL_DATASTORE_DOESNOT_EXIST` crash on some macOS configurations.
+///   avoiding the legacy CSSM-based keychain entirely. Without this flag,
+///   `SecItemCopyMatching` can trigger a C++ `CSSMERR_DL_DATASTORE_DOESNOT_EXIST`
+///   exception that crashes the process on launch when the legacy keychain DB
+///   file is missing or was created under a different signing identity.
 /// - Makes the token readable after the first unlock post-reboot, covering
 ///   app launch in the background before the user has unlocked the screen.
 ///
@@ -59,6 +61,7 @@ public final class KeychainTokenStore: TokenStore, Sendable {
     ///
     /// `kSecUseDataProtectionKeychain: true` routes all calls through the modern
     /// Data Protection Keychain, bypassing the legacy CSSM-based keychain entirely.
+    /// See the class-level comment for the full crash rationale.
     private func baseQuery() -> [CFString: Any] {
         [
             kSecClass: kSecClassGenericPassword,
@@ -79,6 +82,10 @@ public final class KeychainTokenStore: TokenStore, Sendable {
     /// Failures here degrade gracefully to a signed-out state, which is the safe
     /// fallback. `save()` and `delete()` log their non-success statuses explicitly
     /// because they are called infrequently and failures there are always actionable.
+    ///
+    /// - Note: `SecItemCopyMatching` is OS-serialised by the Security framework.
+    ///   No actor or lock is required around this call. See the class-level thread-safety
+    ///   comment for the full rationale.
     public nonisolated func load() -> String? {
         var query = baseQuery()
         query[kSecReturnData] = true
@@ -104,6 +111,10 @@ public final class KeychainTokenStore: TokenStore, Sendable {
     ///   **not** invalidate any `TokenCache` — it has no reference to one. If you are
     ///   wiring `GitHubClient` standalone, invalidate your `TokenCache` after a successful
     ///   save, otherwise the cache will continue serving the pre-sign-in `nil` until restart.
+    /// - Note: `SecItemUpdate` and `SecItemAdd` are OS-serialised by the Security framework.
+    ///   Concurrent writers are handled by the upsert retry guard above. No additional
+    ///   actor or lock is required. See the class-level thread-safety comment for the full
+    ///   rationale.
     @discardableResult
     public nonisolated func save(_ token: String) -> Bool {
         guard let data = token.data(using: .utf8) else { return false }
@@ -140,6 +151,10 @@ public final class KeychainTokenStore: TokenStore, Sendable {
     }
 
     /// Deletes the token from the keychain. Returns `true` on success or if not found.
+    ///
+    /// - Note: `SecItemDelete` is OS-serialised by the Security framework.
+    ///   No actor or lock is required. See the class-level thread-safety comment for
+    ///   the full rationale.
     @discardableResult
     public nonisolated func delete() -> Bool {
         let status = SecItemDelete(baseQuery() as CFDictionary)
