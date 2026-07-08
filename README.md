@@ -6,7 +6,7 @@ A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls 
 
 **Platform & Stack**
 
-![macOS 15+](https://img.shields.io/badge/macOS-15%2B-black?logo=apple&logoColor=white)
+![macOS 26+](https://img.shields.io/badge/macOS-15%2B-black?logo=apple&logoColor=white)
 ![Swift 6.2](https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white)
 ![SPM](https://img.shields.io/badge/SPM-compatible-F05138?logo=swift&logoColor=white)
 
