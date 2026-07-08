@@ -17,4 +17,4 @@ public protocol URLSessionProtocol: Sendable {
 // MARK: - URLSession + URLSessionProtocol
 
 /// Retroactive conformance of `URLSession` to `URLSessionProtocol`.
-extension URLSession: @retroactive URLSessionProtocol {}
+extension URLSession: URLSessionProtocol {}
