@@ -160,6 +160,11 @@ public struct GitHubTransport: GitHubTransportProtocol {
   /// Records one call-counter hit on every 2xx response — the single point all successful
   /// HTTP round-trips flow through regardless of verb or pagination depth.
   ///
+  /// Also forwards `X-RateLimit-Remaining` to `rateLimiter` on every 2xx response so that
+  /// `RateLimitActor.snapshot()` always carries the latest remaining-count. The header is
+  /// absent on raw/S3 responses; the guard-let falls through and `remaining` is left unchanged
+  /// (still `Int.max` until the first API response that includes the header).
+  ///
   /// Counter exclusions:
   /// - 403/429 responses: handled before the 2xx guard and return `.rateLimited` or
   ///   `.permissionDenied` without calling `callCounter.record()`. Both are excluded
@@ -169,12 +174,12 @@ public struct GitHubTransport: GitHubTransportProtocol {
   ///   the request reached GitHub but was rejected, so counting it would overstate usage.
   ///
   /// Sequential awaits — not a missed `async let` optimisation:
-  /// - `rateLimiter.clearIfNotLimited()` and `callCounter.record()` look like two
-  ///   independent actor hops that could be parallelised with `async let`. They are
-  ///   intentionally sequential: rate-limit state must be cleared *before* the success
-  ///   is recorded so the two pieces of state stay consistent from the caller’s
-  ///   perspective. Both are nanosecond in-memory actor operations; `async let` child-task
-  ///   allocation overhead would exceed any latency gain here.
+  /// - `rateLimiter.clearIfNotLimited()`, `rateLimiter.updateRemaining(_:)`, and
+  ///   `callCounter.record()` are intentionally sequential. Rate-limit state must be
+  ///   cleared and the remaining count updated before the success is recorded so all
+  ///   three pieces of state stay consistent from the caller’s perspective. All three
+  ///   are nanosecond in-memory actor operations; `async let` child-task allocation
+  ///   overhead would exceed any latency gain here.
   ///
   /// 3xx and the (200..<300) guard:
   /// - The status range includes 3xx in principle, but URLSession follows redirects
@@ -207,6 +212,12 @@ public struct GitHubTransport: GitHubTransportProtocol {
     }
     // Sequential awaits are intentional — see doc comment above.
     await rateLimiter.clearIfNotLimited()
+    // Forward X-RateLimit-Remaining so RateLimitActor.snapshot() carries a live count.
+    // The header is absent on raw/S3 redirect responses — guard-let falls through safely.
+    if let raw = http.value(forHTTPHeaderField: "X-RateLimit-Remaining"),
+       let value = Int(raw) {
+        await rateLimiter.updateRemaining(value)
+    }
     await callCounter.record()
     let linkHeader = http.value(forHTTPHeaderField: "Link")
     return .success(data, statusCode: http.statusCode, linkHeader: linkHeader)
