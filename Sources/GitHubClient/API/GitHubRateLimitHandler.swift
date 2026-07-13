@@ -10,22 +10,12 @@ public struct RateLimitSnapshot: Sendable, Equatable, Hashable {
     public let isLimited: Bool
     /// The moment at which the rate-limit window expires, or `nil` if unknown.
     public let resetDate: Date?
-    /// The number of API calls remaining in the current rate-limit window.
-    ///
-    /// Sourced from the `X-RateLimit-Remaining` response header on every successful (2xx)
-    /// API call. `Int.max` until the first 2xx response is received — the sentinel value
-    /// that makes the headroom-cooldown branch in `PollIntervalStrategy` a no-op until a
-    /// real value is available. See `PollIntervalStrategy.rateLimitUnavailable`.
-    public let remaining: Int
+    /// Calls remaining in the current rate-limit window, sourced from the
+    /// `X-RateLimit-Remaining` response header. `nil` when the header is absent
+    /// (e.g. before the first successful response or on non-rate-limited errors).
+    public let remaining: Int?
     /// Creates a new snapshot.
-    ///
-    /// - Parameters:
-    ///   - isLimited: Whether the client is currently rate-limited.
-    ///   - resetDate: The reset window expiry, or `nil` if unknown.
-    ///   - remaining: Calls remaining in the current window. Defaults to `Int.max`
-    ///     (unavailable sentinel) so all existing `RateLimitSnapshot(isLimited:resetDate:)`
-    ///     call sites continue to compile without change.
-    public init(isLimited: Bool, resetDate: Date?, remaining: Int = Int.max) {
+    public init(isLimited: Bool, resetDate: Date?, remaining: Int? = nil) {
         self.isLimited = isLimited
         self.resetDate = resetDate
         self.remaining = remaining
@@ -48,13 +38,10 @@ public protocol RateLimitActorProtocol: Actor {
     /// should use this method rather than `clear()` to avoid racing with a
     /// concurrent `set(resetAt:)` call that armed the flag after the check.
     func clearIfNotLimited()
-    /// Updates the `remaining` call count from the `X-RateLimit-Remaining` response header.
-    ///
-    /// Called by the transport layer on every successful (2xx) API response. Pass `Int.max`
-    /// to reset to the unavailable sentinel (e.g. when the header is absent).
-    func updateRemaining(_ value: Int)
     /// Returns `isLimited`, `resetDate`, and `remaining` in a single actor hop.
     func snapshot() -> RateLimitSnapshot
+    /// Records the latest `X-RateLimit-Remaining` value from a successful response.
+    func updateRemaining(_ remaining: Int)
 }
 
 // MARK: - RateLimitActor
@@ -65,13 +52,9 @@ public actor RateLimitActor: RateLimitActorProtocol {
     public private(set) var isLimited = false
     /// The moment at which the rate-limit window expires. `nil` when unknown.
     public private(set) var resetDate: Date?
-    /// Calls remaining in the current rate-limit window.
-    ///
-    /// Updated on every successful (2xx) API response via `updateRemaining(_:)`.
-    /// Starts at `Int.max` (unavailable sentinel) and remains there until the first
-    /// confirmed value arrives. The sentinel disables the headroom-cooldown branch in
-    /// `PollIntervalStrategy` until a real value is known.
-    public private(set) var remaining: Int = Int.max
+    /// Calls remaining in the current rate-limit window. `nil` until the first
+    /// successful response that carries the `X-RateLimit-Remaining` header.
+    public private(set) var remaining: Int?
     /// The structured `Task` that fires when the current rate-limit window expires.
     /// Cancelled and replaced on every `set(resetAt:)` call to ensure only one reset is pending.
     private var resetTask: Task<Void, Never>?
@@ -124,11 +107,9 @@ public actor RateLimitActor: RateLimitActorProtocol {
         clear()
     }
 
-    /// Updates the remaining call count from the `X-RateLimit-Remaining` response header.
-    ///
-    /// Pass `Int.max` to reset to the unavailable sentinel (e.g. when the header is absent).
-    public func updateRemaining(_ value: Int) {
-        remaining = value
+    /// Records the latest `X-RateLimit-Remaining` value from a successful response.
+    public func updateRemaining(_ newRemaining: Int) {
+        remaining = newRemaining
     }
 
     /// Returns `isLimited`, `resetDate`, and `remaining` in a single actor hop.

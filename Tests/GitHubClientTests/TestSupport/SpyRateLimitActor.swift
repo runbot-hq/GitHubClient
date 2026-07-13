@@ -80,8 +80,14 @@ actor SpyRateLimitActor: RateLimitActorProtocol {
         clear()
     }
 
+    private(set) var remaining: Int?
+
+    func updateRemaining(_ newRemaining: Int) {
+        remaining = newRemaining
+    }
+
     func snapshot() -> RateLimitSnapshot {
-        RateLimitSnapshot(isLimited: isLimited, resetDate: resetDate)
+        RateLimitSnapshot(isLimited: isLimited, resetDate: resetDate, remaining: remaining)
     }
 
     /// Resets all spy observation and stub state to their default configurations.
