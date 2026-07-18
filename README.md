@@ -1,5 +1,3 @@
-<img width="240" alt="img" src="icon2_masked.png">
-
 # GitHubClient
 
 A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls over `URLSession`, zero external dependencies, Swift 6.2 strict concurrency throughout.
