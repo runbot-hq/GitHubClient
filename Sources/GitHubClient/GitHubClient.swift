@@ -65,6 +65,10 @@ public final class GitHubClient {
     /// The transport — handles all authenticated GitHub API requests.
     public let transport: any GitHubTransportProtocol
 
+    /// The token cache — held so `warmUp()` and `hasAnyToken` can delegate to it.
+    /// `nil` when the test init is used (no real cache in that path).
+    private let tokenCache: TokenCache?
+
     // MARK: - Production init
 
     /// Creates a fully wired `GitHubClient` backed by the macOS Keychain.
@@ -117,6 +121,7 @@ public final class GitHubClient {
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
+        self.tokenCache = cache
     }
 
     // MARK: - Test init
@@ -143,5 +148,44 @@ public final class GitHubClient {
     ) {
         self.oauthService = oauthService
         self.transport = transport
+        self.tokenCache = nil
+    }
+
+    // MARK: - Token warm-up
+
+    /// Pre-populates the token cache by sourcing the user's login shell environment.
+    ///
+    /// Call this once during app startup **before** the first poll fires (e.g. as the
+    /// first `await` in `AppState.start()`). This bridges the macOS GUI app limitation
+    /// where `launchd`-spawned processes do not inherit the user's shell environment
+    /// and `GH_TOKEN` / `GITHUB_TOKEN` are therefore absent from `ProcessInfo`.
+    ///
+    /// This is a no-op when:
+    /// - The cache is already populated (Keychain OAuth token present)
+    /// - The app was launched from a terminal (token already in `ProcessInfo`)
+    /// - The test init was used (no `TokenCache` in that path)
+    ///
+    /// See `TokenCache.warmUp()` for full implementation details.
+    public func warmUp() async {
+        await tokenCache?.warmUp()
+    }
+
+    // MARK: - Token availability
+
+    /// `true` when any usable GitHub token is available — OAuth token,
+    /// `GH_TOKEN`, or `GITHUB_TOKEN` environment variable.
+    ///
+    /// Unlike `OAuthService.hasAnyToken`, this check goes through `TokenCache`
+    /// and therefore reflects tokens recovered via `warmUp()` (login shell
+    /// resolution). Call this after `warmUp()` has completed for accurate results
+    /// in GUI app launch contexts where `ProcessInfo` does not contain the token.
+    ///
+    /// Falls back to `oauthService.hasAnyToken` when the test init is used
+    /// (no `TokenCache` in that path).
+    public var hasAnyToken: Bool {
+        if let cache = tokenCache {
+            return cache.token() != nil
+        }
+        return oauthService.hasAnyToken
     }
 }
