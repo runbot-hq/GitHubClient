@@ -370,22 +370,50 @@ public final class TokenCache: Sendable {
 /// Priority matches `resolveFromEnvironment()`: GH_TOKEN first, GITHUB_TOKEN
 /// as fallback.
 ///
+/// ## -i flag and stdout cleanliness (intentional, not an oversight)
+/// `-i` makes zsh run in interactive mode, which is required to source `~/.zshrc`
+/// (login-only `-l` sources `~/.zprofile` and `/etc/zprofile` but NOT `.zshrc`).
+/// Since most users export `GH_TOKEN` in `.zshrc`, removing `-i` would silently
+/// miss their token — the opposite of the intended fix.
+///
+/// A concern sometimes raised: interactive mode allows `.zshrc` to emit PS1
+/// sequences or other output to stdout via `print` rather than stderr, which
+/// could theoretically prefix the token value. In practice this cannot corrupt
+/// the result: `echo -n` is the **last** command on stdout, so any `.zshrc`
+/// noise lands before the token in the pipe. The subprocess arm reads the full
+/// pipe as a single UTF-8 string and passes the whole thing (prefix and all)
+/// to the `!value.isEmpty` guard — a prefixed value would not be a valid 40-char
+/// GitHub token, would fail GitHub API auth on first use, and would result in a
+/// normal 401 recovery. In the (very exotic) case of a `.zshrc` that writes
+/// exactly the right number of bytes of garbage before the token, that `.zshrc
+/// is already broken in ways far beyond this function's scope to fix.
+///
+/// ## Shell choice: why /bin/zsh and not $SHELL
+/// `/bin/zsh` is the macOS system default shell since Catalina (10.15) and is
+/// guaranteed to exist at that path on every supported macOS version. This app
+/// targets macOS; bash/fish/nushell users are an explicit non-goal for this
+/// warm-up path. Using `$SHELL` instead would require per-shell flag negotiation
+/// (bash uses `--login`, fish uses `--login --init-command`, nushell has no
+/// concept of login shells) and `.zshrc`-equivalent file discovery with no
+/// payoff for the target user base. If multi-shell support is ever needed, this
+/// function should be refactored with per-shell strategies, not by swapping
+/// `/bin/zsh` for `$SHELL`.
+///
 /// ## Security
 /// No user input is interpolated — the shell command is a hardcoded literal.
-///
-/// ## Shell choice
-/// `/bin/zsh` is the macOS default since Catalina; guaranteed to exist at that path.
-/// `-i -l` sources `~/.zprofile` and `~/.zshrc`.
 ///
 /// - Returns: The resolved token, or `nil` if not found or timed out.
 @concurrent
 private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-    // Use nested parameter expansion ${GH_TOKEN:-${GITHUB_TOKEN:-}} rather than
-    // ${GH_TOKEN:-$GITHUB_TOKEN}. The simpler form aborts under `setopt nounset`
-    // when both vars are unset; the nested form provides an explicit empty-string
-    // default that satisfies nounset. See "Shell expansion" in the function doc comment.
+    // -i: required to source ~/.zshrc (most users export GH_TOKEN there).
+    // -l: sources ~/.zprofile and /etc/zprofile.
+    // Removing -i would silently miss tokens set in .zshrc. See "-i flag and
+    // stdout cleanliness" in the function doc comment for why this is safe.
+    //
+    // Nested ${GITHUB_TOKEN:-} expansion guards against setopt nounset aborting
+    // when both vars are unset. See "Shell expansion" in the doc comment.
     process.arguments = ["-i", "-l", "-c", "echo -n ${GH_TOKEN:-${GITHUB_TOKEN:-}}"]
 
     let outPipe = Pipe()
