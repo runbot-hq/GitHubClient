@@ -45,6 +45,17 @@ private enum ShellResolutionOutcome {
     /// `GITHUB_TOKEN` export. The shell path is NOT latched — `token()` will
     /// re-enter it on the next call, allowing the user to add an export
     /// without relaunching the app.
+    ///
+    /// ## Why not collapse this into `.notAttempted`
+    /// Observable behaviour is identical today: both cases allow re-entry.
+    /// The distinction is preserved for two reasons:
+    /// 1. Diagnostics — logging and future telemetry can distinguish "never
+    ///    tried" from "tried and found nothing", which helps triage user
+    ///    reports without needing a separate flag.
+    /// 2. Future policy — a `.notFound`-specific cooldown (e.g. re-enter at
+    ///    most once per 60 s rather than on every poll cycle) could be added
+    ///    here without a schema change. Collapsing to `.notAttempted` would
+    ///    require a new case or a separate field at that point.
     case notFound
     /// The shell timed out, failed to launch, or was blocked by the App Sandbox.
     /// The shell path IS latched — `token()` short-circuits before step 4 on
@@ -184,8 +195,14 @@ public final class TokenCache: Sendable {
             state.withLock { if $0.token == nil { $0.token = value } }
             return value
         case .notFound:
-            // Shell ran fine but no token was exported. Do NOT latch — allow
-            // re-entry on the next call. See ShellResolutionOutcome.notFound.
+            // Shell ran fine but no token was exported. Record the outcome but
+            // do NOT write to state.token — `nil` in the token field means
+            // "not yet populated" and is the signal for all callers to continue
+            // down the resolution chain. There is no way to cache a nil result
+            // to skip re-entry; the shellOutcome field is the lightweight signal
+            // that the shell was already tried. This is intentionally asymmetric
+            // with the .found case, which does write state.token.
+            // Do NOT latch — allow re-entry. See ShellResolutionOutcome.notFound.
             state.withLock { $0.shellOutcome = .notFound }
             return nil
         case .failed:
@@ -241,6 +258,14 @@ public final class TokenCache: Sendable {
     /// resolve-and-cache pattern; the write is the meaningful side-effect,
     /// not the return value.
     ///
+    /// ## Why Keychain results are cached in memory
+    /// `tokenStore.load()` is a synchronous Keychain read — a kernel call with
+    /// non-trivial overhead on every invocation. `RunnerPoller` calls `token()`
+    /// on every poll cycle (~30 s). Without the in-memory cache, every poll
+    /// cycle would pay a Keychain round-trip even after the token is known.
+    /// The cache is cleared by `invalidate()` on sign-out, so it never holds
+    /// a stale token across a credential change.
+    ///
     /// ## Thundering-herd window (intentional)
     /// Two concurrent callers that both miss the in-memory cache may both call
     /// `tokenStore.load()`. The `if $0.token == nil` Mutex guard prevents a
@@ -269,6 +294,15 @@ public final class TokenCache: Sendable {
     ///
     /// ## Cache-write side effect (not a pure read)
     /// Same resolve-and-cache pattern as `resolveFromStore()`.
+    ///
+    /// ## Why env tokens are cached in memory
+    /// Process environment variables are immutable for the lifetime of a process —
+    /// `setenv` mutations are possible but no caller of `TokenCache` does this.
+    /// Caching the result avoids a `ProcessInfo.processInfo.environment` dictionary
+    /// lookup (a lock-guarded NSDictionary copy under the hood) on every `token()`
+    /// call, and keeps the resolution behaviour consistent with the store path.
+    /// If the env ever changes mid-process (not expected), `invalidate()` flushes
+    /// the cache and the next `token()` call re-reads from the environment.
     private func resolveFromEnvironment() -> String? {
         for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
             if let envValue = ProcessInfo.processInfo.environment[key], !envValue.isEmpty {
@@ -319,8 +353,13 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 ///
 /// ## @concurrent — blocking I/O off the main actor
 /// `waitUntilExit()` blocks a thread. `@concurrent` keeps that off any
-/// actor's serial executor. Free function (not a method) because `@concurrent`
-/// cannot be applied to instance methods on a `Sendable` class.
+/// actor's serial executor. Free function rather than a `nonisolated` instance
+/// method because `@concurrent` requires a non-isolated declaration context —
+/// which a `nonisolated` method on a `final class` does technically satisfy —
+/// but a free function makes the isolation boundary explicit at the call site
+/// and avoids capturing `self` across a concurrency boundary, keeping the
+/// `Sendable` conformance of `TokenCache` clean without auditing which
+/// `self` members are accessed.
 ///
 /// ## -i flag (intentional)
 /// Sources `~/.zshrc`, where most users export `GH_TOKEN`. Without it,
@@ -457,6 +496,9 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> ShellTokenRes
             // is already the null device, but redirecting explicitly prevents a
             // hang if this path is ever reached from a terminal-context caller
             // where stdin would otherwise be the user's terminal.
+            // /dev/null is accessible inside the App Sandbox, so this is safe
+            // regardless of sandbox state (though Process.run() itself would
+            // throw before this matters in a sandboxed binary).
             process.standardInput = FileHandle.nullDevice
             // Store the process in the box before calling run() so the timeout arm
             // can always reach it via terminate(). The `launched` sentinel below
@@ -503,6 +545,12 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> ShellTokenRes
             // exited process checks isRunning internally and returns immediately —
             // it is not a hang risk even when called after the child is gone.
             process.waitUntilExit()
+            // terminationStatus is intentionally not checked. The shell's exit code is
+            // irrelevant to token resolution — what matters is whether the sentinel line
+            // appeared in stdout. A shell that exits non-zero (e.g. a .zshrc hook that
+            // calls `exit 1`) but printed the sentinel line before exiting still gives
+            // us a valid token. Checking the exit code and discarding a found token on
+            // non-zero status would silently break resolution for those users.
             guard let raw = String(data: data, encoding: .utf8) else { return .failed }
             let value = raw
                 .components(separatedBy: .newlines)
@@ -510,7 +558,10 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> ShellTokenRes
                     guard line.hasPrefix(shellTokenSentinel) else { return nil }
                     return String(line.dropFirst(shellTokenSentinel.count))
                 }
-                .first ?? ""
+                .first ?? ""  // .first: if .zshrc somehow produces multiple sentinel-prefixed
+                              // lines (not possible with the single printf command, but
+                              // defensive), take the first. An empty result is handled
+                              // below as .notFound.
             // Trim whitespace and carriage returns. Some terminal emulators write
             // CRLF line endings; a trailing \r would produce Bearer <token>\r and
             // every API call would return 401 silently.
@@ -559,11 +610,16 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> ShellTokenRes
         // discarded — fail-safe over fail-open. See doc comment for full rationale.
         // The caller (token()) sets shellOutcome = .failed on a .failed result.
         //
-        // ShellTokenResult?? → ShellTokenResult: the ?? .failed collapses the outer
-        // Optional (group.next() returns nil only when all tasks have already been
-        // collected). That path is structurally unreachable here — two tasks were
-        // added and only one group.next() call is made — so ?? .failed exists solely
-        // to satisfy the type system, not as a real fallback.
+        // ShellTokenResult?? → ShellTokenResult: group.next() returns nil only when
+        // all tasks have already been collected, which is structurally unreachable
+        // here — two tasks were added and only one group.next() call is made.
+        // ?? .failed rather than group.next()! for two reasons:
+        // 1. Force-unwrap would crash if the structural assumption were ever violated
+        //    (e.g. a future refactor that removes one of the addTask calls). .failed
+        //    is the safe, correct fallback — it treats an unexpected nil as a failure,
+        //    which triggers the .failed latch and prevents silent re-spawns.
+        // 2. It satisfies the type system without a fatalError that would show up in
+        //    crash logs as a false positive on a path that should never be reached.
         let result: ShellTokenResult = await group.next() ?? .failed
         group.cancelAll()
         return result
