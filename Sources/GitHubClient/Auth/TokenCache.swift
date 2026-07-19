@@ -15,9 +15,9 @@ import Synchronization
 //   3. ProcessInfo env  (sync, covers terminal / CI launches)
 //   4. loginShellToken  (async subprocess — cold Finder launch only)
 //
-// The shell is spawned at most once per cache lifetime. After a successful
-// resolution the result is written to the in-memory cache and all
-// subsequent calls return immediately from step 1.
+// The shell is spawned at most once per cache lifetime (cleared by invalidate()).
+// After a successful resolution the result is written to the in-memory cache
+// and all subsequent calls return immediately from step 1.
 
 /// A token cache that resolves from an injected `TokenStore` and/or environment variables,
 /// falling back to a login shell subprocess on a cold GUI-app launch.
@@ -52,7 +52,9 @@ public final class TokenCache: Sendable {
     ///
     /// The shell (step 4) is spawned at most once per cache lifetime. On success
     /// the result is written to the in-memory cache so every subsequent call
-    /// returns immediately from step 1.
+    /// returns immediately from step 1. After `invalidate()` the cache is cleared
+    /// and the next `token()` call re-runs the full chain, including step 4 if
+    /// needed (e.g. after sign-out on a Finder launch with no env token).
     ///
     /// For GUI app launches from Finder/Dock/login items, `launchd` does not source
     /// `~/.zprofile` or `~/.zshrc`, so `ProcessInfo` does not contain `GH_TOKEN`.
@@ -82,8 +84,14 @@ public final class TokenCache: Sendable {
     }
 
     /// Clears the in-memory token cache.
+    ///
     /// Call after saving a new token or after sign-out so the next `token()`
     /// call re-resolves from the store or shell.
+    ///
+    /// After `invalidate()`, the shell (step 4) may be re-spawned on the next
+    /// `token()` call if all faster paths miss — for example, after OAuth sign-out
+    /// on a Finder launch where no env token is present. This is correct and
+    /// intentional: the shell is the only remaining resolution source in that case.
     public func invalidate() {
         cache.withLock { $0 = nil }
         logger?.log("TokenCache › invalidate — cache cleared", category: "transport")
@@ -188,6 +196,18 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// emitting a false "timed out" log on every successful resolution.
 /// `do { try … } catch { return nil }` exits cleanly on cancellation.
 ///
+/// ## Thundering-herd on concurrent callers
+/// `loginShellToken` has no guard against concurrent callers — two `token()`
+/// calls that simultaneously miss all fast paths will each spawn a separate
+/// `/bin/zsh` process. Both will ultimately write the same value to the cache
+/// (the `if $0 == nil` Mutex guard in `token()` prevents a double-write), so
+/// correctness is preserved. In practice this cannot happen: `RunnerPoller` is
+/// a single serial actor and is the only caller of `token()` in the app, so
+/// at most one cold-launch shell is ever spawned. A future public API consumer
+/// that calls `token()` concurrently from multiple tasks should be aware of
+/// this. Tracked as a known gap in issue #68; the follow-up async refactor
+/// will make this moot.
+///
 /// - Returns: The resolved token, or `nil` if not found or timed out.
 @concurrent
 private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
@@ -253,9 +273,13 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
 ///
 /// `Process` is not `Sendable` so it cannot be captured directly across task
 /// boundaries. This box is `@unchecked Sendable` because the access pattern is
-/// safe by construction: written once (subprocess arm, before waitUntilExit),
-/// read at most once (timeout arm, after 10s sleep). The narrow TOCTOU window
-/// where both arms overlap is accepted — see loginShellToken doc comment.
+/// safe by construction: written once by the subprocess arm (after `process.run()`
+/// succeeds, before `waitUntilExit()` blocks), read at most once by the timeout
+/// arm (after 10 seconds of sleep). The narrow TOCTOU window — where the timeout
+/// fires before `box.process` is written, causing `nil?.terminate()` to no-op and
+/// the shell to exit naturally — is accepted: `zsh -c` exits in under a second
+/// once its command completes, so the orphan window is bounded and harmless.
+/// The entire box disappears in the follow-up async refactor tracked in issue #68.
 private final class UncheckedProcessBox: @unchecked Sendable {
     /// The spawned `/bin/zsh` process, or `nil` if not yet started or launch failed.
     var process: Process?
