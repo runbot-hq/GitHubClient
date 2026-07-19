@@ -191,14 +191,20 @@ public final class TokenCache: Sendable {
             return true
         }
         guard shouldProceed else {
-            // Distinguish between two states to avoid a misleading "in flight" log
-            // when the subprocess has already completed:
-            // - cache still nil → subprocess ran and found no token (timeout or absent)
-            // - cache populated → concurrent warmUp() won the race and we arrived late
+            // Distinguish between two states to produce an accurate log:
+            // - cache still nil → subprocess ran and found no token (timeout or absent),
+            //   OR subprocess is still in-flight (concurrent late-arrival before the
+            //   winner's await loginShellToken resolves). Both cases are benign —
+            //   the in-flight winner will write to cache if it succeeds.
+            // - cache populated → winner already finished and wrote the token.
+            // NOTE: the "still nil" log fires for both the "ran + no token" and the
+            // "still running" cases. This is an accepted cosmetic inaccuracy — the
+            // alternative would require a separate "in-flight" sentinel, adding
+            // complexity for no correctness benefit.
             if cache.withLock({ $0 }) == nil {
-                logger?.log("TokenCache › warmUp — login shell already ran but found no token; not retrying (one-shot latch)", category: "transport")
+                logger?.log("TokenCache › warmUp — login shell already ran or is in flight; cache still nil", category: "transport")
             } else {
-                logger?.log("TokenCache › warmUp — login shell already in flight or completed; cache now populated", category: "transport")
+                logger?.log("TokenCache › warmUp — login shell completed; cache now populated", category: "transport")
             }
             return
         }
@@ -353,10 +359,16 @@ public final class TokenCache: Sendable {
 /// issue, accepted as a trade-off against adding a result-coordination lock.
 ///
 /// ## Shell expansion
-/// `${GH_TOKEN:-$GITHUB_TOKEN}` recovers `GH_TOKEN`, falling back to
-/// `GITHUB_TOKEN` when `GH_TOKEN` is unset or empty. This matches the priority
-/// order of `resolveFromEnvironment()`. Only one value is returned per run —
-/// the shell expansion selects one, not both.
+/// `${GH_TOKEN:-${GITHUB_TOKEN:-}}` recovers `GH_TOKEN`, falling back to
+/// `GITHUB_TOKEN`, falling back to an empty string. The nested `:-` form is
+/// used (not the simpler `${GH_TOKEN:-$GITHUB_TOKEN}`) to be safe under
+/// `setopt nounset` / `set -u`: without the explicit empty default, an unset
+/// `GITHUB_TOKEN` would cause zsh to abort with "GITHUB_TOKEN: parameter not
+/// set", writing nothing to stdout and leaving warmUp() silently unauthenticated.
+/// The explicit trailing `:-` provides an empty-string default that satisfies
+/// nounset; `!value.isEmpty` in the subprocess arm then correctly rejects it.
+/// Priority matches `resolveFromEnvironment()`: GH_TOKEN first, GITHUB_TOKEN
+/// as fallback.
 ///
 /// ## Security
 /// No user input is interpolated — the shell command is a hardcoded literal.
@@ -370,7 +382,11 @@ public final class TokenCache: Sendable {
 private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-    process.arguments = ["-i", "-l", "-c", "echo -n ${GH_TOKEN:-$GITHUB_TOKEN}"]
+    // Use nested parameter expansion ${GH_TOKEN:-${GITHUB_TOKEN:-}} rather than
+    // ${GH_TOKEN:-$GITHUB_TOKEN}. The simpler form aborts under `setopt nounset`
+    // when both vars are unset; the nested form provides an explicit empty-string
+    // default that satisfies nounset. See "Shell expansion" in the function doc comment.
+    process.arguments = ["-i", "-l", "-c", "echo -n ${GH_TOKEN:-${GITHUB_TOKEN:-}}"]
 
     let outPipe = Pipe()
     process.standardOutput = outPipe
