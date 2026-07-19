@@ -239,6 +239,8 @@ public final class TokenCache: Sendable {
 
     // MARK: - Private helpers
 
+    /// Returns the token from the in-memory cache, or `nil` if not yet populated.
+    /// Fast path — no I/O, no subprocess.
     private func resolveFromCache() -> String? {
         let cached = cache.withLock { $0 }
         #if DEBUG
@@ -513,11 +515,10 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             #endif
             return value
         }
-        // Timeout arm — terminate the shell if it hasn't finished in 10 s.
-        // process is captured from the subprocess arm via the task group's shared
-        // context. terminate() on an already-exited process is a no-op on Darwin.
+        // Timeout arm — return nil after 10 s; group.cancelAll() below cancels
+        // the subprocess arm (structured concurrency — no direct process reference needed).
         // See "Timeout arm cosmetic log edge case" in the doc comment.
-        group.addTask { [/* process captured below via group's shared state — see note */] in
+        group.addTask {
             try? await Task.sleep(for: .seconds(10))
             logger?.log("TokenCache › warmUp: login shell timed out after 10 s", category: "transport")
             return nil
