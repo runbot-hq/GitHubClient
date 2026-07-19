@@ -61,8 +61,9 @@ public final class TokenCache: Sendable {
     ///
     /// Call this once during app startup (e.g. from `AppState.start()`) **before**
     /// the first poll fires. This is a no-op if the cache is already populated —
-    /// for example, when a Keychain OAuth token exists or when the app is launched
-    /// from a terminal that already has `GH_TOKEN` set.
+    /// for example, when a Keychain OAuth token exists (even if not yet read into
+    /// the in-memory cache) or when the app is launched from a terminal that already
+    /// has `GH_TOKEN` set.
     ///
     /// ## Why this is needed
     /// macOS GUI apps launched from Finder, the Dock, or as a login item are spawned
@@ -80,25 +81,50 @@ public final class TokenCache: Sendable {
     /// that entirely: by the time `token()` is first called from a poll, the cache
     /// is already populated.
     ///
+    /// ## Fast-path priority (no subprocess if any token source resolves)
+    /// warmUp() checks sources in priority order before spawning a shell:
+    /// 1. In-memory cache — set by a prior `token()` call or prior `warmUp()`
+    /// 2. `TokenStore` (Keychain) — checked explicitly so an OAuth-signed-in user
+    ///    never hits the subprocess even on a fresh launch where `token()` hasn't
+    ///    run yet. Without this check the Keychain token would be absent from the
+    ///    in-memory cache at warmUp() time, the subprocess would run, and an env
+    ///    token could beat the Keychain token into cache, inverting priority.
+    /// 3. Process environment (`ProcessInfo`) — covers terminal launches and CI.
+    /// Only if all three return nil does the shell subprocess run.
+    ///
     /// ## Performance
-    /// The subprocess runs on a detached background thread via `Task.detached` and
-    /// takes ~50–100 ms on first call. The result is cached on first resolution;
-    /// subsequent `warmUp()` calls return immediately without spawning a subprocess.
+    /// The subprocess runs on a `Task.detached` background thread and takes
+    /// ~50–100 ms on first call. A single `/bin/zsh -i -l` invocation recovers
+    /// both `GH_TOKEN` and `GITHUB_TOKEN` (whichever is set) in one shell run.
+    /// The result is cached on first resolution; subsequent `warmUp()` calls
+    /// return immediately without spawning a subprocess.
     public func warmUp() async {
-        // Fast path: cache already populated (Keychain OAuth, terminal launch, prior warmUp).
+        // Fast-path 1: in-memory cache already populated.
         guard cache.withLock({ $0 }) == nil else {
             logger?.log("TokenCache › warmUp — cache already populated, skipping login shell", category: "transport")
             return
         }
-        // Also skip if ProcessInfo already has the token (e.g. CI or terminal launch
-        // where the process env is populated). resolveFromEnvironment() will cache it.
+        // Fast-path 2: Keychain OAuth token exists (may not be in cache yet on a
+        // fresh launch before token() has been called). Checking here prevents the
+        // subprocess from running and prevents an env token from beating a valid
+        // Keychain token into cache. resolveFromStore() writes to cache on success.
+        if resolveFromStore() != nil {
+            logger?.log("TokenCache › warmUp — resolved from token store, skipping login shell", category: "transport")
+            return
+        }
+        // Fast-path 3: process env already has the token (terminal launch or CI).
+        // resolveFromEnvironment() writes to cache on success.
         if resolveFromEnvironment() != nil {
             logger?.log("TokenCache › warmUp — resolved from process env, skipping login shell", category: "transport")
             return
         }
-        logger?.log("TokenCache › warmUp — process env empty, attempting login shell resolution", category: "transport")
-        await Task.detached(priority: .userInitiated) { [weak self] in
-            self?.resolveFromLoginShell()
+        logger?.log("TokenCache › warmUp — all fast-paths missed, attempting login shell resolution", category: "transport")
+        // Strong capture: TokenCache is held for the app lifetime by GitHubClient.
+        // [weak self] would add a silent no-op failure mode (self nil → subprocess
+        // never runs → cache stays empty with no log or error). Strong capture is
+        // safe because TokenCache.deinit is unreachable during normal app operation.
+        await Task.detached(priority: .userInitiated) { [self] in
+            resolveFromLoginShell()
         }.value
     }
 
@@ -134,6 +160,7 @@ public final class TokenCache: Sendable {
     ///   inside the `Mutex` lock ensures only one write lands and both callers return
     ///   the same token. The double Keychain read is idempotent and cheaper than
     ///   adding a separate initialisation lock.
+    @discardableResult
     private func resolveFromStore() -> String? {
         guard let token = tokenStore.load() else {
             #if DEBUG
@@ -195,18 +222,25 @@ public final class TokenCache: Sendable {
         return nil
     }
 
-    /// Spawns an interactive login shell to source the user's zsh profile files
-    /// and read `GH_TOKEN` or `GITHUB_TOKEN`. Called only from `warmUp()` on a
-    /// background thread — never called from `token()`.
+    /// Spawns a single interactive login shell to recover the first available GitHub
+    /// token from `GH_TOKEN` or `GITHUB_TOKEN`. Called only from `warmUp()` on a
+    /// `Task.detached` background thread — never from `token()`.
+    ///
+    /// ## Why a single subprocess (not one per key)
+    /// The previous design iterated ["GH_TOKEN", "GITHUB_TOKEN"] and spawned a
+    /// separate `/bin/zsh -i -l` for each key, sourcing the full zsh startup
+    /// sequence twice (~200 ms total) when `GH_TOKEN` was absent. This method
+    /// uses `${GH_TOKEN:-$GITHUB_TOKEN}` to recover the first non-empty value in
+    /// one shell invocation (~50–100 ms), regardless of which variable is set.
     ///
     /// ## Why a login shell is needed
     /// macOS GUI apps are spawned by `launchd`, which does not source `~/.zprofile`
-    /// or `~/.zshrc`. Running `/bin/zsh -i -l -c "echo -n $KEY"` sources the full
-    /// zsh startup sequence and recovers any exported variable.
+    /// or `~/.zshrc`. Running `/bin/zsh -i -l -c "..."` sources the full zsh
+    /// startup sequence and recovers any exported variable.
     ///
     /// ## Security
-    /// The key name is hardcoded to one of two known strings — no user input is
-    /// interpolated into the shell command, so there is no injection risk.
+    /// No user input is interpolated into the shell command — the command string is
+    /// a hardcoded literal. There is no injection risk.
     /// stderr is redirected to a separate `Pipe()` to suppress zsh startup warnings
     /// (e.g. `compinit` insecure-directory warnings) from appearing in Console.app.
     ///
@@ -217,35 +251,33 @@ public final class TokenCache: Sendable {
     /// for this path to find it. A future improvement could inspect `$SHELL` and
     /// adapt, but zsh covers the overwhelming majority of macOS developer environments.
     private func resolveFromLoginShell() {
-        for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            // -i (interactive) + -l (login) causes zsh to source ~/.zprofile and ~/.zshrc,
-            // making any exported env vars available to the -c command.
-            process.arguments = ["-i", "-l", "-c", "echo -n $\(key)"]
-            let outPipe = Pipe()
-            process.standardOutput = outPipe
-            // Suppress zsh startup warnings (compinit, etc.) from appearing in logs.
-            process.standardError = Pipe()
-            do {
-                try process.run()
-            } catch {
-                logger?.log("TokenCache › warmUp: login shell launch failed for \(key): \(error)", category: "transport")
-                continue
-            }
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
-                #if DEBUG
-                logger?.log("TokenCache › warmUp: login shell: \(key) not found in shell environment", category: "transport")
-                #endif
-                continue
-            }
-            #if DEBUG
-            logger?.log("TokenCache › warmUp: resolved from login shell env var \(key) (len=\(value.count)), populating cache", category: "transport")
-            #endif
-            cache.withLock { if $0 == nil { $0 = value } }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        // -i (interactive) + -l (login) causes zsh to source ~/.zprofile and ~/.zshrc.
+        // ${GH_TOKEN:-$GITHUB_TOKEN} expands to GH_TOKEN if set and non-empty,
+        // otherwise falls back to GITHUB_TOKEN. echo -n suppresses the trailing newline.
+        process.arguments = ["-i", "-l", "-c", "echo -n ${GH_TOKEN:-$GITHUB_TOKEN}"]
+        let outPipe = Pipe()
+        process.standardOutput = outPipe
+        // Suppress zsh startup warnings (compinit, etc.) from appearing in logs.
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            logger?.log("TokenCache › warmUp: login shell launch failed: \(error)", category: "transport")
             return
         }
+        process.waitUntilExit()
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+            #if DEBUG
+            logger?.log("TokenCache › warmUp: login shell: neither GH_TOKEN nor GITHUB_TOKEN found in shell environment", category: "transport")
+            #endif
+            return
+        }
+        #if DEBUG
+        logger?.log("TokenCache › warmUp: resolved from login shell (len=\(value.count)), populating cache", category: "transport")
+        #endif
+        cache.withLock { if $0 == nil { $0 = value } }
     }
 }

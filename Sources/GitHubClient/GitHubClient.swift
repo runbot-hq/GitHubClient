@@ -161,7 +161,9 @@ public final class GitHubClient {
     /// and `GH_TOKEN` / `GITHUB_TOKEN` are therefore absent from `ProcessInfo`.
     ///
     /// This is a no-op when:
-    /// - The cache is already populated (Keychain OAuth token present)
+    /// - The cache is already populated (prior `token()` call or prior `warmUp()`)
+    /// - A Keychain OAuth token exists (checked directly via `TokenStore`, even if
+    ///   not yet read into the in-memory cache on this launch)
     /// - The app was launched from a terminal (token already in `ProcessInfo`)
     /// - The test init was used (no `TokenCache` in that path)
     ///
@@ -182,6 +184,13 @@ public final class GitHubClient {
     ///
     /// Falls back to `oauthService.hasAnyToken` when the test init is used
     /// (no `TokenCache` in that path).
+    ///
+    /// ## Side effects
+    /// This property calls `cache.token()` which may trigger a synchronous Keychain
+    /// read (`TokenStore.load()`) if the in-memory cache is unpopulated. The read is
+    /// cheap and idempotent, but callers should be aware that reading `hasAnyToken`
+    /// is not a free in-memory check when the cache is cold. After `warmUp()` has
+    /// completed the cache is warm and subsequent reads return immediately.
     public var hasAnyToken: Bool {
         if let cache = tokenCache {
             return cache.token() != nil
