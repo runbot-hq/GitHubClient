@@ -26,25 +26,12 @@ public struct GitHubWorkflowRun: Decodable, Sendable {
     /// Raw ISO 8601 date string — caller is responsible for parsing.
     public let updatedAt: String
 
-    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        /// Maps `id`.
-        case id
-        /// Maps `name`.
-        case name
-        /// Maps `status`.
-        case status
-        /// Maps `conclusion`.
-        case conclusion
-        /// Maps `head_branch`.
+        case id, name, status, conclusion
         case headBranch = "head_branch"
-        /// Maps `head_sha`.
         case headSha = "head_sha"
-        /// Maps `html_url`.
         case htmlUrl = "html_url"
-        /// Maps `created_at`.
         case createdAt = "created_at"
-        /// Maps `updated_at`.
         case updatedAt = "updated_at"
     }
 }
@@ -110,29 +97,13 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// `var` — replaced wholesale when step data arrives; absent for queued jobs (see decoder note).
     public var steps: [GitHubStep]
 
-    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        /// Maps `id`.
-        case id
-        /// Maps `name`.
-        case name
-        /// Maps `status`.
-        case status
-        /// Maps `conclusion`.
-        case conclusion
-        /// Maps `steps`.
-        case steps
-        /// Maps `run_id`.
+        case id, name, status, conclusion, steps
         case runID = "run_id"
-        /// Maps `html_url`.
         case htmlUrl = "html_url"
-        /// Maps `runner_name`.
         case runnerName = "runner_name"
-        /// Maps `started_at`.
         case startedAt = "started_at"
-        /// Maps `completed_at`.
         case completedAt = "completed_at"
-        /// Maps `created_at`.
         case createdAt = "created_at"
     }
 
@@ -175,10 +146,16 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
         createdAt: String? = nil,
         steps: [GitHubStep] = []
     ) {
-        self.id = id; self.runID = runID; self.name = name; self.status = status
-        self.conclusion = conclusion; self.htmlUrl = htmlUrl
-        self.runnerName = runnerName; self.startedAt = startedAt
-        self.completedAt = completedAt; self.createdAt = createdAt
+        self.id = id
+        self.runID = runID
+        self.name = name
+        self.status = status
+        self.conclusion = conclusion
+        self.htmlUrl = htmlUrl
+        self.runnerName = runnerName
+        self.startedAt = startedAt
+        self.completedAt = completedAt
+        self.createdAt = createdAt
         self.steps = steps
     }
 
@@ -225,19 +202,9 @@ public struct GitHubStep: Decodable, Equatable, Sendable {
     /// Raw ISO 8601 date string — caller is responsible for parsing.
     public let completedAt: String?
 
-    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        /// Maps `name`.
-        case name
-        /// Maps `status`.
-        case status
-        /// Maps `conclusion`.
-        case conclusion
-        /// Maps `number`.
-        case number
-        /// Maps `started_at`.
+        case name, status, conclusion, number
         case startedAt = "started_at"
-        /// Maps `completed_at`.
         case completedAt = "completed_at"
     }
 
@@ -259,8 +226,11 @@ public struct GitHubStep: Decodable, Equatable, Sendable {
         startedAt: String? = nil,
         completedAt: String? = nil
     ) {
-        self.number = number; self.name = name; self.status = status
-        self.conclusion = conclusion; self.startedAt = startedAt
+        self.number = number
+        self.name = name
+        self.status = status
+        self.conclusion = conclusion
+        self.startedAt = startedAt
         self.completedAt = completedAt
     }
 }
