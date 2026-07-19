@@ -105,7 +105,7 @@ public final class TokenCache: Sendable {
     ///
     /// ## Blocking I/O isolation (Principle 18)
     /// The subprocess is run inside `loginShellToken(logger:)`, a `@concurrent`
-    /// async free function. `@concurrent` runs off any actor’s serial executor,
+    /// async free function. `@concurrent` runs off any actor's serial executor,
     /// so `waitUntilExit()` blocks one cooperative thread pool worker without
     /// stalling the caller. No `DispatchQueue` or `DispatchSemaphore` bridges
     /// are used — the timeout is a structured `withTaskGroup` race and the pipe
@@ -159,6 +159,24 @@ public final class TokenCache: Sendable {
     }
 
     /// Clears the in-memory token cache. Call after saving a new token or after sign-out.
+    ///
+    /// ## warmUpInFlight asymmetry
+    /// `invalidate()` clears the token `cache` but does **not** reset `warmUpInFlight`.
+    /// This is intentional for the current flow: sign-out calls `invalidate()` on this
+    /// instance and then never calls `warmUp()` again (the next token read falls through
+    /// to `resolveFromStore()` / `resolveFromEnvironment()` as usual).
+    ///
+    /// However, if `warmUp()` is ever called after `invalidate()` — for example, if
+    /// the startup sequence is changed to re-warm the cache post-sign-out — `warmUp()`
+    /// will fast-path out on the `warmUpInFlight` sentinel and never retry the login
+    /// shell subprocess, even if the cache is now empty. The subprocess-backed token
+    /// recovery would silently stop working for the lifetime of this `TokenCache` instance.
+    ///
+    /// If that scenario ever arises, `warmUpInFlight` must either be reset here
+    /// (resetting allows exactly one more subprocess run per `invalidate()` call)
+    /// or `warmUp()` must be redesigned with a different retry policy. For now the
+    /// one-shot-per-instance design is correct and this comment exists to prevent a
+    /// future caller from being surprised.
     public func invalidate() {
         cache.withLock { $0 = nil }
         logger?.log("TokenCache › invalidate — cache cleared", category: "transport")
@@ -337,7 +355,7 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             #endif
             return value
         }
-        // Timeout arm: if the shell hasn’t finished in 10 seconds, terminate it.
+        // Timeout arm: if the shell hasn't finished in 10 seconds, terminate it.
         group.addTask {
             try? await Task.sleep(for: .seconds(10))
             // Only reach here if not cancelled (i.e. we won the race).
