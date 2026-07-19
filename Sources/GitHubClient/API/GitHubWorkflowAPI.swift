@@ -148,12 +148,16 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// Returns a copy of this job with one or more fields replaced.
     ///
     /// Replaces the previous 6 individual `copying(field:)` overloads with a
-    /// single generic mutating closure. Any field declared `var` can be updated;
-    /// adding new fields to the struct requires no new overload.
+    /// single generic mutating closure. Any field declared `var` can be updated
+    /// (`conclusion`, `runnerName`, `startedAt`, `completedAt`, `createdAt`, `steps`);
+    /// immutable identity fields (`id`, `runID`, `name`, `status`, `htmlUrl`) remain `let`
+    /// and cannot be mutated via this helper.
+    ///
+    /// Adding new `var` fields to the struct requires no new overload.
     ///
     /// ```swift
     /// let updated = job.copying { $0.runnerName = "runner-1" }
-    /// let multi   = job.copying { $0.status = "completed"; $0.conclusion = "success" }
+    /// let multi   = job.copying { $0.conclusion = "success"; $0.runnerName = "runner-2" }
     /// ```
     public func copying(update: (inout Self) -> Void) -> Self {
         var copy = self
