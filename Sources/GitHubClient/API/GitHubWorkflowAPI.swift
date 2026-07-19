@@ -28,23 +28,11 @@ public struct GitHubWorkflowRun: Decodable, Sendable {
 
     /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        /// Maps `id`.
-        case id
-        /// Maps `name`.
-        case name
-        /// Maps `status`.
-        case status
-        /// Maps `conclusion`.
-        case conclusion
-        /// Maps `head_branch`.
+        case id, name, status, conclusion
         case headBranch = "head_branch"
-        /// Maps `head_sha`.
         case headSha = "head_sha"
-        /// Maps `html_url`.
         case htmlUrl = "html_url"
-        /// Maps `created_at`.
         case createdAt = "created_at"
-        /// Maps `updated_at`.
         case updatedAt = "updated_at"
     }
 }
@@ -55,17 +43,18 @@ public struct GitHubWorkflowRun: Decodable, Sendable {
 ///
 /// Fields are split into identity fields (`let`) and lifecycle fields (`var`):
 ///
-/// - **`let` (identity):** `id`, `runID`, `name`, `status`, `htmlUrl` — assigned once
-///   by the GitHub API and never change for the lifetime of a job. Mutating these
-///   would produce a logically different job, not an updated view of the same one.
-///   `status` in particular is intentionally `let`; it is an identity/classification
-///   field set at creation and is not a candidate for `copying(update:)`. Use a fresh
-///   decode when the API reports a status change.
+/// - **`let` (identity):** `id`, `runID`, `name`, `status`, `htmlUrl`, `createdAt` —
+///   assigned once by the GitHub API and never change for the lifetime of a job.
+///   Mutating these would produce a logically different job, not an updated view
+///   of the same one. `status` is intentionally `let`; it is a classification field
+///   not patched locally — re-decode from the API when a status change is expected.
+///   `createdAt` is `let` because job creation time is immutable; it is optional
+///   only because some API responses omit it for in-flight jobs, not because it
+///   changes after first appearance.
 ///
 /// - **`var` (lifecycle):** `conclusion`, `runnerName`, `startedAt`, `completedAt`,
-///   `createdAt`, `steps` — populated progressively as the job runs. These are `var`
-///   specifically to support `copying(update:)` for local state patching between polls
-///   without reconstructing the full struct.
+///   `steps` — populated progressively as the job runs and patched locally via
+///   `copying(update:)` between polls.
 ///
 /// ## Sendable
 ///
@@ -85,13 +74,13 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// Re-decode from the API when a status change is expected.
     public let status: String
     /// Raw conclusion string — NOT `JobConclusion` (a RunBotCore type).
-    /// `var` — populated when the job completes; may be patched locally before next poll.
+    /// `var` — populated when the job completes; patched locally before next poll.
     public var conclusion: String?
     /// GitHub web URL for this job.
     /// Intentionally `let` — the URL is stable for the lifetime of the job.
     public let htmlUrl: String?
     /// Name of the runner executing this job, or `nil` if not yet assigned.
-    /// `var` — assigned when a runner picks up the job; patched locally via `copying(update:)`.
+    /// `var` — assigned when a runner picks up the job; patched via `copying(update:)`.
     public var runnerName: String?
     /// Raw ISO 8601 date string — caller is responsible for parsing.
     /// `var` — set when the job starts; may arrive in a later poll than the initial decode.
@@ -100,35 +89,22 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// `var` — set when the job finishes; absent until completion.
     public var completedAt: String?
     /// Raw ISO 8601 date string — caller is responsible for parsing.
-    /// `var` — lifecycle timestamp; absent on some API responses for in-progress jobs.
-    public var createdAt: String?
+    ///
+    /// Intentionally `let` — job creation time is immutable; the field is optional
+    /// only because some API responses omit it for in-flight jobs, not because it
+    /// changes after first appearance. It is not a candidate for `copying(update:)`.
+    public let createdAt: String?
     /// Steps within this job.
     /// `var` — replaced wholesale when step data arrives; absent for queued jobs (see decoder note).
     public var steps: [GitHubStep]
 
-    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        /// Maps `id`.
-        case id
-        /// Maps `name`.
-        case name
-        /// Maps `status`.
-        case status
-        /// Maps `conclusion`.
-        case conclusion
-        /// Maps `steps`.
-        case steps
-        /// Maps `run_id`.
+        case id, name, status, conclusion, steps
         case runID = "run_id"
-        /// Maps `html_url`.
         case htmlUrl = "html_url"
-        /// Maps `runner_name`.
         case runnerName = "runner_name"
-        /// Maps `started_at`.
         case startedAt = "started_at"
-        /// Maps `completed_at`.
         case completedAt = "completed_at"
-        /// Maps `created_at`.
         case createdAt = "created_at"
     }
 
@@ -150,11 +126,10 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
         // not an empty array but an absent key. `decodeIfPresent` returns `nil`
         // for an absent key, and `try?` converts a malformed-but-present array
         // to `nil` as well. Both cases correctly fall back to `[]`.
-        // No logger call is made on the absent-key path because a missing `steps`
-        // key is the documented API contract for queued jobs, not an error condition.
-        // A logger call fires upstream in `fetchJobs` only when the entire
-        // `[GitHubJob]` decode fails (a genuine API shape change).
-        // This is a known API shape difference, not a decode bug.
+        // No logger call on the absent-key path: a missing `steps` key is the
+        // documented API contract for queued jobs, not an error condition. A logger
+        // call fires upstream in `fetchJobs` only when the entire `[GitHubJob]`
+        // decode fails (a genuine API shape change). Not a decode bug.
         steps = (try? container.decodeIfPresent([GitHubStep].self, forKey: .steps)) ?? []
     }
 
@@ -184,9 +159,9 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// Returns a copy of this job with one or more lifecycle fields replaced.
     ///
     /// Only `var` fields (`conclusion`, `runnerName`, `startedAt`, `completedAt`,
-    /// `createdAt`, `steps`) can be mutated via the closure. Identity fields
-    /// (`id`, `runID`, `name`, `status`, `htmlUrl`) are `let` and the compiler
-    /// will reject any attempt to assign them — this is intentional.
+    /// `steps`) can be mutated via the closure. Identity fields (`id`, `runID`,
+    /// `name`, `status`, `htmlUrl`, `createdAt`) are `let` and the compiler will
+    /// reject any attempt to assign them — this is intentional.
     ///
     /// `@discardableResult` is deliberately absent. Discarding the return value
     /// of a `copying` call is always a caller bug (the original is unchanged),
@@ -222,19 +197,9 @@ public struct GitHubStep: Decodable, Equatable, Sendable {
     /// Raw ISO 8601 date string — caller is responsible for parsing.
     public let completedAt: String?
 
-    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        /// Maps `name`.
-        case name
-        /// Maps `status`.
-        case status
-        /// Maps `conclusion`.
-        case conclusion
-        /// Maps `number`.
-        case number
-        /// Maps `started_at`.
+        case name, status, conclusion, number
         case startedAt = "started_at"
-        /// Maps `completed_at`.
         case completedAt = "completed_at"
     }
 
@@ -244,11 +209,10 @@ public struct GitHubStep: Decodable, Equatable, Sendable {
     /// API surface. Tests construct instances via the JSON round-trip shim in
     /// `TestModelHelpers.swift` (`@testable import GitHubClient`).
     ///
-    /// All fields are `let` by design — individual step mutation is not needed
-    /// at present. Steps are replaced wholesale on `GitHubJob` via
-    /// `job.copying { $0.steps = newSteps }`. If per-step patching is ever
-    /// required, promote the relevant fields to `var` and add `Copyable`
-    /// conformance (see #67).
+    /// All fields are `let` by design — individual step mutation is not needed.
+    /// Steps are replaced wholesale on `GitHubJob` via `job.copying { $0.steps = newSteps }`.
+    /// If per-step patching is ever required, promote the relevant fields to `var`
+    /// and add `Copyable` conformance (see #67).
     init(
         number: Int,
         name: String,
@@ -257,11 +221,8 @@ public struct GitHubStep: Decodable, Equatable, Sendable {
         startedAt: String? = nil,
         completedAt: String? = nil
     ) {
-        self.number = number
-        self.name = name
-        self.status = status
-        self.conclusion = conclusion
-        self.startedAt = startedAt
+        self.number = number; self.name = name; self.status = status
+        self.conclusion = conclusion; self.startedAt = startedAt
         self.completedAt = completedAt
     }
 }
@@ -340,12 +301,8 @@ public func fetchActiveRuns(
     for status in statuses {
         let endpoint = "\(scope.apiPrefix)/actions/runs?status=\(status)&per_page=\(GitHubConstants.activeRunsPageSize)"
         guard let data = await transport.apiPaginated(endpoint) else {
-            // See the nil-transport heuristic note in the function doc comment above.
             if allRuns.isEmpty { return .noToken } else { return .rateLimited(allRuns) }
         }
-        // apiPaginated returns a flat JSON array — decode directly as [GitHubWorkflowRun].
-        // Do NOT use a {"workflow_runs":[...]} wrapper here: apiPaginated strips the
-        // GitHub API envelope and encodes only the array items into the returned Data.
         do {
             let runs = try transport.decoder.decode([GitHubWorkflowRun].self, from: data)
             for run in runs where seenIDs.insert(run.id).inserted {
@@ -354,14 +311,10 @@ public func fetchActiveRuns(
         } catch {
             // Decode failure on a successful 2xx page is intentionally non-fatal.
             // The HTTP request succeeded — this is an API shape change or decoder
-            // misconfiguration, not a network or auth condition. Returning a typed
-            // error to the caller is not possible without a signature change, and
-            // the caller's correct response (show available runs) is identical to
-            // an empty result set. The loop continues so a decode failure on one
-            // status page does not discard successfully decoded runs from the other.
-            // Note: callCounter.record() already fired in the transport layer for
-            // this HTTP hit, so counter.snapshot().count may exceed allRuns.count
-            // after this path — see the doc comment above. This is expected, not a bug.
+            // misconfiguration, not a network or auth condition. The loop continues
+            // so a decode failure on one status page does not discard runs from the other.
+            // callCounter.record() already fired in the transport layer for this hit,
+            // so counter.snapshot().count may exceed allRuns.count — expected, not a bug.
             transport.logger?.log(
                 "fetchActiveRuns › decode failed for status=\(status): \(error)",
                 category: "transport"
@@ -394,9 +347,6 @@ public func fetchJobs(
 ) async -> [GitHubJob] {
     let endpoint = "\(scope.apiPrefix)/actions/runs/\(runID)/jobs?per_page=\(GitHubConstants.maxPageSize)"
     guard let data = await transport.apiPaginated(endpoint) else { return [] }
-    // apiPaginated returns a flat JSON array — decode directly as [GitHubJob].
-    // Do NOT use a {"jobs":[...]} wrapper here: apiPaginated strips the
-    // GitHub API envelope and encodes only the array items into the returned Data.
     do {
         return try transport.decoder.decode([GitHubJob].self, from: data)
     } catch {
