@@ -139,15 +139,31 @@ public final class TokenCache: Sendable {
         // In-flight guard: if another concurrent warmUp() call already passed all
         // fast-paths and is about to spawn (or is running) the subprocess, bail here.
         // The first caller sets the sentinel to true inside the lock; all later callers
-        // see true and return. The sentinel is never reset — warmUp() spawns at most
-        // one subprocess per TokenCache lifetime.
+        // see true and return.
+        //
+        // The sentinel is never reset — warmUp() spawns at most one subprocess per
+        // TokenCache lifetime. This means that if loginShellToken returns nil (timeout
+        // or token not found in shell), warmUpInFlight stays true and future warmUp()
+        // calls will hit this guard and skip retrying. This is intentional: a shell
+        // that timed out once is likely to time out again, and retrying on every
+        // poll cycle would add latency with no benefit. The distinction between
+        // "in-flight" and "already ran but found no token" is logged separately below.
         let shouldProceed = warmUpInFlight.withLock { inFlight -> Bool in
             guard !inFlight else { return false }
             inFlight = true
             return true
         }
         guard shouldProceed else {
-            logger?.log("TokenCache › warmUp — login shell already in flight, skipping", category: "transport")
+            // Distinguish between two cases to avoid a misleading "already in flight" log
+            // when the subprocess has long since completed:
+            // - cache is still nil: the subprocess ran but found no token (timeout or absent).
+            //   Logging "already in flight" here is actively misleading for post-mortem debugging.
+            // - cache is populated: the subprocess succeeded and we are racing a concurrent caller.
+            if cache.withLock({ $0 }) == nil {
+                logger?.log("TokenCache › warmUp — login shell already ran but found no token; not retrying (warmUpInFlight latch)", category: "transport")
+            } else {
+                logger?.log("TokenCache › warmUp — login shell already in flight or completed; cache now populated", category: "transport")
+            }
             return
         }
         logger?.log("TokenCache › warmUp — all fast-paths missed, attempting login shell resolution", category: "transport")
@@ -342,7 +358,12 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // waitUntilExit() does NOT check Swift task cancellation — a cancelled
             // task would block its cooperative thread worker until zsh exits after SIGTERM.
             // Checking here lets us skip the blocking call entirely when we've already lost
-            // the race, freeing the worker immediately.
+            // the race. Note: there is a narrow TOCTOU window between this check and the
+            // waitUntilExit() call below — if cancellation arrives after the guard but
+            // before waitUntilExit(), the blocking call still executes. This is benign:
+            // waitUntilExit() returns promptly after SIGTERM and the stdout read is a
+            // safe no-op (pipe is at EOF). The guard eliminates the common case; the
+            // narrow window is accepted as an implementation trade-off.
             guard !Task.isCancelled else { return nil }
             process.waitUntilExit()
             // Read all stdout in one call after the process has exited (pipe is at EOF).
@@ -359,9 +380,15 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             return value
         }
         // Timeout arm: if the shell hasn't finished in 10 seconds, terminate it.
+        // Task.sleep throws CancellationError when cancelled (caught by try?), so the
+        // terminate() and log below are only reached if the sleep completed naturally
+        // (i.e. this arm won the race). In the rare case where both arms finish
+        // near-simultaneously, terminate() is called on an already-exited process —
+        // this is a safe no-op on Darwin. The "timed out" log may fire in that edge
+        // case even though the subprocess technically succeeded; this is a cosmetic
+        // inaccuracy accepted as a trade-off against adding a result-coordination lock.
         group.addTask {
             try? await Task.sleep(for: .seconds(10))
-            // Only reach here if not cancelled (i.e. we won the race).
             logger?.log("TokenCache › warmUp: login shell timed out after 10 s — terminating", category: "transport")
             process.terminate()
             return nil
