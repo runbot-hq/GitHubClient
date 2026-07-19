@@ -60,19 +60,19 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// Raw status string — NOT `JobStatus` (a RunBotCore type).
     public let status: String
     /// Raw conclusion string — NOT `JobConclusion` (a RunBotCore type).
-    public let conclusion: String?
+    public var conclusion: String?
     /// GitHub web URL for this job.
     public let htmlUrl: String?
     /// Name of the runner executing this job, or `nil` if not yet assigned.
-    public let runnerName: String?
+    public var runnerName: String?
     /// Raw ISO 8601 date string — caller is responsible for parsing.
-    public let startedAt: String?
+    public var startedAt: String?
     /// Raw ISO 8601 date string — caller is responsible for parsing.
-    public let completedAt: String?
+    public var completedAt: String?
     /// Raw ISO 8601 date string — caller is responsible for parsing.
-    public let createdAt: String?
+    public var createdAt: String?
     /// Steps within this job.
-    public let steps: [GitHubStep]
+    public var steps: [GitHubStep]
 
     /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
@@ -122,7 +122,7 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
         steps = (try? container.decodeIfPresent([GitHubStep].self, forKey: .steps)) ?? []
     }
 
-    /// Full memberwise initialiser — used by `copying(...)` helpers and tests.
+    /// Full memberwise initialiser — used by `copying(update:)` and tests.
     public init(
         id: Int,
         runID: Int,
@@ -143,54 +143,22 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
         self.steps = steps
     }
 
-    // MARK: copying helpers — used by ActiveJob.withUpdatedRaw
+    // MARK: - copying helper
 
-    /// Returns a copy of this job with `runnerName` replaced.
-    public func copying(runnerName newValue: String?) -> GitHubJob {
-        GitHubJob(id: id, runID: runID, name: name, status: status,
-                  conclusion: conclusion, htmlUrl: htmlUrl,
-                  runnerName: newValue, startedAt: startedAt,
-                  completedAt: completedAt, createdAt: createdAt, steps: steps)
-    }
-
-    /// Returns a copy of this job with `startedAt` replaced.
-    public func copying(startedAt newValue: String?) -> GitHubJob {
-        GitHubJob(id: id, runID: runID, name: name, status: status,
-                  conclusion: conclusion, htmlUrl: htmlUrl,
-                  runnerName: runnerName, startedAt: newValue,
-                  completedAt: completedAt, createdAt: createdAt, steps: steps)
-    }
-
-    /// Returns a copy of this job with `completedAt` replaced.
-    public func copying(completedAt newValue: String?) -> GitHubJob {
-        GitHubJob(id: id, runID: runID, name: name, status: status,
-                  conclusion: conclusion, htmlUrl: htmlUrl,
-                  runnerName: runnerName, startedAt: startedAt,
-                  completedAt: newValue, createdAt: createdAt, steps: steps)
-    }
-
-    /// Returns a copy of this job with `createdAt` replaced.
-    public func copying(createdAt newValue: String?) -> GitHubJob {
-        GitHubJob(id: id, runID: runID, name: name, status: status,
-                  conclusion: conclusion, htmlUrl: htmlUrl,
-                  runnerName: runnerName, startedAt: startedAt,
-                  completedAt: completedAt, createdAt: newValue, steps: steps)
-    }
-
-    /// Returns a copy of this job with `steps` replaced.
-    public func copying(steps newValue: [GitHubStep]) -> GitHubJob {
-        GitHubJob(id: id, runID: runID, name: name, status: status,
-                  conclusion: conclusion, htmlUrl: htmlUrl,
-                  runnerName: runnerName, startedAt: startedAt,
-                  completedAt: completedAt, createdAt: createdAt, steps: newValue)
-    }
-
-    /// Returns a copy of this job with `conclusion` replaced.
-    public func copying(conclusion newValue: String?) -> GitHubJob {
-        GitHubJob(id: id, runID: runID, name: name, status: status,
-                  conclusion: newValue, htmlUrl: htmlUrl,
-                  runnerName: runnerName, startedAt: startedAt,
-                  completedAt: completedAt, createdAt: createdAt, steps: steps)
+    /// Returns a copy of this job with one or more fields replaced.
+    ///
+    /// Replaces the previous 6 individual `copying(field:)` overloads with a
+    /// single generic mutating closure. Any field declared `var` can be updated;
+    /// adding new fields to the struct requires no new overload.
+    ///
+    /// ```swift
+    /// let updated = job.copying { $0.runnerName = "runner-1" }
+    /// let multi   = job.copying { $0.status = "completed"; $0.conclusion = "success" }
+    /// ```
+    public func copying(update: (inout Self) -> Void) -> Self {
+        var copy = self
+        update(&copy)
+        return copy
     }
 }
 
