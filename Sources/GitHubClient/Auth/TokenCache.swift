@@ -147,8 +147,8 @@ public final class TokenCache: Sendable {
     ///
     /// ## Performance
     /// The subprocess takes ~50–100 ms on first call with a 10-second timeout.
-    /// A single `/bin/zsh -i -l` invocation recovers both `GH_TOKEN` and
-    /// `GITHUB_TOKEN` in one shell run. The result is cached on first resolution;
+    /// A single `/bin/zsh -i -l` invocation recovers `GH_TOKEN`, falling back to
+    /// `GITHUB_TOKEN`, in one shell run. The result is cached on first resolution;
     /// subsequent `warmUp()` calls return immediately.
     ///
     /// ## Token freshness / credential-manager tokens
@@ -302,6 +302,10 @@ public final class TokenCache: Sendable {
 ///
 /// Marked `@concurrent` so `waitUntilExit()` occupies one cooperative thread
 /// pool worker without binding to any actor's serial executor (Principle 18).
+/// This is a file-private free function (not a method on `TokenCache`) because
+/// `@concurrent` cannot be applied to instance methods on a `Sendable` class
+/// without additional actor-annotation gymnastics — the free-function placement
+/// is what makes the annotation viable.
 ///
 /// ## stdout pipe drain strategy
 /// stdout is read with `readDataToEndOfFile()` **after** `waitUntilExit()` returns.
@@ -348,6 +352,12 @@ public final class TokenCache: Sendable {
 /// subprocess succeeded. This is a cosmetic log inaccuracy, not a correctness
 /// issue, accepted as a trade-off against adding a result-coordination lock.
 ///
+/// ## Shell expansion
+/// `${GH_TOKEN:-$GITHUB_TOKEN}` recovers `GH_TOKEN`, falling back to
+/// `GITHUB_TOKEN` when `GH_TOKEN` is unset or empty. This matches the priority
+/// order of `resolveFromEnvironment()`. Only one value is returned per run —
+/// the shell expansion selects one, not both.
+///
 /// ## Security
 /// No user input is interpolated — the shell command is a hardcoded literal.
 ///
@@ -367,7 +377,6 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     // Redirect stderr to /dev/null rather than a Pipe. A Pipe whose read end is never
     // drained would stall waitUntilExit() if .zshrc emits more than ~64 KB to stderr
     // (e.g. verbose compinit output). /dev/null has no buffer limit and needs no drain.
-    process.standardError = FileHandle.standardError  // silenced below
     process.standardError = FileHandle.nullDevice
 
     do {
