@@ -9,6 +9,11 @@ import Synchronization
 
 /// In-memory `TokenStore` double. Keychain-free and safe to construct per test.
 /// Backed by a `Mutex` so it is `Sendable` without `@unchecked`.
+///
+/// Intentionally `nonisolated` (no `@MainActor` annotation). The `Mutex`
+/// provides the necessary thread safety, so this type works correctly from
+/// any actor context — including `@MainActor`-isolated test suites such as
+/// `OAuthServiceScopesTests` and `OAuthServiceRedirectURITests`.
 final class MockTokenStore: TokenStore {
     private let storage: Mutex<String?>
 
