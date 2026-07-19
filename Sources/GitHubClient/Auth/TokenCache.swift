@@ -231,41 +231,34 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// shell will be re-spawned. The #68 async refactor removes this design
 /// entirely, making the timeout semantics moot.
 ///
-/// ## Pipe buffer deadlock prevention (concurrent drain)
+/// ## Pipe buffer deadlock prevention (withCheckedContinuation drain)
 /// `waitUntilExit()` blocks until the child exits. If the child writes enough
 /// data to fill the pipe kernel buffer (~64 KB on macOS) before exiting —
 /// plausible with a verbose `.zshrc` running neofetch, nvm, or oh-my-zsh —
 /// the child blocks on the write side waiting for the buffer to drain while
 /// this code blocks on `waitUntilExit()` waiting for the child to exit:
-/// deadlock. The fix is to start draining the pipe asynchronously on a
-/// `DispatchQueue.global()` thread before calling `waitUntilExit()`, so the
-/// buffer never fills regardless of output volume. `waitUntilExit()` then
-/// completes normally and the fully drained data is collected via semaphore.
+/// deadlock. The fix is to drain the pipe concurrently on a `DispatchQueue`
+/// worker thread using `withCheckedContinuation`, suspending the async task
+/// until the drain completes. `waitUntilExit()` is then called after
+/// `await drainPipe(outPipe)` returns, by which point all stdout has been
+/// read and the child has already exited naturally.
 ///
-/// ## DispatchSemaphore synchronisation contract for drainedData
-/// `drainedData` is written inside the `DispatchQueue.global().async` closure
-/// and read after `semaphore.wait()`. This is not a data race: the
-/// `semaphore.signal()` call at the end of the closure and `semaphore.wait()`
-/// on the reader establish an explicit happens-before relationship — the write
-/// is guaranteed complete before the read begins. Swift's concurrency checker
-/// cannot see through `DispatchQueue` closures so the pattern looks
-/// unsynchronised to tooling; it is correctly synchronised by the semaphore.
+/// ## Why withCheckedContinuation instead of DispatchSemaphore
+/// Swift 6 strict concurrency (SE-0296) marks `DispatchSemaphore.wait()` as
+/// unavailable from async contexts — including inside `@concurrent` task
+/// closures, which are still typed `async`. `withCheckedContinuation` is the
+/// correct Swift 6 idiom for bridging a blocking call that must run off the
+/// async executor. It also eliminates the `#SendableClosureCaptures` warning
+/// from a captured `var` because data flows through the continuation's resume
+/// value rather than a mutated capture.
 ///
-/// ## semaphore.wait() on the timeout path — does it hang?
+/// ## On the timeout path: does drainPipe hang?
 /// If the timeout arm fires and calls `terminate()` while the drain is still
-/// running, `readDataToEndOfFile()` returns promptly: `terminate()` sends
-/// SIGTERM to the shell, which causes the shell to exit and close the write
-/// end of the pipe; a closed write end causes `readDataToEndOfFile()` to
-/// return immediately with whatever data was buffered. `semaphore.signal()`
-/// fires promptly and `semaphore.wait()` returns without hanging.
-///
-/// ## semaphore.wait() blocking the cooperative thread — not an issue here
-/// `DispatchSemaphore.wait()` blocks the calling thread. Blocking a Swift
-/// cooperative pool thread with a semaphore is an anti-pattern that can
-/// cause thread-pool exhaustion. This is safe here because `loginShellToken`
-/// is `@concurrent`, which opts out of the cooperative pool entirely and runs
-/// on a dedicated GCD thread. Blocking that thread with `semaphore.wait()` has
-/// no effect on the cooperative pool and carries no exhaustion risk.
+/// running, `terminate()` sends SIGTERM to the shell, which causes the shell
+/// to exit and close the write end of the pipe. A closed write end causes
+/// `readDataToEndOfFile()` to return immediately with whatever was buffered,
+/// the continuation is resumed, and `await drainPipe(outPipe)` returns
+/// promptly. No hang.
 ///
 /// ## Thread leak on the timeout path (known, bounded)
 /// After `group.next()` + `group.cancelAll()`, this function returns before
@@ -302,7 +295,7 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     let box = UncheckedProcessBox()
     return await withTaskGroup(of: String?.self) { group in
-        // Subprocess arm — spawn, wait, read stdout.
+        // Subprocess arm — spawn, drain stdout, wait, read.
         group.addTask {
             guard !Task.isCancelled else { return nil }
             let process = Process()
@@ -335,38 +328,19 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
                 logger?.log("TokenCache › login shell launch failed: \(error)", category: "transport")
                 return nil
             }
-            // Drain stdout concurrently on a background thread BEFORE calling
-            // waitUntilExit(). If the pipe kernel buffer (~64 KB on macOS) fills
-            // before the child exits, the child blocks on write() waiting for the
-            // buffer to drain while waitUntilExit() blocks waiting for the child
-            // to exit — deadlock. A verbose .zshrc (neofetch, nvm, oh-my-zsh, etc.)
-            // can easily produce >64 KB of stdout. The async drain prevents the
-            // buffer from filling regardless of output volume.
-            //
-            // Synchronisation: drainedData is written inside the async closure and
-            // read after semaphore.wait(). semaphore.signal() / semaphore.wait()
-            // establish a happens-before relationship — the write is complete before
-            // the read begins. This is not a data race despite appearances; Swift's
-            // concurrency checker cannot see through DispatchQueue closures.
-            let semaphore = DispatchSemaphore(value: 0)
-            var drainedData = Data()
-            DispatchQueue.global().async {
-                drainedData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                semaphore.signal()
-            }
+            // Drain stdout via withCheckedContinuation BEFORE calling waitUntilExit().
+            // If the pipe kernel buffer (~64 KB on macOS) fills before the child exits,
+            // calling waitUntilExit() first would deadlock: child blocks on write(),
+            // this task blocks on waitUntilExit(). drainPipe() runs readDataToEndOfFile()
+            // on a DispatchQueue worker thread and suspends this async task until the
+            // drain completes; by the time we reach waitUntilExit() the pipe is fully
+            // drained and the child has exited naturally. See doc comment for details.
+            let data = await drainPipe(outPipe)
             // waitUntilExit() does not honour Swift task cancellation.
             // The timeout arm calls box.process?.terminate() as the kill path.
-            // The concurrent drain above ensures this never deadlocks on a
-            // pipe-full condition.
+            // The drain above ensures this never deadlocks on a pipe-full condition.
             process.waitUntilExit()
-            // semaphore.wait() blocks this thread until the drain completes.
-            // Safe to block here: loginShellToken is @concurrent and runs on a
-            // dedicated GCD thread, not a cooperative pool thread — no pool
-            // exhaustion risk. On the timeout path, terminate() closes the pipe
-            // write end, causing readDataToEndOfFile() to return immediately, so
-            // semaphore.signal() fires promptly and this never hangs.
-            semaphore.wait()
-            guard let raw = String(data: drainedData, encoding: .utf8) else { return nil }
+            guard let raw = String(data: data, encoding: .utf8) else { return nil }
             let value = raw
                 .components(separatedBy: .newlines)
                 .compactMap { line -> String? in
@@ -403,6 +377,25 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
         let result: String? = await group.next() ?? nil
         group.cancelAll()
         return result
+    }
+}
+
+/// Drains `pipe` by calling `readDataToEndOfFile()` on a `DispatchQueue` worker
+/// thread and bridging the result back to the async caller via `withCheckedContinuation`.
+///
+/// `readDataToEndOfFile()` blocks until the write end of the pipe is closed (i.e.
+/// the child process exits or is terminated). Running it on a `DispatchQueue` thread
+/// keeps the blocking I/O off the Swift concurrency cooperative pool.
+///
+/// On the timeout path: `terminate()` sends SIGTERM to the shell, which closes
+/// the pipe write end, causing `readDataToEndOfFile()` to return immediately with
+/// whatever was buffered. The continuation is resumed promptly — no hang.
+private func drainPipe(_ pipe: Pipe) async -> Data {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            continuation.resume(returning: data)
+        }
     }
 }
 
