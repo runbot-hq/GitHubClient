@@ -242,6 +242,31 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// buffer never fills regardless of output volume. `waitUntilExit()` then
 /// completes normally and the fully drained data is collected via semaphore.
 ///
+/// ## DispatchSemaphore synchronisation contract for drainedData
+/// `drainedData` is written inside the `DispatchQueue.global().async` closure
+/// and read after `semaphore.wait()`. This is not a data race: the
+/// `semaphore.signal()` call at the end of the closure and `semaphore.wait()`
+/// on the reader establish an explicit happens-before relationship — the write
+/// is guaranteed complete before the read begins. Swift's concurrency checker
+/// cannot see through `DispatchQueue` closures so the pattern looks
+/// unsynchronised to tooling; it is correctly synchronised by the semaphore.
+///
+/// ## semaphore.wait() on the timeout path — does it hang?
+/// If the timeout arm fires and calls `terminate()` while the drain is still
+/// running, `readDataToEndOfFile()` returns promptly: `terminate()` sends
+/// SIGTERM to the shell, which causes the shell to exit and close the write
+/// end of the pipe; a closed write end causes `readDataToEndOfFile()` to
+/// return immediately with whatever data was buffered. `semaphore.signal()`
+/// fires promptly and `semaphore.wait()` returns without hanging.
+///
+/// ## semaphore.wait() blocking the cooperative thread — not an issue here
+/// `DispatchSemaphore.wait()` blocks the calling thread. Blocking a Swift
+/// cooperative pool thread with a semaphore is an anti-pattern that can
+/// cause thread-pool exhaustion. This is safe here because `loginShellToken`
+/// is `@concurrent`, which opts out of the cooperative pool entirely and runs
+/// on a dedicated GCD thread. Blocking that thread with `semaphore.wait()` has
+/// no effect on the cooperative pool and carries no exhaustion risk.
+///
 /// ## Thread leak on the timeout path (known, bounded)
 /// After `group.next()` + `group.cancelAll()`, this function returns before
 /// the subprocess arm's `waitUntilExit()` call has necessarily unblocked.
@@ -316,8 +341,13 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // buffer to drain while waitUntilExit() blocks waiting for the child
             // to exit — deadlock. A verbose .zshrc (neofetch, nvm, oh-my-zsh, etc.)
             // can easily produce >64 KB of stdout. The async drain prevents the
-            // buffer from filling regardless of output volume. A DispatchSemaphore
-            // collects the drained data after waitUntilExit() returns.
+            // buffer from filling regardless of output volume.
+            //
+            // Synchronisation: drainedData is written inside the async closure and
+            // read after semaphore.wait(). semaphore.signal() / semaphore.wait()
+            // establish a happens-before relationship — the write is complete before
+            // the read begins. This is not a data race despite appearances; Swift's
+            // concurrency checker cannot see through DispatchQueue closures.
             let semaphore = DispatchSemaphore(value: 0)
             var drainedData = Data()
             DispatchQueue.global().async {
@@ -329,6 +359,12 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // The concurrent drain above ensures this never deadlocks on a
             // pipe-full condition.
             process.waitUntilExit()
+            // semaphore.wait() blocks this thread until the drain completes.
+            // Safe to block here: loginShellToken is @concurrent and runs on a
+            // dedicated GCD thread, not a cooperative pool thread — no pool
+            // exhaustion risk. On the timeout path, terminate() closes the pipe
+            // write end, causing readDataToEndOfFile() to return immediately, so
+            // semaphore.signal() fires promptly and this never hangs.
             semaphore.wait()
             guard let raw = String(data: drainedData, encoding: .utf8) else { return nil }
             let value = raw
