@@ -317,7 +317,7 @@ public final class TokenCache: Sendable {
 /// ## Security
 /// No user input is interpolated into the shell command — the command is a
 /// hardcoded literal. There is no injection risk.
-/// stderr is redirected to a separate `Pipe()` to suppress zsh startup warnings
+/// stderr is redirected to `errPipe` to suppress zsh startup warnings
 /// (e.g. `compinit` insecure-directory warnings) from appearing in Console.app.
 ///
 /// ## Shell choice
@@ -336,9 +336,12 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     // otherwise falls back to GITHUB_TOKEN. echo -n suppresses the trailing newline.
     process.arguments = ["-i", "-l", "-c", "echo -n ${GH_TOKEN:-$GITHUB_TOKEN}"]
     let outPipe = Pipe()
+    // errPipe is stored explicitly (not assigned as an anonymous Pipe()) to match
+    // the outPipe pattern and make FD lifetime unambiguous. Its contents are never
+    // read — it exists solely to suppress zsh startup warnings from Console.app.
+    let errPipe = Pipe()
     process.standardOutput = outPipe
-    // Suppress zsh startup warnings (compinit, etc.) from appearing in Console.app.
-    process.standardError = Pipe()
+    process.standardError = errPipe
     do {
         try process.run()
     } catch {
