@@ -191,6 +191,9 @@ public final class GitHubClient {
     /// cheap and idempotent, but callers should be aware that reading `hasAnyToken`
     /// is not a free in-memory check when the cache is cold. After `warmUp()` has
     /// completed the cache is warm and subsequent reads return immediately.
+    // NOTE: Not a free check on a cold cache — may trigger a synchronous Keychain
+    // read via cache.token() → resolveFromStore(). Call after warmUp() completes
+    // for O(1) cost. Safe on @MainActor; Keychain reads are fast but not instantaneous.
     public var hasAnyToken: Bool {
         if let cache = tokenCache {
             return cache.token() != nil
