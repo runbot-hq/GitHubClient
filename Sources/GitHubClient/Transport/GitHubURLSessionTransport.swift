@@ -15,7 +15,6 @@ import Foundation
 /// **Thread safety:** `GitHubTransport` is a value type whose `let` properties are either
 /// value types or `Sendable` reference types. `JSONDecoder`/`JSONEncoder` are reference types
 /// but are `@unchecked Sendable` and stateless after `init`, safe for concurrent reads.
-/// Concurrent reads are safe; there is no mutable state.
 public struct GitHubTransport: GitHubTransportProtocol {
 
   // MARK: - Stored properties
@@ -23,12 +22,8 @@ public struct GitHubTransport: GitHubTransportProtocol {
   /// JSON decoder — stateless after `init`, safe for concurrent reads.
   ///
   /// ⚠️ **Do not mutate the returned instance.** `JSONDecoder` is a reference type;
-  /// mutating its properties (e.g. `keyDecodingStrategy`, `dateDecodingStrategy`)
-  /// after this transport has been initialised will corrupt concurrent decodes
-  /// across all callers sharing this transport instance. Configure the decoder
-  /// before passing it to `GitHubTransport.init(decoder:...)` and never touch it
-  /// again. This constraint cannot be enforced by the type system because
-  /// `GitHubTransportProtocol.decoder` must satisfy a `public` protocol requirement.
+  /// mutating its properties after this transport has been initialised will corrupt
+  /// concurrent decodes. Configure before passing to init and never touch it again.
   public let decoder: JSONDecoder
 
   /// JSON encoder — stateless after `init`, safe for concurrent reads.
@@ -40,41 +35,33 @@ public struct GitHubTransport: GitHubTransportProtocol {
   /// Rate-limit actor used to arm/clear the global back-off window.
   private let rateLimiter: any RateLimitActorProtocol
 
-  /// Synchronous closure that returns the current GitHub PAT, or `nil` when
-  /// the user is signed out.
-  private let tokenProvider: @Sendable () -> String?
+  /// Async closure that returns the current GitHub PAT, or `nil` when signed out.
+  ///
+  /// Async so that `TokenCache.token()` can resolve the token lazily — including
+  /// spawning a login shell on a cold Finder/Dock launch — without blocking any
+  /// actor's serial executor. The closure is awaited inside `execute()`, which is
+  /// already `async`, so the suspension point is transparent to callers.
+  private let tokenProvider: @Sendable () async -> String?
 
   /// Optional logger for diagnostic messages.
-  ///
-  /// `public` (not `private`) so the protocol requirement in `GitHubTransportProtocol`
-  /// is satisfied and host apps can forward it to `configureGHLogger(_:)` without
-  /// downcasting to the concrete `GitHubTransport` type.
   public let logger: (any GitHubLogger)?
 
   /// Call counter incremented once per successful HTTP round-trip (2xx response).
-  ///
-  /// Injected at init so tests can pass a mock conformer and assert call counts
-  /// without touching the shared singleton. Defaults to `APICallCounter.shared`.
-  ///
-  /// Recorded inside `interpretHTTPResponse` — the single path every successful
-  /// `execute(_:)` call flows through, regardless of HTTP verb or pagination.
   private let callCounter: any APICallCounterProtocol
 
   // MARK: - Init
 
-  /// Creates a `GitHubTransport` with the given dependencies. All parameters have defaults
-  /// that reproduce the production behaviour, so `GitHubTransport()` is ready to use.
+  /// Creates a `GitHubTransport` with the given dependencies.
   ///
-  /// - Note: In production, `GitHubClient.init` always supplies an explicit `tokenProvider`
-  ///   (`{ cache.token() }`) so the `nil` default is never used in the app target.
-  ///   The default (`{ nil }`) exists only so `GitHubTransport()` compiles without
-  ///   a token provider in test or standalone contexts where no `TokenCache` is wired.
+  /// - Note: In production, `GitHubClient.init` always supplies an explicit
+  ///   `tokenProvider` (`{ await cache.token() }`). The `nil` default exists only
+  ///   so `GitHubTransport()` compiles in test or standalone contexts.
   public init(
     decoder: JSONDecoder = JSONDecoder(),
     encoder: JSONEncoder = JSONEncoder(),
     session: URLSession = .shared,
     rateLimiter: some RateLimitActorProtocol = rateLimitActor,
-    tokenProvider: (@Sendable () -> String?)? = nil,
+    tokenProvider: (@Sendable () async -> String?)? = nil,
     logger: (any GitHubLogger)? = nil,
     callCounter: any APICallCounterProtocol = APICallCounter.shared
   ) {
@@ -91,10 +78,9 @@ public struct GitHubTransport: GitHubTransportProtocol {
 
   /// Core execution pipeline shared by all `GitHubTransportProtocol` methods.
   ///
-  /// Resolves the token, builds a signed `URLRequest`, performs the `URLSession` round-trip,
-  /// and maps the HTTP response to an `ExecuteResult`. All public transport methods delegate
-  /// to this function. `configure` is applied after the base request is built, allowing
-  /// callers to override the HTTP method, body, and headers for POST/PUT/DELETE.
+  /// Resolves the token (async — may spawn a login shell on cold Finder launch),
+  /// builds a signed `URLRequest`, performs the `URLSession` round-trip, and maps
+  /// the HTTP response to an `ExecuteResult`.
   @concurrent
   func execute(
     _ endpoint: String,
@@ -103,7 +89,7 @@ public struct GitHubTransport: GitHubTransportProtocol {
     useRawAccept: Bool = false,
     configure: @Sendable (URLRequest) -> URLRequest = { $0 }
   ) async -> ExecuteResult {
-    guard let token = tokenProvider() else {
+    guard let token = await tokenProvider() else {
       logger?.log("\(logTag) › no token available", category: "transport")
       return .noToken
     }
@@ -132,7 +118,6 @@ public struct GitHubTransport: GitHubTransportProtocol {
 
   // MARK: - Request building
 
-  /// Builds a signed `URLRequest` for `endpoint`, or `nil` if the URL is invalid.
   private func buildRequest(
     endpoint: String,
     token: String,
@@ -157,31 +142,11 @@ public struct GitHubTransport: GitHubTransportProtocol {
 
   /// Maps an HTTP response + body into an `ExecuteResult`, arming rate-limit back-off as needed.
   ///
-  /// Records one call-counter hit on every 2xx response — the single point all successful
-  /// HTTP round-trips flow through regardless of verb or pagination depth.
-  ///
-  /// Counter exclusions:
-  /// - 403/429 responses: handled before the 2xx guard and return `.rateLimited` or
-  ///   `.permissionDenied` without calling `callCounter.record()`. Both are excluded
-  ///   deliberately — a request that was denied or rate-limited did not consume a
-  ///   successful API quota slot. `.permissionDenied` specifically covers plain 403s
-  ///   with no rate-limit headers (wrong token scope, revoked PAT, repo access denial);
-  ///   the request reached GitHub but was rejected, so counting it would overstate usage.
+  /// Records one call-counter hit on every 2xx response.
   ///
   /// Sequential awaits — not a missed `async let` optimisation:
-  /// - `rateLimiter.clearIfNotLimited()` and `callCounter.record()` look like two
-  ///   independent actor hops that could be parallelised with `async let`. They are
-  ///   intentionally sequential: rate-limit state must be cleared *before* the success
-  ///   is recorded so the two pieces of state stay consistent from the caller’s
-  ///   perspective. Both are nanosecond in-memory actor operations; `async let` child-task
-  ///   allocation overhead would exceed any latency gain here.
-  ///
-  /// 3xx and the (200..<300) guard:
-  /// - The status range includes 3xx in principle, but URLSession follows redirects
-  ///   automatically and never surfaces a 3xx response to this completion handler.
-  ///   A 304 Not Modified is only returned when a conditional GET includes an
-  ///   `If-None-Match` / `If-Modified-Since` header — none of which this client sends.
-  ///   In practice this guard can only be reached by a 2xx; the wider range is harmless.
+  /// `rateLimiter.clearIfNotLimited()` and `callCounter.record()` are intentionally
+  /// sequential: rate-limit state must be cleared before success is recorded.
   private func interpretHTTPResponse(
     _ response: URLResponse,
     data: Data,
@@ -205,7 +170,6 @@ public struct GitHubTransport: GitHubTransportProtocol {
       logErrorBody(data, endpoint: urlString, status: http.statusCode, logger: logger)
       return .httpError(http.statusCode)
     }
-    // Sequential awaits are intentional — see doc comment above.
     await rateLimiter.clearIfNotLimited()
     if let remaining = http.value(forHTTPHeaderField: "X-RateLimit-Remaining").flatMap(Int.init) {
         await rateLimiter.updateRemaining(remaining)
@@ -218,18 +182,11 @@ public struct GitHubTransport: GitHubTransportProtocol {
 
 // MARK: - Shared execution core
 
-/// The result of a single URLSession round-trip through `execute`.
 internal enum ExecuteResult {
-  /// A 2xx response with body, status code, and optional `Link` header.
   case success(Data, statusCode: Int, linkHeader: String?)
-  /// No GitHub token was available.
   case noToken
-  /// A non-2xx HTTP status code was returned.
   case httpError(Int)
-  /// The request was rate limited (403/429 with rate-limit signals).
   case rateLimited
-  /// The request was denied (403/429 without rate-limit signals).
   case permissionDenied
-  /// A transport-level network error occurred.
   case networkError(Error)
 }

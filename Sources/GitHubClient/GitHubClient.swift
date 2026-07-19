@@ -17,33 +17,12 @@ import Foundation
 //       logger: MyLogger()
 //   )
 //
-// Custom scopes (optional — defaults to GitHubScopes.default):
-//
-//   let github = GitHubClient(
-//       clientID: "your-client-id",
-//       clientSecret: "your-client-secret",
-//       service: "com.example.myapp",
-//       account: "github-oauth-token",
-//       scopes: GitHubScopes.default + [GitHubScopes.readUser]
-//   )
-//
 // Tests inject mocks via the secondary init:
 //
 //   let github = GitHubClient(
 //       oauthService: MockOAuthService(),
 //       transport: MockTransport()
 //   )
-//
-// ## Why a facade?
-//
-// Without this type, `OAuthService`, `GitHubTransport`, and `TokenCache`
-// are constructed independently with no shared token path:
-//
-// - `OAuthService` saves tokens to `KeychainTokenStore`.
-// - `GitHubTransport` reads tokens via a separate closure.
-// - `TokenCache` exists but is never wired into either.
-//
-// This facade is the single wiring point that closes all three gaps.
 
 /// A facade that owns and wires `OAuthService`, `GitHubTransport`, and
 /// `TokenCache` under a single initialiser.
@@ -54,8 +33,7 @@ import Foundation
 /// ## Isolation
 /// `GitHubClient` is `@MainActor`-isolated at the type level because
 /// `oauthService` stores `any OAuthServiceProtocol` whose protocol is
-/// `@MainActor`-isolated. This makes the isolation boundary compiler-enforced
-/// rather than relying on call-site convention.
+/// `@MainActor`-isolated.
 @MainActor
 public final class GitHubClient {
 
@@ -64,10 +42,6 @@ public final class GitHubClient {
 
     /// The transport — handles all authenticated GitHub API requests.
     public let transport: any GitHubTransportProtocol
-
-    /// The token cache — held so `warmUp()` and `hasAnyToken` can delegate to it.
-    /// `nil` when the test init is used (no real cache in that path).
-    private let tokenCache: TokenCache?
 
     // MARK: - Production init
 
@@ -78,18 +52,12 @@ public final class GitHubClient {
     /// path. `TokenCache.invalidate()` is called automatically after every
     /// successful sign-in and sign-out.
     ///
-    /// Must be called on the main actor because `OAuthService.init` is
-    /// `@MainActor`-isolated. `AppDelegate` — the only production call site —
-    /// satisfies this requirement automatically.
-    ///
     /// - Parameters:
     ///   - clientID: The GitHub OAuth app client ID.
     ///   - clientSecret: The GitHub OAuth app client secret.
-    ///   - service: The keychain service name (e.g. your app's bundle identifier).
-    ///   - account: The keychain account name (e.g. `"github-oauth-token"`).
-    ///   - scopes: The OAuth scopes to request during sign-in. Defaults to
-    ///     `GitHubScopes.default`. Must not be empty. Use `GitHubScopes`
-    ///     constants for type safety and discoverability.
+    ///   - service: The keychain service name.
+    ///   - account: The keychain account name.
+    ///   - scopes: The OAuth scopes to request. Defaults to `GitHubScopes.default`.
     ///   - logger: Optional logger for diagnostic messages.
     @MainActor
     public init(
@@ -113,88 +81,23 @@ public final class GitHubClient {
             onTokenDeleted: { cache.invalidate() }
         )
         let transport = GitHubTransport(
-            tokenProvider: { cache.token() },
+            tokenProvider: { await cache.token() },
             logger: logger
         )
-        // Write through the internal backing store to avoid triggering the
-        // #DeprecatedDeclaration warning on the public `sharedGitHubTransport` alias.
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
-        self.tokenCache = cache
     }
 
     // MARK: - Test init
 
     /// Creates a `GitHubClient` with injected protocol mocks.
-    ///
-    /// Use in tests to avoid Keychain or network access. Inject a
-    /// `MockOAuthService` and `MockTransport` at whatever granularity
-    /// the test requires.
-    ///
-    /// Intentionally nonisolated — it only assigns protocol existentials
-    /// and never calls any `@MainActor`-isolated code directly.
-    ///
-    /// - Note: Does **not** accept a `scopes:` parameter — it takes
-    ///   `any OAuthServiceProtocol` directly, which already encapsulates
-    ///   scope configuration. No changes needed here.
-    ///
-    /// - Parameters:
-    ///   - oauthService: A mock or stub conforming to `OAuthServiceProtocol`.
-    ///   - transport: A mock or stub conforming to `GitHubTransportProtocol`.
+    /// Does not accept a `scopes:` parameter — takes `any OAuthServiceProtocol` directly.
     public init(
         oauthService: any OAuthServiceProtocol,
         transport: any GitHubTransportProtocol
     ) {
         self.oauthService = oauthService
         self.transport = transport
-        self.tokenCache = nil
-    }
-
-    // MARK: - Token warm-up
-
-    /// Pre-populates the token cache by sourcing the user's login shell environment.
-    ///
-    /// Call this once during app startup **before** the first poll fires (e.g. as the
-    /// first `await` in `AppState.start()`). This bridges the macOS GUI app limitation
-    /// where `launchd`-spawned processes do not inherit the user's shell environment
-    /// and `GH_TOKEN` / `GITHUB_TOKEN` are therefore absent from `ProcessInfo`.
-    ///
-    /// This is a no-op when:
-    /// - The cache is already populated (prior `token()` call or prior `warmUp()`)
-    /// - A Keychain OAuth token exists (checked directly via `TokenStore`, even if
-    ///   not yet read into the in-memory cache on this launch)
-    /// - The app was launched from a terminal (token already in `ProcessInfo`)
-    /// - The test init was used (no `TokenCache` in that path)
-    ///
-    /// See `TokenCache.warmUp()` for full implementation details.
-    public func warmUp() async {
-        await tokenCache?.warmUp()
-    }
-
-    // MARK: - Token availability
-
-    /// `true` when any usable GitHub token is available — OAuth token,
-    /// `GH_TOKEN`, or `GITHUB_TOKEN` environment variable.
-    ///
-    /// Unlike `OAuthService.hasAnyToken`, this check goes through `TokenCache`
-    /// and therefore reflects tokens recovered via `warmUp()` (login shell
-    /// resolution). Call this after `warmUp()` has completed for accurate results
-    /// in GUI app launch contexts where `ProcessInfo` does not contain the token.
-    ///
-    /// Falls back to `oauthService.hasAnyToken` when the test init is used
-    /// (no `TokenCache` in that path).
-    ///
-    /// ## Side effects
-    /// This property calls `cache.token()` which may trigger a synchronous Keychain
-    /// read (`TokenStore.load()`) if the in-memory cache is unpopulated. The read is
-    /// cheap and idempotent, but callers should be aware that reading `hasAnyToken`
-    /// is not a free in-memory check when the cache is cold. After `warmUp()` has
-    /// completed the cache is warm and subsequent reads return immediately.
-    public var hasAnyToken: Bool {
-        if let cache = tokenCache {
-            return cache.token() != nil
-        }
-        return oauthService.hasAnyToken
     }
 }
