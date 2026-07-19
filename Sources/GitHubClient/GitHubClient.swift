@@ -84,6 +84,18 @@ public final class GitHubClient {
             tokenProvider: { await cache.token() },
             logger: logger
         )
+        // ⚠️ NOT a dead assignment — this is load-bearing module wiring.
+        // sharedTransportStorage is the backing var read by currentTransport
+        // (GitHubTransportShims.swift). Every free-function shim in the module
+        // (ghAPI, ghPost, cancelRun, deleteRunnerByID, etc.) resolves its
+        // transport via `currentTransport`, which falls back to
+        // sharedTransportStorage when no @TaskLocal override is in scope.
+        // Without this write, every shim call in a production app would use
+        // the default no-token GitHubTransport() constructed at module load —
+        // all API calls would return 401 until the user re-launches.
+        // Periphery / compiler "assigned but never read" warnings are false
+        // positives here: the value IS read, just indirectly through
+        // currentTransport in a different file.
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
@@ -92,7 +104,17 @@ public final class GitHubClient {
     // MARK: - Test init
 
     /// Creates a `GitHubClient` with injected protocol mocks.
-    /// Does not accept a `scopes:` parameter — takes `any OAuthServiceProtocol` directly.
+    ///
+    /// Accepts `any OAuthServiceProtocol` and `any GitHubTransportProtocol`
+    /// directly, so the caller controls all behaviour at mock-construction time.
+    ///
+    /// WHY NO `scopes:` PARAMETER:
+    /// The production init accepts `scopes:` to pass them through to
+    /// `OAuthService`. The test init bypasses `OAuthService` entirely — the
+    /// caller passes a fully-constructed mock, which already encodes whatever
+    /// scope behaviour the test requires. Adding `scopes:` here would be
+    /// misleading: there is no `OAuthService` to forward them to, and a test
+    /// author who adds scopes expecting OAuth behaviour would get a silent no-op.
     public init(
         oauthService: any OAuthServiceProtocol,
         transport: any GitHubTransportProtocol

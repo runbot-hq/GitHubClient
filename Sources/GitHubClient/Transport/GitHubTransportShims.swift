@@ -7,9 +7,24 @@ import Foundation
 
 /// Internal backing storage for the process-wide default transport.
 ///
-/// Written exactly once by `GitHubClient.init` before any concurrent reads,
-/// satisfying the once-written invariant. All internal code reads/writes this
-/// directly.
+/// Written exactly once by `GitHubClient.init` (the production init) before
+/// any concurrent reads, satisfying the once-written invariant that makes
+/// `nonisolated(unsafe)` safe here. All internal shim functions read this
+/// indirectly via `currentTransport`.
+///
+/// WHY `nonisolated(unsafe)` (not a global actor or a lock):
+/// - `GitHubClient.init` is `@MainActor`-isolated and runs before any shim
+///   is called, so the write always precedes all reads — no data race in
+///   practice.
+/// - A `@MainActor` annotation on a module-level var would force every shim
+///   call site to be `@MainActor`-isolated or async, which is unnecessarily
+///   viral for a read-only-after-init global.
+/// - A `Mutex` or `OSAllocatedUnfairLock` would add synchronisation overhead
+///   on every shim call for a value that never changes after init.
+/// - `nonisolated(unsafe)` opts out of the Swift 6 actor-isolation check and
+///   shifts the safety proof to the once-written invariant above. If you are
+///   reading this because you want to write to this var outside of
+///   `GitHubClient.init`, stop — add a new property on `GitHubClient` instead.
 nonisolated(unsafe) internal var sharedTransportStorage: any GitHubTransportProtocol = GitHubTransport()
 
 // MARK: - @TaskLocal transport
@@ -30,12 +45,19 @@ nonisolated(unsafe) internal var sharedTransportStorage: any GitHubTransportProt
 /// otherwise falls back to `sharedTransportStorage` — the live authenticated
 /// instance wired by `GitHubClient.init` — evaluated at call time.
 ///
-/// All shims and domain helpers in this module read `currentTransport`
-/// directly and require no changes.
+/// WHY `var` AND NOT `let`:
+/// Swift requires `var` for any property with a getter body — `let` is a
+/// syntax error for a computed property. This is a read-only computed accessor
+/// with no setter; the `var` keyword carries no mutability implication here.
+/// There is no stored backing field and no write path. The compiler enforces
+/// immutability: any attempt to assign to `currentTransport` is a compile error
+/// ("cannot assign to property: 'currentTransport' is a get-only property").
 ///
-/// - Note: Declared as `var` because Swift requires `var` for computed properties;
-///   `let` is not valid for a computed getter. This property has no setter and
-///   is immutable from any call site — the compiler enforces this.
+/// WHY `nonisolated` IS NOT NEEDED HERE:
+/// `@TaskLocal` storage is task-scoped, not actor-scoped. Reading
+/// `taskLocalTransport` does not require an actor hop and is safe from any
+/// isolation context. `sharedTransportStorage` carries its own
+/// `nonisolated(unsafe)` annotation. There is no isolation mismatch to resolve.
 public var currentTransport: any GitHubTransportProtocol {
     taskLocalTransport ?? sharedTransportStorage
 }
@@ -49,10 +71,11 @@ public var currentTransport: any GitHubTransportProtocol {
 /// }
 /// ```
 ///
-/// - Note: Declared `nonisolated` so it can be called from any actor context —
-///   including `@MainActor`-isolated `AppDelegate` — without an isolation
-///   mismatch. Task-local storage is task-scoped, not actor-scoped, so no
-///   actor hop is needed and no isolation warning is produced.
+/// WHY `nonisolated`:
+/// Task-local storage is task-scoped, not actor-scoped. There is no actor
+/// state to protect and no hop needed. Marking `nonisolated` lets callers
+/// on any actor (including `@MainActor`-isolated `AppDelegate`) call this
+/// without an isolation mismatch warning.
 ///
 /// The `@Sendable` closure and `T: Sendable` bound are required because
 /// `$taskLocalTransport.withValue` crosses task boundaries under strict

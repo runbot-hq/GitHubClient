@@ -13,8 +13,13 @@ import Foundation
 /// `init(decoder:encoder:session:rateLimiter:tokenProvider:logger:callCounter:)`.
 ///
 /// **Thread safety:** `GitHubTransport` is a value type whose `let` properties are either
-/// value types or `Sendable` reference types. `JSONDecoder`/`JSONEncoder` are reference types
-/// but are `@unchecked Sendable` and stateless after `init`, safe for concurrent reads.
+/// value types or `Sendable` reference types. `JSONDecoder`/`JSONEncoder` are reference
+/// types declared `@unchecked Sendable` by the standard library. They are safe for
+/// concurrent reads because no mutable state is accessed after `init` — all configuration
+/// (date decoding strategy, key decoding strategy, etc.) must be applied before the
+/// transport is initialised and never changed afterwards. ⚠️ Do NOT mutate the decoder
+/// or encoder after construction; doing so is an unsynchronised write that will corrupt
+/// concurrent decodes/encodes.
 public struct GitHubTransport: GitHubTransportProtocol {
 
   // MARK: - Stored properties
@@ -37,10 +42,20 @@ public struct GitHubTransport: GitHubTransportProtocol {
 
   /// Async closure that returns the current GitHub PAT, or `nil` when signed out.
   ///
-  /// Async so that `TokenCache.token()` can resolve the token lazily — including
-  /// spawning a login shell on a cold Finder/Dock launch — without blocking any
-  /// actor's serial executor. The closure is awaited inside `execute()`, which is
-  /// already `async`, so the suspension point is transparent to callers.
+  /// WHY A STORED ASYNC CLOSURE (not a direct `TokenCache` reference):
+  /// 1. Decoupling: `GitHubTransport` lives in the `Transport` layer and must
+  ///    not import `TokenCache` from the `Auth` layer — that would create a
+  ///    circular dependency within the module. A closure erases the concrete type.
+  /// 2. Testability: tests can inject a synchronous stub (`{ "test-token" }` or
+  ///    `{ nil }`) without constructing a full `KeychainTokenStore`/`TokenCache`
+  ///    stack. This is the primary reason the parameter exists in the public init.
+  /// 3. Lazy resolution: the closure is awaited inside `execute()`, which is
+  ///    already `async`. On a cold Finder/Dock launch the first await suspends
+  ///    for ~50–200 ms while `TokenCache.token()` spawns a login shell. The
+  ///    closure boundary makes that suspension point explicit and keeps it off
+  ///    any actor's serial executor (execute() is `@concurrent`).
+  /// 4. Future flexibility: the provider can be swapped (e.g. to a short-lived
+  ///    installation token refresher) without changing `GitHubTransport`'s API.
   private let tokenProvider: @Sendable () async -> String?
 
   /// Optional logger for diagnostic messages.
@@ -56,9 +71,18 @@ public struct GitHubTransport: GitHubTransportProtocol {
 
   /// Creates a `GitHubTransport` with the given dependencies.
   ///
-  /// - Note: In production, `GitHubClient.init` always supplies an explicit
-  ///   `tokenProvider` (`{ await cache.token() }`). The `nil` default exists only
-  ///   so `GitHubTransport()` compiles in test or standalone contexts.
+  /// WHY `tokenProvider` HAS A `nil` DEFAULT:
+  /// The `nil` default (resolved to `{ nil }` in the body) exists so that
+  /// `GitHubTransport()` compiles in test and standalone contexts that do not
+  /// have a `TokenCache` available. In production, `GitHubClient.init` always
+  /// supplies an explicit `tokenProvider: { await cache.token() }` — the default
+  /// is never used in a shipped app. A `GitHubTransport()` constructed without
+  /// an explicit provider will return `.noToken` on every `execute()` call, which
+  /// is the correct behaviour for an unauthenticated transport stub.
+  ///
+  /// ⚠️ Do NOT add `tokenProvider: { await TokenCache.shared.token() }` as the
+  /// default — that would silently couple transport to a shared singleton and
+  /// make token injection in tests impossible without swizzling.
   public init(
     decoder: JSONDecoder = JSONDecoder(),
     encoder: JSONEncoder = JSONEncoder(),
@@ -148,9 +172,14 @@ public struct GitHubTransport: GitHubTransportProtocol {
   ///
   /// Records one call-counter hit on every 2xx response.
   ///
-  /// Sequential awaits — not a missed `async let` optimisation:
-  /// `rateLimiter.clearIfNotLimited()` and `callCounter.record()` are intentionally
-  /// sequential: rate-limit state must be cleared before success is recorded.
+  /// WHY SEQUENTIAL AWAITS (not `async let`):
+  /// The two awaits — `rateLimiter.clearIfNotLimited()` then `callCounter.record()` —
+  /// are intentionally sequential, not a missed `async let` parallelisation opportunity.
+  /// Rate-limit state must be cleared before the success counter is incremented:
+  /// if both ran concurrently, a read of `rateLimiter.isLimited` on another task
+  /// could see the old (still-limited) state while `callCounter` has already ticked,
+  /// producing a misleading call-count for a request that the rate-limiter
+  /// considers not yet cleared. Sequential ordering is the correct invariant here.
   private func interpretHTTPResponse(
     _ response: URLResponse,
     data: Data,
@@ -174,11 +203,11 @@ public struct GitHubTransport: GitHubTransportProtocol {
       logErrorBody(data, endpoint: urlString, status: http.statusCode, logger: logger)
       return .httpError(http.statusCode)
     }
-    await rateLimiter.clearIfNotLimited()
+    await rateLimiter.clearIfNotLimited()   // ← must precede callCounter.record() — see doc comment
     if let remaining = http.value(forHTTPHeaderField: "X-RateLimit-Remaining").flatMap(Int.init) {
         await rateLimiter.updateRemaining(remaining)
     }
-    await callCounter.record()
+    await callCounter.record()              // ← intentionally after clearIfNotLimited()
     let linkHeader = http.value(forHTTPHeaderField: "Link")
     return .success(data, statusCode: http.statusCode, linkHeader: linkHeader)
   }
