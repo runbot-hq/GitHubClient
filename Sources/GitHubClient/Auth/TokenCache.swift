@@ -38,6 +38,12 @@ public final class TokenCache: Sendable {
     /// inside invalidate() or warmUp() must be redesigned. The current one-shot design
     /// is correct for the existing call flow; this comment exists to prevent a future
     /// caller from treating the lack of reset as an unintentional omission.
+    ///
+    /// ## Naming: warmUpInFlight vs warmUpAttempted
+    /// The name reads as "currently running" but the semantics are "ever attempted" —
+    /// it is a permanent one-shot latch, not a transient in-flight flag. The name is
+    /// kept as-is because renaming would churn all call sites with no behaviour change;
+    /// the one-shot semantics are fully documented here and at every read site.
     private let warmUpInFlight = Mutex<Bool>(false)
 
     /// Creates a new `TokenCache`.
@@ -320,6 +326,16 @@ public final class TokenCache: Sendable {
 /// so `readDataToEndOfFile()` returns immediately with whatever was written.
 /// There is no pipe-buffer deadlock risk for payloads this small.
 ///
+/// The raw pipe data is trimmed with `trimmingCharacters(in: .whitespacesAndNewlines)`
+/// before the `!value.isEmpty` guard and before being written to cache. This
+/// eliminates the whitespace sub-case: a trailing newline from a misbehaving echo
+/// substitute, or leading whitespace from a `.zshrc` greeting written to stdout
+/// instead of stderr, would otherwise be silently cached as part of the token and
+/// produce 401s with no diagnostic. Arbitrary non-whitespace prefix noise from
+/// `.zshrc` `print` statements is not trimmed, but such a string would not be a
+/// valid GitHub token and would fail on first API call via the normal 401 recovery
+/// path — not silently.
+///
 /// ## stderr drain strategy
 /// stderr is redirected to `FileHandle.nullDevice` (/dev/null). A Pipe() is
 /// deliberately NOT used for stderr: if the read end is never drained and the
@@ -380,13 +396,12 @@ public final class TokenCache: Sendable {
 /// sequences or other output to stdout via `print` rather than stderr, which
 /// could theoretically prefix the token value. In practice this cannot corrupt
 /// the result: `echo -n` is the **last** command on stdout, so any `.zshrc`
-/// noise lands before the token in the pipe. The subprocess arm reads the full
-/// pipe as a single UTF-8 string and passes the whole thing (prefix and all)
-/// to the `!value.isEmpty` guard — a prefixed value would not be a valid 40-char
-/// GitHub token, would fail GitHub API auth on first use, and would result in a
-/// normal 401 recovery. In the (very exotic) case of a `.zshrc` that writes
-/// exactly the right number of bytes of garbage before the token, that `.zshrc
-/// is already broken in ways far beyond this function's scope to fix.
+/// noise lands before the token in the pipe. The subprocess arm trims whitespace
+/// and passes the whole string to `!value.isEmpty` — a prefixed value would not
+/// be a valid GitHub token, would fail GitHub API auth on first use, and would
+/// result in a normal 401 recovery. In the (very exotic) case of a `.zshrc` that
+/// writes exactly the right number of bytes of garbage before the token, that
+/// `.zshrc` is already broken in ways far beyond this function's scope to fix.
 ///
 /// ## Shell choice: why /bin/zsh and not $SHELL
 /// `/bin/zsh` is the macOS system default shell since Catalina (10.15) and is
@@ -441,7 +456,19 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             guard !Task.isCancelled else { return nil }
             process.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+            // Trim whitespace before the isEmpty check and before caching.
+            // A trailing newline from a misbehaving echo substitute, or leading
+            // whitespace from a .zshrc greeting written to stdout, would otherwise
+            // be silently baked into the cached token and produce 401s with no
+            // diagnostic. See "stdout pipe drain strategy" in the function doc comment.
+            guard let raw = String(data: data, encoding: .utf8) else {
+                #if DEBUG
+                logger?.log("TokenCache › warmUp: login shell: stdout was not valid UTF-8", category: "transport")
+                #endif
+                return nil
+            }
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else {
                 #if DEBUG
                 logger?.log("TokenCache › warmUp: login shell: no token found in shell environment", category: "transport")
                 #endif
