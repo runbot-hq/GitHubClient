@@ -20,6 +20,7 @@ A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls 
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Codebase Structure](#codebase-Structure)
 - [Usage](#usage)
 - [Usage Examples](#usage-examples)
 - [Authentication](#authentication)
@@ -43,6 +44,13 @@ A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls 
 
 - Swift 6.2+
 - macOS 15+
+
+## Codebase Structure
+The package is organized into three layers :
+
+- API/ — workflow/runner domain functions and models
+- Auth/ — OAuth, Keychain, token caching
+- Transport/ — URLSession-backed HTTP transport
 
 ## Installation
 
