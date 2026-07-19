@@ -402,30 +402,39 @@ private func drainPipe(_ pipe: Pipe) async -> Data {
 /// Shares the `Process` reference between the subprocess arm and the timeout arm.
 ///
 /// `Process` is not `Sendable` so it cannot be captured directly across task
-/// boundaries. This box is `@unchecked Sendable` because the access pattern is
-/// safe by construction: `box.process` is assigned before `process.run()` is
-/// called (subprocess arm), so the timeout arm always reads a non-nil value
-/// for any process that has been handed to the OS. A `defer` in the subprocess
-/// arm clears the box if `run()` throws, so the timeout arm sees `nil` and
-/// skips `terminate()` on a process that never launched.
+/// boundaries. This box is `@unchecked Sendable` because the two arms access
+/// `process` without any synchronisation primitive — see the data race note below.
+/// A `defer` in the subprocess arm clears the box if `run()` throws, so the
+/// timeout arm sees `nil` and skips `terminate()` on a process that never launched.
 ///
-/// ## Accepted data race
+/// ## Accepted data race (hardware-ordering-dependent, not formally safe)
 /// The write (`box.process = process`, before `run()`) and the read
 /// (`box.process?.terminate()`, after 10 s of sleep) are on two different Swift
-/// concurrency tasks with no lock or memory barrier between them. TSan will
-/// correctly flag this as an unsynchronised read/write — this is an accepted
-/// data race, not a false positive. It is safe in practice because:
-/// - The write always precedes `waitUntilExit()`, which blocks the subprocess
-///   arm's thread for the duration of the shell's life.
+/// concurrency tasks with no lock, barrier, or `Mutex` between them. TSan will
+/// correctly flag this as an unsynchronised read/write. This is an accepted
+/// data race, not a false positive.
+///
+/// Safety in practice relies on hardware memory ordering, not on any guarantee
+/// from the Swift memory model. The Swift memory model does not promise that an
+/// unsynchronised write from Task A is visible to a read from Task B at any
+/// particular point — only properly synchronised accesses carry that guarantee.
+/// The argument below holds on Apple Silicon and x86 due to their strong
+/// memory models, but it is not formally provable from Swift semantics alone.
+/// Do NOT adapt this pattern assuming it is formally safe.
+///
+/// Why it holds in practice:
+/// - The write precedes `waitUntilExit()`, which blocks the subprocess arm's
+///   thread for the entire duration of the shell's life — effectively pinning
+///   the write well before the timeout arm could ever fire.
 /// - The read happens after 10 s of sleep — orders of magnitude after the write.
 /// - `Process.terminate()` is thread-safe (documented by Apple).
 /// - Window A: timeout fires between task creation and `box.process = process`
 ///   → `nil?.terminate()`, a no-op; the shell runs to natural completion.
 /// - Window B: timeout fires between `box.process = process` and `process.run()`
-///   → `terminate()` is called on a not-yet-launched Process. Per Apple docs,
-///   `terminate()` checks `isRunning` and is a no-op on an unlaunched process.
-///   Both windows are bounded and harmless.
-/// Accepted as bounded and harmless; the entire box disappears in #68.
+///   → `terminate()` on an unlaunched Process. Per Apple docs, `terminate()`
+///   checks `isRunning` and is a no-op. Both windows are bounded and harmless.
+///
+/// Accepted as bounded and harmless in practice; disappears entirely in #68.
 ///
 /// ## Process dealloc does not terminate
 /// When `withTaskGroup` returns and `box` is released, ARC deallocates this
