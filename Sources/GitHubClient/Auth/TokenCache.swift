@@ -18,6 +18,11 @@ import Synchronization
 // The shell is spawned at most once per cache lifetime (cleared by invalidate()).
 // After a successful resolution the result is written to the in-memory cache
 // and all subsequent calls return immediately from step 1.
+//
+// If the shell times out or produces no token, loginShellFailed is set to true
+// under the same Mutex. Subsequent token() calls short-circuit before step 4,
+// returning nil immediately without re-spawning. invalidate() resets the flag
+// so a sign-out / sign-in cycle gets exactly one fresh attempt.
 
 /// A token cache that resolves from an injected `TokenStore` and/or environment variables,
 /// falling back to a login shell subprocess on a cold GUI-app launch.
@@ -28,8 +33,14 @@ public final class TokenCache: Sendable {
     private let tokenStore: any TokenStore
     /// An optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
-    /// Thread-safe in-memory cache, initially `nil`.
-    private let cache = Mutex<String?>(nil)
+
+    /// Combined cache state guarded by a single `Mutex`.
+    ///
+    /// Both fields are mutated together so reads and writes are always consistent:
+    /// - `token`: the resolved token, or `nil` if not yet populated.
+    /// - `shellFailed`: set to `true` after a confirmed shell timeout or no-token
+    ///   result, preventing further shell re-spawns until `invalidate()` resets it.
+    private let state = Mutex<(token: String?, shellFailed: Bool)>((token: nil, shellFailed: false))
 
     /// Creates a new `TokenCache`.
     /// - Parameters:
@@ -52,25 +63,33 @@ public final class TokenCache: Sendable {
     ///
     /// The shell (step 4) is spawned at most once per cache lifetime. On success
     /// the result is written to the in-memory cache so every subsequent call
-    /// returns immediately from step 1. After `invalidate()` the cache is cleared
-    /// and the next `token()` call re-runs the full chain, including step 4 if
-    /// needed (e.g. after sign-out on a Finder launch with no env token).
+    /// returns immediately from step 1. On timeout or no-token result, the
+    /// `shellFailed` flag is set and all subsequent calls return `nil` immediately
+    /// without re-spawning the shell. `invalidate()` resets both the cache and the
+    /// flag, so a sign-out / sign-in cycle gets exactly one fresh attempt.
     ///
     /// For GUI app launches from Finder/Dock/login items, `launchd` does not source
     /// `~/.zprofile` or `~/.zshrc`, so `ProcessInfo` does not contain `GH_TOKEN`.
     /// Step 4 bridges that gap by spawning `/bin/zsh -i -l` which sources those files.
     ///
     /// Returns `nil` if no token is available from any source (user is signed out,
-    /// no env var, no shell export).
+    /// no env var, no shell export, or shell previously timed out).
     public func token() async -> String? {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }
         if let envToken = resolveFromEnvironment() { return envToken }
+        // Short-circuit if the shell already failed on a prior call.
+        // Prevents re-spawning /bin/zsh on every poll cycle after a confirmed
+        // timeout or no-token result. Reset by invalidate().
+        if state.withLock({ $0.shellFailed }) { return nil }
         // All fast paths missed — cold Finder/Dock/login-item launch.
         // Spawn the login shell to source ~/.zprofile and ~/.zshrc.
-        // This suspends for ~50-200ms on the first call, then the result
+        // This suspends for ~50–200ms on the first call, then the result
         // is cached and all subsequent calls return from step 1 above.
         guard let value = await loginShellToken(logger: logger) else {
+            // Shell timed out or produced no token. Set the failed flag so
+            // subsequent poll cycles don't re-spawn the shell indefinitely.
+            state.withLock { $0.shellFailed = true }
             logger?.log(
                 "TokenCache › token() — login shell found no token. "
                 + "If this is a Finder/Dock launch, check that GH_TOKEN or GITHUB_TOKEN "
@@ -79,27 +98,30 @@ public final class TokenCache: Sendable {
             )
             return nil
         }
-        cache.withLock { if $0 == nil { $0 = value } }
+        state.withLock { if $0.token == nil { $0.token = value } }
         return value
     }
 
-    /// Clears the in-memory token cache.
+    /// Clears the in-memory token cache and resets the shell-failed flag.
     ///
     /// Call after saving a new token or after sign-out so the next `token()`
     /// call re-resolves from the store or shell.
     ///
-    /// After `invalidate()`, the shell (step 4) may be re-spawned on the next
-    /// `token()` call if all faster paths miss — for example, after OAuth sign-out
-    /// on a Finder launch where no env token is present. This is correct and
-    /// intentional: the shell is the only remaining resolution source in that case.
+    /// Resetting `shellFailed` here is intentional: a sign-out / sign-in cycle
+    /// should get exactly one fresh shell attempt on the next `token()` call,
+    /// even if the previous attempt timed out. Without this reset the user would
+    /// be permanently locked out of the shell path for the process lifetime after
+    /// a single timeout, regardless of whether they subsequently fix their
+    /// `~/.zshrc` or reduce its startup cost.
+    ///
     /// Note the latency cost: the re-spawned shell adds ~50–200 ms to the first
     /// poll cycle after sign-out on an affected launch configuration. This cost
-    /// recurs on every sign-out cycle (each `invalidate()` resets the cache), not
+    /// recurs on every sign-out cycle (each `invalidate()` resets the flag), not
     /// just once per process lifetime. It is cached immediately on success, so
     /// only the first `token()` call after each `invalidate()` pays the penalty.
     public func invalidate() {
-        cache.withLock { $0 = nil }
-        logger?.log("TokenCache › invalidate — cache cleared", category: "transport")
+        state.withLock { $0 = (token: nil, shellFailed: false) }
+        logger?.log("TokenCache › invalidate — cache and shell-failed flag cleared", category: "transport")
     }
 
     // MARK: - Private helpers
@@ -107,7 +129,7 @@ public final class TokenCache: Sendable {
     /// Returns the token from the in-memory cache, or `nil` if not yet populated.
     /// Fast path — no I/O, no subprocess.
     private func resolveFromCache() -> String? {
-        let cached = cache.withLock { $0 }
+        let cached = state.withLock { $0.token }
         #if DEBUG
         if let cached {
             logger?.log("TokenCache › resolved from cache (len=\(cached.count))", category: "transport")
@@ -120,14 +142,15 @@ public final class TokenCache: Sendable {
     /// Empty strings are treated as absent (e.g. corrupted Keychain entry).
     ///
     /// ## Cache-write side effect (not a pure read)
-    /// Writes to `cache` on success. Named `resolveFrom…` to signal the
+    /// Writes to `state.token` on success. Named `resolveFrom…` to signal the
     /// resolve-and-cache pattern; the write is the meaningful side-effect,
     /// not the return value.
     ///
     /// ## Thundering-herd window (intentional)
     /// Two concurrent callers that both miss the in-memory cache may both call
-    /// `tokenStore.load()`. The `if $0 == nil` Mutex guard prevents a double-write;
-    /// the double Keychain read is idempotent and cheaper than an extra init lock.
+    /// `tokenStore.load()`. The `if $0.token == nil` Mutex guard prevents a
+    /// double-write; the double Keychain read is idempotent and cheaper than
+    /// an extra init lock.
     private func resolveFromStore() -> String? {
         guard let token = tokenStore.load(), !token.isEmpty else {
             #if DEBUG
@@ -138,7 +161,7 @@ public final class TokenCache: Sendable {
         #if DEBUG
         logger?.log("TokenCache › resolved from store (len=\(token.count)), populating cache", category: "transport")
         #endif
-        cache.withLock { if $0 == nil { $0 = token } }
+        state.withLock { if $0.token == nil { $0.token = token } }
         return token
     }
 
@@ -157,7 +180,7 @@ public final class TokenCache: Sendable {
                 #if DEBUG
                 logger?.log("TokenCache › resolved from env var \(key) (len=\(envValue.count)), populating cache", category: "transport")
                 #endif
-                cache.withLock { if $0 == nil { $0 = envValue } }
+                state.withLock { if $0.token == nil { $0.token = envValue } }
                 return envValue
             }
             #if DEBUG
@@ -226,10 +249,8 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// fires first, `group.next()` returns `nil` and `cancelAll()` is called —
 /// any token the shell was about to produce is intentionally discarded.
 /// This is a deliberate fail-safe: returning `nil` after a timeout is safer
-/// than returning a token whose resolution time exceeded the budget. On the
-/// next poll cycle, `token()` will retry (the cache is still empty) and the
-/// shell will be re-spawned. The #68 async refactor removes this design
-/// entirely, making the timeout semantics moot.
+/// than returning a token whose resolution time exceeded the budget. The caller
+/// (`token()`) sets `shellFailed = true` on nil return, preventing re-spawns.
 ///
 /// ## Pipe buffer deadlock prevention (withCheckedContinuation drain)
 /// `waitUntilExit()` blocks until the child exits. If the child writes enough
@@ -275,20 +296,17 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// sandboxed, `process.run()` will throw a permission error, `loginShellToken`
 /// returns `nil`, and the user gets no token with no obvious diagnostic.
 /// The entire `loginShellToken` path must be removed before enabling the
-/// sandbox entitlement. The #68 async refactor replaces `Process` with a
-/// pure-Swift async resolution strategy and removes this dependency.
+/// sandbox entitlement.
 ///
 /// ## Thundering-herd on concurrent callers
 /// `loginShellToken` has no guard against concurrent callers — two `token()`
 /// calls that simultaneously miss all fast paths will each spawn a separate
 /// `/bin/zsh` process. Both will ultimately write the same value to the cache
-/// (the `if $0 == nil` Mutex guard in `token()` prevents a double-write), so
-/// correctness is preserved. In practice this cannot happen: `RunnerPoller` is
-/// a single serial actor and is the only caller of `token()` in the app, so
+/// (the `if $0.token == nil` Mutex guard in `token()` prevents a double-write),
+/// so correctness is preserved. In practice this cannot happen: `RunnerPoller`
+/// is a single serial actor and is the only caller of `token()` in the app, so
 /// at most one cold-launch shell is ever spawned. A future public API consumer
-/// that calls `token()` concurrently from multiple tasks should be aware of
-/// this. Tracked as a known gap in issue #68; the follow-up async refactor
-/// will make this moot.
+/// that calls `token()` concurrently from multiple tasks should be aware of this.
 ///
 /// - Returns: The resolved token, or `nil` if not found or timed out.
 @concurrent
@@ -386,6 +404,7 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
         // group.next() returns the result of whichever arm completes first.
         // If the timeout arm wins, the shell's token (if any) is intentionally
         // discarded — fail-safe over fail-open. See doc comment for full rationale.
+        // The caller (token()) sets shellFailed = true on nil return.
         //
         // String?? → String?: the ?? nil collapses the outer Optional (group.next()
         // returns nil only when all tasks have already been collected). That path is
@@ -452,7 +471,7 @@ private func drainPipe(_ pipe: Pipe) async -> Data {
 ///   → `terminate()` on an unlaunched Process. Per Apple docs, `terminate()`
 ///   checks `isRunning` and is a no-op. Both windows are bounded and harmless.
 ///
-/// Accepted as bounded and harmless in practice; disappears entirely in #68.
+/// Accepted as bounded and harmless in practice.
 ///
 /// ## Process dealloc does not terminate
 /// When `withTaskGroup` returns and `box` is released, ARC deallocates this
