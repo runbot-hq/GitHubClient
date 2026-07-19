@@ -50,6 +50,27 @@ public struct GitHubWorkflowRun: Decodable, Sendable {
 }
 
 /// A GitHub Actions job as returned by the REST API.
+///
+/// ## let vs var field split
+///
+/// Fields are split into identity fields (`let`) and lifecycle fields (`var`):
+///
+/// - **`let` (identity):** `id`, `runID`, `name`, `status`, `htmlUrl` — assigned once
+///   by the GitHub API and never change for the lifetime of a job. Mutating these
+///   would produce a logically different job, not an updated view of the same one.
+///   `status` in particular is intentionally `let`; it is an identity/classification
+///   field set at creation and is not a candidate for `copying(update:)`. Use a fresh
+///   decode when the API reports a status change.
+///
+/// - **`var` (lifecycle):** `conclusion`, `runnerName`, `startedAt`, `completedAt`,
+///   `createdAt`, `steps` — populated progressively as the job runs. These are `var`
+///   specifically to support `copying(update:)` for local state patching between polls
+///   without reconstructing the full struct.
+///
+/// ## Sendable
+///
+/// `var` fields on a value-type (`struct`) are safe for `Sendable` without `@unchecked`.
+/// Each copy of the struct is independent — no shared mutable state exists.
 public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// Unique numeric job ID assigned by GitHub.
     public let id: Int
@@ -58,20 +79,31 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// Display name of the job.
     public let name: String
     /// Raw status string — NOT `JobStatus` (a RunBotCore type).
+    ///
+    /// Intentionally `let` — status is an identity/classification field set at job
+    /// creation and never patched locally. It is not mutable via `copying(update:)`.
+    /// Re-decode from the API when a status change is expected.
     public let status: String
     /// Raw conclusion string — NOT `JobConclusion` (a RunBotCore type).
+    /// `var` — populated when the job completes; may be patched locally before next poll.
     public var conclusion: String?
     /// GitHub web URL for this job.
+    /// Intentionally `let` — the URL is stable for the lifetime of the job.
     public let htmlUrl: String?
     /// Name of the runner executing this job, or `nil` if not yet assigned.
+    /// `var` — assigned when a runner picks up the job; patched locally via `copying(update:)`.
     public var runnerName: String?
     /// Raw ISO 8601 date string — caller is responsible for parsing.
+    /// `var` — set when the job starts; may arrive in a later poll than the initial decode.
     public var startedAt: String?
     /// Raw ISO 8601 date string — caller is responsible for parsing.
+    /// `var` — set when the job finishes; absent until completion.
     public var completedAt: String?
     /// Raw ISO 8601 date string — caller is responsible for parsing.
+    /// `var` — lifecycle timestamp; absent on some API responses for in-progress jobs.
     public var createdAt: String?
     /// Steps within this job.
+    /// `var` — replaced wholesale when step data arrives; absent for queued jobs (see decoder note).
     public var steps: [GitHubStep]
 
     /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
@@ -118,6 +150,10 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
         // not an empty array but an absent key. `decodeIfPresent` returns `nil`
         // for an absent key, and `try?` converts a malformed-but-present array
         // to `nil` as well. Both cases correctly fall back to `[]`.
+        // No logger call is made on the absent-key path because a missing `steps`
+        // key is the documented API contract for queued jobs, not an error condition.
+        // A logger call fires upstream in `fetchJobs` only when the entire
+        // `[GitHubJob]` decode fails (a genuine API shape change).
         // This is a known API shape difference, not a decode bug.
         steps = (try? container.decodeIfPresent([GitHubStep].self, forKey: .steps)) ?? []
     }
@@ -145,15 +181,20 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
 
     // MARK: - copying helper
 
-    /// Returns a copy of this job with one or more fields replaced.
+    /// Returns a copy of this job with one or more lifecycle fields replaced.
     ///
-    /// Replaces the previous 6 individual `copying(field:)` overloads with a
-    /// single generic mutating closure. Any field declared `var` can be updated
-    /// (`conclusion`, `runnerName`, `startedAt`, `completedAt`, `createdAt`, `steps`);
-    /// immutable identity fields (`id`, `runID`, `name`, `status`, `htmlUrl`) remain `let`
-    /// and cannot be mutated via this helper.
+    /// Only `var` fields (`conclusion`, `runnerName`, `startedAt`, `completedAt`,
+    /// `createdAt`, `steps`) can be mutated via the closure. Identity fields
+    /// (`id`, `runID`, `name`, `status`, `htmlUrl`) are `let` and the compiler
+    /// will reject any attempt to assign them — this is intentional.
     ///
-    /// Adding new `var` fields to the struct requires no new overload.
+    /// `@discardableResult` is deliberately absent. Discarding the return value
+    /// of a `copying` call is always a caller bug (the original is unchanged),
+    /// so the compiler warning is the correct behaviour.
+    ///
+    /// This method is intentionally concrete on `GitHubJob` rather than extracted
+    /// to a `Copyable` protocol. Protocol extraction is tracked in #67 and will
+    /// be done once the pattern proves useful on additional model types.
     ///
     /// ```swift
     /// let updated = job.copying { $0.runnerName = "runner-1" }
@@ -197,11 +238,17 @@ public struct GitHubStep: Decodable, Equatable, Sendable {
         case completedAt = "completed_at"
     }
 
-    /// Memberwise initialiser for use within `GitHubClient` only (e.g. `copying` helpers).
+    /// Memberwise initialiser for use within `GitHubClient` only.
     ///
     /// Intentionally `internal` — `GitHubStep` is `Decodable`-only at the public
     /// API surface. Tests construct instances via the JSON round-trip shim in
     /// `TestModelHelpers.swift` (`@testable import GitHubClient`).
+    ///
+    /// All fields are `let` by design — individual step mutation is not needed
+    /// at present. Steps are replaced wholesale on `GitHubJob` via
+    /// `job.copying { $0.steps = newSteps }`. If per-step patching is ever
+    /// required, promote the relevant fields to `var` and add `Copyable`
+    /// conformance (see #67).
     init(
         number: Int,
         name: String,
