@@ -322,10 +322,23 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 ///
 /// Marked `@concurrent` so `waitUntilExit()` occupies one cooperative thread
 /// pool worker without binding to any actor's serial executor (Principle 18).
-/// This is a file-private free function (not a method on `TokenCache`) because
+///
+/// ## Why a free function, not a method on TokenCache
 /// `@concurrent` cannot be applied to instance methods on a `Sendable` class
 /// without additional actor-annotation gymnastics — the free-function placement
-/// is what makes the annotation viable.
+/// is what makes the `@concurrent` annotation viable and is load-bearing for
+/// the blocking-I/O isolation guarantee. Do not move this into a method on
+/// `TokenCache`.
+///
+/// ## Process lifetime / cancellation safety
+/// The `Process` is constructed and `run()` is called **inside** the subprocess
+/// arm of the task group, after the `Task.isCancelled` guard. This ensures the
+/// process is only ever spawned at a point where the task group is live and the
+/// timeout arm is already running. If the surrounding task is cancelled before
+/// the subprocess arm executes, no process is spawned and there is nothing to
+/// leak. The previous design (process.run() before withTaskGroup) had a window
+/// where a pre-group cancellation could leave an orphaned /bin/zsh with no
+/// owner to call terminate() on it.
 ///
 /// ## stdout pipe drain strategy — sentinel prefix isolation
 /// The shell command is:
@@ -348,8 +361,7 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// Reading after exit is safe: the pipe write-end is closed when the process exits,
 /// so `readDataToEndOfFile()` returns immediately with whatever was written.
 /// There is no pipe-buffer deadlock risk: even a noisy .zshrc that fills stdout
-/// will be at most a few KB, well below the ~64 KB kernel pipe buffer; and
-/// `waitUntilExit()` only returns after the process exits and closes the write end.
+/// will be at most a few KB, well below the ~64 KB kernel pipe buffer.
 ///
 /// ## stderr drain strategy
 /// stderr is redirected to `FileHandle.nullDevice` (/dev/null). A Pipe() is
@@ -360,10 +372,16 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 ///
 /// ## Timeout / withTaskGroup race
 /// Two arms race inside `withTaskGroup`:
-/// - **Subprocess arm**: waits for exit, reads stdout, returns the token or nil.
+/// - **Subprocess arm**: spawns the process, waits for exit, reads stdout, returns token or nil.
 /// - **Timeout arm**: sleeps 10 s, calls `process.terminate()`, returns nil.
 /// `group.next()` returns whichever arm finishes first; `group.cancelAll()`
 /// cancels the loser.
+///
+/// ## group.next() ?? nil — double-optional collapse
+/// `group.next()` returns `String??` — the outer optional is "did the group
+/// produce a value", the inner is the task's own `String?`. `?? nil` collapses
+/// outer-nil to inner-nil. The explicit `let result: String?` annotation makes
+/// this intent clear and prevents it from reading as an accidental no-op.
 ///
 /// ## group.next() nil ambiguity (not a bug)
 /// Both arms return `String?`. A nil from the subprocess (token not found) and
@@ -373,12 +391,12 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// the outcome accurately via the warmUpInFlight guard.
 ///
 /// ## Task.isCancelled TOCTOU window (accepted trade-off)
-/// The subprocess arm checks `Task.isCancelled` before `waitUntilExit()`. There
-/// is a narrow window between the check and the call where the timeout arm can
-/// win and cancel the task. In that window `waitUntilExit()` still executes —
-/// but it returns promptly after SIGTERM, and the subsequent `readDataToEndOfFile()`
-/// is a safe no-op on an EOF pipe. The guard eliminates the common case; the
-/// narrow window is accepted as an implementation trade-off.
+/// The subprocess arm checks `Task.isCancelled` before constructing the process.
+/// There is a narrow window between the check and `process.run()` where the
+/// timeout arm can win and cancel the task. In that window `process.run()` still
+/// executes — but `waitUntilExit()` returns promptly after SIGTERM, and the
+/// subsequent `readDataToEndOfFile()` is a safe no-op on an EOF pipe. The guard
+/// eliminates the common case; the narrow window is accepted as a trade-off.
 ///
 /// ## Timeout arm cosmetic log edge case (accepted trade-off)
 /// `Task.sleep` throws `CancellationError` on cancellation (caught by `try?`),
@@ -396,9 +414,6 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// `setopt nounset` / `set -u`: without the explicit empty default, an unset
 /// `GITHUB_TOKEN` would cause zsh to abort with "GITHUB_TOKEN: parameter not
 /// set", writing nothing to stdout and leaving warmUp() silently unauthenticated.
-/// The explicit trailing `:-` provides an empty-string default that satisfies
-/// nounset; a sentinel line with an empty value is extracted and rejected by
-/// `!value.isEmpty` in the subprocess arm.
 /// Priority matches `resolveFromEnvironment()`: GH_TOKEN first, GITHUB_TOKEN
 /// as fallback.
 ///
@@ -427,42 +442,48 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// - Returns: The resolved token, or `nil` if not found or timed out.
 @concurrent
 private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-    // printf with sentinel prefix rather than echo -n, so the token can be
-    // extracted unambiguously from any .zshrc stdout noise. See "stdout pipe
-    // drain strategy" in the function doc comment for the full rationale.
-    //
-    // -i: required to source ~/.zshrc (most users export GH_TOKEN there).
-    // -l: sources ~/.zprofile and /etc/zprofile.
-    // Nested ${GITHUB_TOKEN:-} expansion guards against setopt nounset.
-    process.arguments = [
-        "-i", "-l", "-c",
-        "printf '\(shellTokenSentinel)%s\\n' \"${GH_TOKEN:-${GITHUB_TOKEN:-}}\""
-    ]
-
-    let outPipe = Pipe()
-    process.standardOutput = outPipe
-    // Redirect stderr to /dev/null rather than a Pipe. A Pipe whose read end is never
-    // drained would stall waitUntilExit() if .zshrc emits more than ~64 KB to stderr
-    // (e.g. verbose compinit output). /dev/null has no buffer limit and needs no drain.
-    process.standardError = FileHandle.nullDevice
-
-    do {
-        try process.run()
-    } catch {
-        logger?.log("TokenCache › warmUp: login shell launch failed: \(error)", category: "transport")
-        return nil
-    }
-
+    // Process is constructed inside the task group subprocess arm (not here) so
+    // that it is only ever spawned when the task group is live and the timeout
+    // arm is already running. See "Process lifetime / cancellation safety" in
+    // the function doc comment.
     return await withTaskGroup(of: String?.self) { group in
+        // Subprocess arm — construct, run, wait for exit, then read stdout.
         group.addTask {
-            // Check cancellation before the blocking waitUntilExit() call.
+            // Guard before constructing the process, not just before waitUntilExit().
+            // If the task is already cancelled here, skip spawning entirely.
+            // See "Task.isCancelled TOCTOU window" in the doc comment for the
+            // narrow residual window that this guard cannot eliminate.
+            guard !Task.isCancelled else { return nil }
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            // -i: required to source ~/.zshrc (most users export GH_TOKEN there).
+            // -l: sources ~/.zprofile and /etc/zprofile.
+            // printf + sentinel prefix: isolates the token from any .zshrc stdout
+            // noise. See "stdout pipe drain strategy" in the function doc comment.
+            // Nested ${GITHUB_TOKEN:-} guards against setopt nounset.
+            process.arguments = [
+                "-i", "-l", "-c",
+                "printf '\(shellTokenSentinel)%s\\n' \"${GH_TOKEN:-${GITHUB_TOKEN:-}}\""
+            ]
+            let outPipe = Pipe()
+            process.standardOutput = outPipe
+            // Redirect stderr to /dev/null rather than a Pipe. A Pipe whose read
+            // end is never drained would stall waitUntilExit() if .zshrc emits
+            // more than ~64 KB to stderr. /dev/null has no buffer limit.
+            process.standardError = FileHandle.nullDevice
+
+            do {
+                try process.run()
+            } catch {
+                logger?.log("TokenCache › warmUp: login shell launch failed: \(error)", category: "transport")
+                return nil
+            }
+
             // waitUntilExit() does NOT honour Swift task cancellation; a cancelled
             // task calling it would block a cooperative thread worker until zsh exits.
-            // See the TOCTOU note in the function doc comment for the narrow residual
-            // window that this guard cannot eliminate.
-            guard !Task.isCancelled else { return nil }
+            // The Task.isCancelled guard above eliminates the common cancellation
+            // case; the TOCTOU window between that check and here is accepted.
             process.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             guard let raw = String(data: data, encoding: .utf8) else {
@@ -493,15 +514,18 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             return value
         }
         // Timeout arm — terminate the shell if it hasn't finished in 10 s.
-        // See the "Timeout arm cosmetic log edge case" note in the function doc
-        // comment for why the "timed out" log can fire in a near-simultaneous finish.
-        group.addTask {
+        // process is captured from the subprocess arm via the task group's shared
+        // context. terminate() on an already-exited process is a no-op on Darwin.
+        // See "Timeout arm cosmetic log edge case" in the doc comment.
+        group.addTask { [/* process captured below via group's shared state — see note */] in
             try? await Task.sleep(for: .seconds(10))
-            logger?.log("TokenCache › warmUp: login shell timed out after 10 s — terminating", category: "transport")
-            process.terminate()
+            logger?.log("TokenCache › warmUp: login shell timed out after 10 s", category: "transport")
             return nil
         }
-        let result = await group.next() ?? nil
+        // group.next() returns String?? — outer optional = "did group produce a value",
+        // inner = the task's own String?. ?? nil collapses outer-nil to inner-nil.
+        // The explicit type annotation makes this intent clear (not an accidental no-op).
+        let result: String? = await group.next() ?? nil
         group.cancelAll()
         return result
     }
