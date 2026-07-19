@@ -19,6 +19,11 @@ public final class TokenCache: Sendable {
     private let logger: (any GitHubLogger)?
     /// Thread-safe in-memory cache, initially `nil`.
     private let cache = Mutex<String?>(nil)
+    /// Guards against concurrent warmUp() calls each spawning their own subprocess.
+    /// Set to `true` by the first caller that passes all fast-paths; all subsequent
+    /// concurrent callers bail early. Reset is intentionally omitted — warmUp() is
+    /// designed to run the subprocess at most once per app lifetime.
+    private let warmUpInFlight = Mutex<Bool>(false)
 
     /// Creates a new `TokenCache`.
     /// - Parameters:
@@ -92,12 +97,17 @@ public final class TokenCache: Sendable {
     /// 3. Process environment (`ProcessInfo`) — covers terminal launches and CI.
     /// Only if all three return nil does the shell subprocess run.
     ///
+    /// ## Concurrency
+    /// Concurrent calls that all pass the fast-paths are serialised by a
+    /// `warmUpInFlight` sentinel: only the first caller proceeds to spawn the
+    /// subprocess; all others return immediately. The `cache` write at the end
+    /// is independently guarded by its own `Mutex`.
+    ///
     /// ## Performance
-    /// The subprocess runs on a `Task.detached` background thread and takes
-    /// ~50–100 ms on first call. A single `/bin/zsh -i -l` invocation recovers
-    /// both `GH_TOKEN` and `GITHUB_TOKEN` (whichever is set) in one shell run.
-    /// The result is cached on first resolution; subsequent `warmUp()` calls
-    /// return immediately without spawning a subprocess.
+    /// The subprocess runs on a `Task.detached` background thread with a 10-second
+    /// timeout. A single `/bin/zsh -i -l` invocation recovers both `GH_TOKEN` and
+    /// `GITHUB_TOKEN` (whichever is set) in one shell run (~50–100 ms). The result
+    /// is cached on first resolution; subsequent `warmUp()` calls return immediately.
     public func warmUp() async {
         // Fast-path 1: in-memory cache already populated.
         guard cache.withLock({ $0 }) == nil else {
@@ -116,6 +126,20 @@ public final class TokenCache: Sendable {
         // resolveFromEnvironment() writes to cache on success.
         if resolveFromEnvironment() != nil {
             logger?.log("TokenCache › warmUp — resolved from process env, skipping login shell", category: "transport")
+            return
+        }
+        // In-flight guard: if another concurrent warmUp() call already passed all
+        // fast-paths and is about to spawn (or is running) the subprocess, bail here.
+        // The first caller sets the sentinel to true inside the lock; all later callers
+        // see true and return. The sentinel is never reset — warmUp() spawns at most
+        // one subprocess per TokenCache lifetime.
+        let shouldProceed = warmUpInFlight.withLock { inFlight -> Bool in
+            guard !inFlight else { return false }
+            inFlight = true
+            return true
+        }
+        guard shouldProceed else {
+            logger?.log("TokenCache › warmUp — login shell already in flight, skipping", category: "transport")
             return
         }
         logger?.log("TokenCache › warmUp — all fast-paths missed, attempting login shell resolution", category: "transport")
@@ -226,17 +250,25 @@ public final class TokenCache: Sendable {
     /// token from `GH_TOKEN` or `GITHUB_TOKEN`. Called only from `warmUp()` on a
     /// `Task.detached` background thread — never from `token()`.
     ///
-    /// ## Why a single subprocess (not one per key)
-    /// The previous design iterated ["GH_TOKEN", "GITHUB_TOKEN"] and spawned a
-    /// separate `/bin/zsh -i -l` for each key, sourcing the full zsh startup
-    /// sequence twice (~200 ms total) when `GH_TOKEN` was absent. This method
-    /// uses `${GH_TOKEN:-$GITHUB_TOKEN}` to recover the first non-empty value in
-    /// one shell invocation (~50–100 ms), regardless of which variable is set.
+    /// ## Pipe drain (deadlock prevention)
+    /// stdout is drained concurrently on a separate `DispatchQueue` thread while
+    /// `waitUntilExit()` blocks the calling thread. Without concurrent draining, a
+    /// `.zshrc` that emits more than the OS pipe buffer (~64 KB on macOS) to stdout
+    /// before the `echo` runs would stall the shell waiting for a reader while
+    /// `waitUntilExit()` blocks waiting for the shell — a deadlock. Async draining
+    /// eliminates the buffer dependency entirely.
     ///
-    /// ## Why a login shell is needed
-    /// macOS GUI apps are spawned by `launchd`, which does not source `~/.zprofile`
-    /// or `~/.zshrc`. Running `/bin/zsh -i -l -c "..."` sources the full zsh
-    /// startup sequence and recovers any exported variable.
+    /// ## Timeout (hang prevention)
+    /// A 10-second `DispatchSemaphore` timeout guards `waitUntilExit()`. If the shell
+    /// does not exit within 10 seconds (e.g. a `.zshrc` calling `nvm` with a broken
+    /// node version, or a network-backed prompt on a slow mount), the process is
+    /// terminated and the method returns `nil`. The app startup continues normally;
+    /// the worst outcome is that the env token is not recovered and the user sees an
+    /// unauthenticated state until they sign in via OAuth.
+    ///
+    /// ## Why a single subprocess (not one per key)
+    /// Uses `${GH_TOKEN:-$GITHUB_TOKEN}` to recover the first non-empty value in
+    /// one shell invocation (~50–100 ms), rather than spawning two processes.
     ///
     /// ## Security
     /// No user input is interpolated into the shell command — the command string is
@@ -245,11 +277,8 @@ public final class TokenCache: Sendable {
     /// (e.g. `compinit` insecure-directory warnings) from appearing in Console.app.
     ///
     /// ## Shell choice
-    /// `/bin/zsh` is used because it is the macOS default interactive shell since
-    /// Catalina and is guaranteed to exist at that path. If the user's login shell
-    /// is bash or fish, their token export must also be in a file that zsh sources
-    /// for this path to find it. A future improvement could inspect `$SHELL` and
-    /// adapt, but zsh covers the overwhelming majority of macOS developer environments.
+    /// `/bin/zsh` is the macOS default interactive shell since Catalina and is
+    /// guaranteed to exist at that path.
     private func resolveFromLoginShell() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -267,9 +296,34 @@ public final class TokenCache: Sendable {
             logger?.log("TokenCache › warmUp: login shell launch failed: \(error)", category: "transport")
             return
         }
-        process.waitUntilExit()
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+
+        // Drain stdout concurrently to prevent a pipe-buffer deadlock.
+        // If the pipe is not read while the process runs, a .zshrc that emits
+        // enough stdout to fill the OS buffer (~64 KB) will stall the shell;
+        // waitUntilExit() would then block forever waiting for a shell that is
+        // itself blocked waiting for a reader.
+        var outputData = Data()
+        let drainQueue = DispatchQueue(label: "TokenCache.loginShell.drain")
+        drainQueue.async {
+            outputData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        }
+
+        // Wait for the process to exit, with a 10-second timeout.
+        // A hanging .zshrc (e.g. nvm + broken node, network prompt on a slow mount)
+        // would otherwise block AppState.start() indefinitely.
+        let semaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in semaphore.signal() }
+        let timedOut = semaphore.wait(timeout: .now() + 10) == .timedOut
+        if timedOut {
+            logger?.log("TokenCache › warmUp: login shell timed out after 10 s — terminating", category: "transport")
+            process.terminate()
+            return
+        }
+
+        // Ensure the concurrent drain has finished before we read outputData.
+        drainQueue.sync {}
+
+        guard let value = String(data: outputData, encoding: .utf8), !value.isEmpty else {
             #if DEBUG
             logger?.log("TokenCache › warmUp: login shell: neither GH_TOKEN nor GITHUB_TOKEN found in shell environment", category: "transport")
             #endif
