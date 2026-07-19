@@ -106,11 +106,17 @@ public final class TokenCache: Sendable {
     /// no env var, no shell export, or shell previously timed out or failed to launch).
     ///
     /// - Warning: Concurrent callers that simultaneously miss all fast paths (steps 1–3)
-    ///   will each spawn a separate `/bin/zsh` subprocess. The `if $0.token == nil`
-    ///   Mutex guard in the write-back prevents a double-write, so correctness is
-    ///   preserved, but the redundant shells are wasted work. In the app, `RunnerPoller`
-    ///   is a single serial actor so this never fires in practice. External consumers
-    ///   calling `token()` concurrently from multiple tasks should be aware of this.
+    ///   will each spawn a separate `/bin/zsh` subprocess. The `shellFailed` guard and
+    ///   the write-back to `state.token` are separate Mutex lock calls — there is no
+    ///   atomic "check-and-enter" operation. This means that `shellFailed` is NOT set
+    ///   until `loginShellToken` returns (which can take up to 10 s on timeout), so the
+    ///   window where multiple callers can each independently enter the shell path spans
+    ///   the full execution time of the shell, not just a scheduling instant. Correctness
+    ///   is preserved (the `if $0.token == nil` Mutex guard in the write-back prevents a
+    ///   double-write), but any number of concurrent callers can each spawn a separate
+    ///   `/bin/zsh` process simultaneously. In the app, `RunnerPoller` is a single serial
+    ///   actor so this never fires in practice. External consumers calling `token()`
+    ///   concurrently from multiple tasks should be aware of this.
     ///
     ///   An earlier iteration defended this with a `Mutex<Bool>`-protected
     ///   `warmUpInFlight` flag and a `withTaskGroup` timeout scaffold. That was
