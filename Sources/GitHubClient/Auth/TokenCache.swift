@@ -93,8 +93,10 @@ public final class TokenCache: Sendable {
     /// on a Finder launch where no env token is present. This is correct and
     /// intentional: the shell is the only remaining resolution source in that case.
     /// Note the latency cost: the re-spawned shell adds ~50–200 ms to the first
-    /// poll cycle after sign-out on an affected launch configuration. This is
-    /// a one-time cost per cache lifetime and is cached immediately on success.
+    /// poll cycle after sign-out on an affected launch configuration. This cost
+    /// recurs on every sign-out cycle (each `invalidate()` resets the cache), not
+    /// just once per process lifetime. It is cached immediately on success, so
+    /// only the first `token()` call after each `invalidate()` pays the penalty.
     public func invalidate() {
         cache.withLock { $0 = nil }
         logger?.log("TokenCache › invalidate — cache cleared", category: "transport")
@@ -229,6 +231,17 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// shell will be re-spawned. The #68 async refactor removes this design
 /// entirely, making the timeout semantics moot.
 ///
+/// ## Pipe buffer deadlock prevention (concurrent drain)
+/// `waitUntilExit()` blocks until the child exits. If the child writes enough
+/// data to fill the pipe kernel buffer (~64 KB on macOS) before exiting —
+/// plausible with a verbose `.zshrc` running neofetch, nvm, or oh-my-zsh —
+/// the child blocks on the write side waiting for the buffer to drain while
+/// this code blocks on `waitUntilExit()` waiting for the child to exit:
+/// deadlock. The fix is to start draining the pipe asynchronously on a
+/// `DispatchQueue.global()` thread before calling `waitUntilExit()`, so the
+/// buffer never fills regardless of output volume. `waitUntilExit()` then
+/// completes normally and the fully drained data is collected via semaphore.
+///
 /// ## Thread leak on the timeout path (known, bounded)
 /// After `group.next()` + `group.cancelAll()`, this function returns before
 /// the subprocess arm's `waitUntilExit()` call has necessarily unblocked.
@@ -297,11 +310,27 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
                 logger?.log("TokenCache › login shell launch failed: \(error)", category: "transport")
                 return nil
             }
+            // Drain stdout concurrently on a background thread BEFORE calling
+            // waitUntilExit(). If the pipe kernel buffer (~64 KB on macOS) fills
+            // before the child exits, the child blocks on write() waiting for the
+            // buffer to drain while waitUntilExit() blocks waiting for the child
+            // to exit — deadlock. A verbose .zshrc (neofetch, nvm, oh-my-zsh, etc.)
+            // can easily produce >64 KB of stdout. The async drain prevents the
+            // buffer from filling regardless of output volume. A DispatchSemaphore
+            // collects the drained data after waitUntilExit() returns.
+            let semaphore = DispatchSemaphore(value: 0)
+            var drainedData = Data()
+            DispatchQueue.global().async {
+                drainedData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                semaphore.signal()
+            }
             // waitUntilExit() does not honour Swift task cancellation.
             // The timeout arm calls box.process?.terminate() as the kill path.
+            // The concurrent drain above ensures this never deadlocks on a
+            // pipe-full condition.
             process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            guard let raw = String(data: data, encoding: .utf8) else { return nil }
+            semaphore.wait()
+            guard let raw = String(data: drainedData, encoding: .utf8) else { return nil }
             let value = raw
                 .components(separatedBy: .newlines)
                 .compactMap { line -> String? in
@@ -361,9 +390,12 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
 ///   arm's thread for the duration of the shell's life.
 /// - The read happens after 10 s of sleep — orders of magnitude after the write.
 /// - `Process.terminate()` is thread-safe (documented by Apple).
-/// - The remaining race window (timeout fires between task creation and
-///   `box.process = process` executing) results in `nil?.terminate()`, a no-op;
-///   the shell runs to natural completion (sub-second for `zsh -c printf`).
+/// - Window A: timeout fires between task creation and `box.process = process`
+///   → `nil?.terminate()`, a no-op; the shell runs to natural completion.
+/// - Window B: timeout fires between `box.process = process` and `process.run()`
+///   → `terminate()` is called on a not-yet-launched Process. Per Apple docs,
+///   `terminate()` checks `isRunning` and is a no-op on an unlaunched process.
+///   Both windows are bounded and harmless.
 /// Accepted as bounded and harmless; the entire box disappears in #68.
 ///
 /// ## Process dealloc does not terminate
