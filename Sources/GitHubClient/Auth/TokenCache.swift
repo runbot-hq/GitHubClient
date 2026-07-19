@@ -109,7 +109,7 @@ public final class TokenCache: Sendable {
     /// so `waitUntilExit()` blocks one cooperative thread pool worker without
     /// stalling the caller. No `DispatchQueue` or `DispatchSemaphore` bridges
     /// are used — the timeout is a structured `withTaskGroup` race and the pipe
-    /// is drained via `FileHandle.AsyncBytes`.
+    /// is drained via `FileHandle.readToEnd()`.
     ///
     /// ## Performance
     /// The subprocess takes ~50–100 ms on first call with a 10-second timeout.
@@ -282,19 +282,21 @@ public final class TokenCache: Sendable {
 /// blocking I/O uses `@concurrent` free functions, not `DispatchQueue` bridges.
 ///
 /// ## Pipe drain (deadlock prevention)
-/// stdout is read via `FileHandle.AsyncBytes` (`outPipe.fileHandleForReading.bytes`),
-/// an `AsyncSequence` that yields chunks as they arrive. This drains the pipe
-/// concurrently with the running shell without any `DispatchQueue`. A `.zshrc`
-/// emitting more than the OS pipe buffer (~64 KB) to stdout can no longer cause
-/// a deadlock — the async reader keeps the buffer empty regardless of output volume.
+/// stdout is read via `FileHandle.readToEndOfFile()` after the shell exits.
+/// The shell command is a single `echo -n` so stdout output is guaranteed to
+/// be small (≤ the token length, typically ~40 bytes). Reading after exit is
+/// safe — the pipe is already at EOF by the time `waitUntilExit()` returns.
+/// No byte-by-byte iteration is needed and there is no pipe-buffer deadlock
+/// risk for payloads this small.
 ///
 /// ## Timeout (hang prevention)
 /// A `withTaskGroup` race pits the subprocess task against a
 /// `Task.sleep(for: .seconds(10))` timeout arm. Whichever finishes first wins;
 /// `group.cancelAll()` cancels the loser. If the timeout arm wins it calls
 /// `process.terminate()` before returning `nil`, ensuring the shell is always
-/// cleaned up. This replaces the previous `DispatchSemaphore` + `terminationHandler`
-/// pattern with fully structured concurrency.
+/// cleaned up. The subprocess arm checks `Task.isCancelled` before calling
+/// `waitUntilExit()` so a cancelled arm never blocks a cooperative thread worker
+/// waiting for a slow-to-die shell.
 ///
 /// ## Security
 /// No user input is interpolated into the shell command — the command is a
@@ -329,21 +331,22 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     }
 
     // Race the subprocess against a 10-second timeout using structured concurrency.
-    // The subprocess arm drains stdout via AsyncBytes (no pipe-buffer deadlock risk)
-    // and then calls waitUntilExit(). The timeout arm terminates the process if it
-    // wins. group.cancelAll() cancels the losing arm in both cases.
+    // The subprocess arm waits for exit then reads stdout. The timeout arm terminates
+    // the process if it wins. group.cancelAll() cancels the losing arm in both cases.
     return await withTaskGroup(of: String?.self) { group in
-        // Subprocess arm: drain stdout as an AsyncSequence, then wait for exit.
+        // Subprocess arm: wait for the shell to exit, then read its stdout.
+        // The shell command is a single `echo -n` — stdout output is tiny (token length)
+        // so reading after exit is safe and there is no pipe-buffer deadlock risk.
         group.addTask {
-            var data = Data()
-            // FileHandle.AsyncBytes yields chunks as the shell writes them,
-            // keeping the pipe buffer empty regardless of .zshrc output volume.
-            if let asyncBytes = try? outPipe.fileHandleForReading.bytes {
-                for try await byte in asyncBytes {
-                    data.append(byte)
-                }
-            }
+            // Guard against the timeout arm winning before we reach waitUntilExit().
+            // waitUntilExit() does NOT check Swift task cancellation — a cancelled
+            // task would block its cooperative thread worker until zsh exits after SIGTERM.
+            // Checking here lets us skip the blocking call entirely when we've already lost
+            // the race, freeing the worker immediately.
+            guard !Task.isCancelled else { return nil }
             process.waitUntilExit()
+            // Read all stdout in one call after the process has exited (pipe is at EOF).
+            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
                 #if DEBUG
                 logger?.log("TokenCache › warmUp: login shell: neither GH_TOKEN nor GITHUB_TOKEN found in shell environment", category: "transport")
