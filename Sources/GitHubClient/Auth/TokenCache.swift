@@ -41,6 +41,16 @@ public final class TokenCache: Sendable {
     /// - `shellFailed`: set to `true` after a confirmed shell timeout, no-token
     ///   result, or launch failure, preventing further shell re-spawns until
     ///   `invalidate()` resets it.
+    ///
+    /// ## Why one Mutex for both fields
+    /// `token` and `shellFailed` are always read and mutated as a pair:
+    /// `token()` reads `shellFailed` then writes one or the other, and
+    /// `invalidate()` resets both atomically. Two separate locks would require
+    /// lock-ordering discipline to prevent deadlock, and would expose an
+    /// inconsistent intermediate state where `token` is cleared but `shellFailed`
+    /// is still `true` — permanently blocking the shell path after sign-out until
+    /// the second lock was also cleared. One lock is simpler and eliminates that
+    /// window entirely.
     private let state = Mutex<(token: String?, shellFailed: Bool)>((token: nil, shellFailed: false))
 
     /// Creates a new `TokenCache`.
@@ -62,6 +72,25 @@ public final class TokenCache: Sendable {
     /// 3. `GH_TOKEN` / `GITHUB_TOKEN` process environment — covers terminal / CI launches
     /// 4. Login shell subprocess — cold Finder/Dock/login-item launch only
     ///
+    /// ## Why `async` when steps 1–3 are synchronous
+    /// Steps 1–3 are synchronous and return without ever suspending. The function
+    /// is `async` solely because step 4 (`loginShellToken`) is unavoidably async —
+    /// it uses `@concurrent` + `withTaskGroup` + `waitUntilExit()`. Swift does not
+    /// allow a non-async function to call an async one. The cost of the `async`
+    /// declaration on the warm path is a single actor-hop check — negligible
+    /// compared to any Keychain or subprocess I/O.
+    ///
+    /// ## Why shell failure is permanent until `invalidate()`
+    /// Retrying on every call would spawn a new `/bin/zsh` on every poll cycle
+    /// (~30 s) for the process lifetime on any machine where the shell has no
+    /// token — a persistent background thread burn and a guaranteed 10-second
+    /// stall each cycle. A timed backoff would add a timestamp field and timer
+    /// logic that exists solely for a condition the user must fix manually anyway.
+    /// The chosen policy matches user mental model: act (fix `~/.zprofile`, set
+    /// the env var, sign in via OAuth), then the next sign-out/sign-in cycle
+    /// resets via `invalidate()`. Transient OS blips (`ENOMEM` at launch etc.)
+    /// are the one accepted gap — tracked in issue #68.
+    ///
     /// The shell (step 4) is spawned at most once per cache lifetime. On success
     /// the result is written to the in-memory cache so every subsequent call
     /// returns immediately from step 1. On timeout, no-token result, or launch
@@ -82,6 +111,15 @@ public final class TokenCache: Sendable {
     ///   preserved, but the redundant shells are wasted work. In the app, `RunnerPoller`
     ///   is a single serial actor so this never fires in practice. External consumers
     ///   calling `token()` concurrently from multiple tasks should be aware of this.
+    ///
+    ///   An earlier iteration defended this with a `Mutex<Bool>`-protected
+    ///   `warmUpInFlight` flag and a `withTaskGroup` timeout scaffold. That was
+    ///   intentionally removed: it added a second Mutex, a waiting task, and a
+    ///   timeout-within-a-timeout to guard a scenario that cannot occur today
+    ///   (`RunnerPoller` is serial). If a future caller genuinely needs
+    ///   concurrent-safe shell resolution, the right fix is a single
+    ///   `OSAllocatedUnfairLock<Bool>`-protected in-flight flag here — not
+    ///   re-introducing `warmUp()`.
     public func token() async -> String? {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }
@@ -89,6 +127,7 @@ public final class TokenCache: Sendable {
         // Short-circuit if the shell already failed on a prior call.
         // Prevents re-spawning /bin/zsh on every poll cycle after a confirmed
         // timeout, no-token result, or launch failure. Reset by invalidate().
+        // See "Why shell failure is permanent until invalidate()" above.
         if state.withLock({ $0.shellFailed }) { return nil }
         // All fast paths missed — cold Finder/Dock/login-item launch.
         // Spawn the login shell to source ~/.zprofile and ~/.zshrc.
@@ -283,6 +322,14 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// from a captured `var` because data flows through the continuation's resume
 /// value rather than a mutated capture.
 ///
+/// ## Why stderr is not drained
+/// `standardError` is redirected to `FileHandle.nullDevice` — the OS kernel
+/// sink, not a `Pipe`. There is no pipe buffer; bytes are discarded immediately.
+/// `readDataToEndOfFile()` is never called on stderr, so there is no second
+/// drain to coordinate and no second deadlock window. If stderr is ever changed
+/// to a `Pipe`, a matching `drainPipe()` call before `waitUntilExit()` becomes
+/// required.
+///
 /// ## On the timeout path: does drainPipe hang?
 /// If the timeout arm fires and calls `terminate()` while the drain is still
 /// running, `terminate()` sends SIGTERM to the shell, which causes the shell
@@ -342,6 +389,8 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             ]
             let outPipe = Pipe()
             process.standardOutput = outPipe
+            // /dev/null is a kernel sink, not a Pipe — no buffer to fill, no drain needed.
+            // See "Why stderr is not drained" in the loginShellToken doc comment above.
             process.standardError = FileHandle.nullDevice
             // Redirect stdin to /dev/null. /bin/zsh -i (interactive mode) reads
             // from stdin by default. For a Finder/Dock launch the inherited stdin
@@ -354,6 +403,14 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // the defer below clears box.process to nil so the timeout arm
             // sees nil and skips terminate() on a process that never launched.
             box.process = process
+            // processIdentifier is assigned by the OS only when run() succeeds.
+            // A value of 0 means run() never succeeded — which is exactly the
+            // throw path. On the success path processIdentifier is a real PID
+            // (> 0) so the condition is false and box.process is left intact
+            // for the timeout arm to call terminate() if needed.
+            // Do NOT simplify to an unconditional nil — that would clear the
+            // process reference on the success path too, racing with the
+            // timeout arm's terminate() call.
             defer { if process.processIdentifier == 0 { box.process = nil } }
             // ⚠️ App Sandbox: Process.run() throws a permission error in a sandboxed
             // app. loginShellToken must be removed before enabling the sandbox
