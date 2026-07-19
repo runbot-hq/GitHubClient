@@ -27,6 +27,16 @@ import Foundation
 //       scopes: GitHubScopes.default + [GitHubScopes.readUser]
 //   )
 //
+// Custom redirect URI (optional — defaults to OAuthService.defaultRedirectURI):
+//
+//   let github = GitHubClient(
+//       clientID: "your-client-id",
+//       clientSecret: "your-client-secret",
+//       service: "com.example.myapp",
+//       account: "github-oauth-token",
+//       redirectURI: "myapp-staging://oauth/callback"
+//   )
+//
 // Tests inject mocks via the secondary init:
 //
 //   let github = GitHubClient(
@@ -86,6 +96,10 @@ public final class GitHubClient {
     ///   - scopes: The OAuth scopes to request during sign-in. Defaults to
     ///     `GitHubScopes.default`. Must not be empty. Use `GitHubScopes`
     ///     constants for type safety and discoverability.
+    ///   - redirectURI: The OAuth redirect URI sent to GitHub during authorisation.
+    ///     Defaults to `OAuthService.defaultRedirectURI` (i.e. `GitHubConstants.oauthRedirectURI`).
+    ///     Override for staging environments, white-label builds, or a second OAuth app.
+    ///     Existing call sites that omit this parameter are unaffected.
     ///   - logger: Optional logger for diagnostic messages.
     @MainActor
     public init(
@@ -94,6 +108,7 @@ public final class GitHubClient {
         service: String,
         account: String,
         scopes: [String] = GitHubScopes.default,
+        redirectURI: String = OAuthService.defaultRedirectURI,
         logger: (any GitHubLogger)? = nil
     ) {
         let store = KeychainTokenStore(service: service, account: account, logger: logger)
@@ -103,6 +118,7 @@ public final class GitHubClient {
             clientSecret: clientSecret,
             tokenStore: store,
             scopes: scopes,
+            redirectURI: redirectURI,
             logger: logger,
             session: URLSession.shared,
             onTokenSaved: { cache.invalidate() },
@@ -130,9 +146,9 @@ public final class GitHubClient {
     /// Intentionally nonisolated — it only assigns protocol existentials
     /// and never calls any `@MainActor`-isolated code directly.
     ///
-    /// - Note: Does **not** accept a `scopes:` parameter — it takes
-    ///   `any OAuthServiceProtocol` directly, which already encapsulates
-    ///   scope configuration. No changes needed here.
+    /// - Note: Does **not** accept `scopes:` or `redirectURI:` parameters —
+    ///   it takes `any OAuthServiceProtocol` directly, which already encapsulates
+    ///   both configurations. No changes needed here.
     ///
     /// - Parameters:
     ///   - oauthService: A mock or stub conforming to `OAuthServiceProtocol`.

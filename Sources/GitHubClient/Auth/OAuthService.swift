@@ -29,8 +29,13 @@ public final class OAuthService: OAuthServiceProtocol {
     private let decoder = JSONDecoder()
     /// Shared `JSONEncoder` — reused across token-exchange encode calls.
     private let encoder = JSONEncoder()
-    /// The OAuth redirect URI. Must match the value registered in the GitHub OAuth app settings.
-    private let redirectURI = GitHubConstants.oauthRedirectURI
+    /// The default OAuth redirect URI — sourced from `GitHubConstants.oauthRedirectURI`.
+    /// Pass a different value to `OAuthService.init(redirectURI:)` to override for staging
+    /// environments, white-label builds, or a second OAuth app.
+    public static let defaultRedirectURI: String = GitHubConstants.oauthRedirectURI
+    /// The OAuth redirect URI sent to GitHub during authorisation.
+    /// Set at init time via the `redirectURI` parameter; defaults to `defaultRedirectURI`.
+    private let redirectURI: String
     /// OAuth scopes requested during sign-in. Set at init time via the `scopes` parameter.
     private let scopes: [String]
     /// GitHub OAuth authorisation URL.
@@ -72,6 +77,14 @@ public final class OAuthService: OAuthServiceProtocol {
     ///     is passed (fires in both debug and release builds — this is intentional; an empty
     ///     scopes array is a programming error, not a runtime condition).
     ///     Use `GitHubScopes` constants for type safety and discoverability.
+    ///   - redirectURI: The OAuth redirect URI sent to GitHub during authorisation. Defaults to
+    ///     `OAuthService.defaultRedirectURI` (i.e. `GitHubConstants.oauthRedirectURI`).
+    ///     Override for staging environments, white-label builds, or a second OAuth app.
+    ///     No `precondition` guards against an empty string — an empty URI is a runtime
+    ///     misconfiguration, not a programming error; GitHub will reject it at authorisation
+    ///     time with a descriptive error. This is intentionally asymmetric with the `scopes`
+    ///     guard (an empty scopes array has no recoverable fallback; an empty URI does).
+    ///     Existing call sites that omit this parameter are unaffected.
     ///   - logger: Optional logger for diagnostic messages.
     ///   - session: The `URLSessionProtocol` used for token-exchange requests. Defaults to `URLSession.shared`.
     ///     Inject a `MockURLSession` in tests to avoid real network calls.
@@ -86,6 +99,7 @@ public final class OAuthService: OAuthServiceProtocol {
         clientSecret: String,
         tokenStore: any TokenStore,
         scopes: [String] = GitHubScopes.default,
+        redirectURI: String = OAuthService.defaultRedirectURI,
         logger: (any GitHubLogger)? = nil,
         session: any URLSessionProtocol = URLSession.shared,
         onTokenSaved: (() -> Void)? = nil,
@@ -93,6 +107,7 @@ public final class OAuthService: OAuthServiceProtocol {
     ) {
         precondition(!scopes.isEmpty, "OAuthService: scopes must not be empty — pass at least one GitHubScopes constant")
         self.scopes = scopes
+        self.redirectURI = redirectURI
         self.clientID = clientID
         self.clientSecret = clientSecret
         self.tokenStore = tokenStore
@@ -313,6 +328,13 @@ public final class OAuthService: OAuthServiceProtocol {
     }
 
     /// Builds the token-exchange `URLRequest`.
+    ///
+    /// `redirect_uri` is intentionally omitted from the POST body. GitHub only
+    /// requires it in the token exchange if multiple redirect URIs are registered
+    /// for the OAuth app — in that case it must match the value used in the
+    /// authorisation step. Omitting it is correct for the single-URI case this
+    /// library targets. If multi-URI support is ever needed, forward `self.redirectURI`
+    /// as an additional body field here.
     private func makeTokenRequest(code: String) throws -> URLRequest {
         guard let url = URL(string: accessTokenURL) else { throw URLError(.badURL) }
         var req = URLRequest(url: url)
