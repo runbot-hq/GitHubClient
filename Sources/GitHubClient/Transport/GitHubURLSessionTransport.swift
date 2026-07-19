@@ -47,6 +47,9 @@ public struct GitHubTransport: GitHubTransportProtocol {
   public let logger: (any GitHubLogger)?
 
   /// Call counter incremented once per successful HTTP round-trip (2xx response).
+  ///
+  /// Injected at init so tests can pass a mock conformer and assert call counts
+  /// without touching the shared singleton. Defaults to `APICallCounter.shared`.
   private let callCounter: any APICallCounterProtocol
 
   // MARK: - Init
@@ -118,6 +121,7 @@ public struct GitHubTransport: GitHubTransportProtocol {
 
   // MARK: - Request building
 
+  /// Builds a signed `URLRequest` for `endpoint`, or `nil` if the URL is invalid.
   private func buildRequest(
     endpoint: String,
     token: String,
@@ -182,11 +186,18 @@ public struct GitHubTransport: GitHubTransportProtocol {
 
 // MARK: - Shared execution core
 
+/// The result of a single URLSession round-trip through `execute`.
 internal enum ExecuteResult {
+  /// A 2xx response with body, status code, and optional `Link` header.
   case success(Data, statusCode: Int, linkHeader: String?)
+  /// No GitHub token was available — user is signed out or no env var is set.
   case noToken
+  /// A non-2xx HTTP status code was returned.
   case httpError(Int)
+  /// The request was rate limited (403/429 with rate-limit signals).
   case rateLimited
+  /// The request was denied (403/429 without rate-limit signals).
   case permissionDenied
+  /// A transport-level network error occurred (DNS failure, TLS error, timeout, etc.).
   case networkError(Error)
 }
