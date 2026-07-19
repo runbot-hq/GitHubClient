@@ -192,11 +192,13 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// and any user hooks (oh-my-zsh, nvm, rvm, pyenv, etc.). On a minimally
 /// configured machine this is ~50–200ms. On a heavily configured machine with
 /// a cold `compinit` cache, startup can reach 1–3 seconds. The 10-second
-/// timeout is generous for the common case but may feel tight for users with
-/// expensive `~/.zshrc` setups. Correctness is unaffected — the sentinel
-/// strategy isolates the token from all stdout noise regardless of init
-/// duration. If the timeout proves too tight in practice, increase it or
-/// consider adding a user-facing note in the README / release notes.
+/// timeout budget includes process-launch time — on a slow machine where
+/// `process.run()` itself takes a moment, the effective shell-resolution
+/// window is shorter than 10 s. The timeout is generous for the common case
+/// but may feel tight for users with expensive `~/.zshrc` setups. Correctness
+/// is unaffected — the sentinel strategy isolates the token from all stdout
+/// noise regardless of init duration. If the timeout proves too tight in
+/// practice, increase it or add a user-facing note in the README.
 ///
 /// ## Shell choice: /bin/zsh (not $SHELL)
 /// Guaranteed on every supported macOS since Catalina. `$SHELL` would require
@@ -248,13 +250,18 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             let outPipe = Pipe()
             process.standardOutput = outPipe
             process.standardError = FileHandle.nullDevice
+            // Assign box.process BEFORE calling run() so the timeout arm can
+            // always call terminate() on a non-nil process. If run() throws,
+            // processIdentifier is 0 (never launched) and the defer clears the
+            // box so the timeout arm sees nil and skips terminate() cleanly.
+            box.process = process
+            defer { if process.processIdentifier == 0 { box.process = nil } }
             do {
                 try process.run()
             } catch {
                 logger?.log("TokenCache › login shell launch failed: \(error)", category: "transport")
                 return nil
             }
-            box.process = process
             // waitUntilExit() does not honour Swift task cancellation.
             // The timeout arm calls box.process?.terminate() as the kill path.
             process.waitUntilExit()
@@ -296,22 +303,26 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
 ///
 /// `Process` is not `Sendable` so it cannot be captured directly across task
 /// boundaries. This box is `@unchecked Sendable` because the access pattern is
-/// safe by construction: written once by the subprocess arm (after `process.run()`
-/// succeeds, before `waitUntilExit()` blocks), read at most once by the timeout
-/// arm (after 10 seconds of sleep).
+/// safe by construction: `box.process` is assigned before `process.run()` is
+/// called (subprocess arm), so the timeout arm always reads a non-nil value
+/// for any process that has been handed to the OS. A `defer` in the subprocess
+/// arm clears the box if `run()` throws, so the timeout arm sees `nil` and
+/// skips `terminate()` on a process that never launched.
 ///
-/// ## TOCTOU window and TSan
-/// The write (`box.process = process`) and the read (`box.process?.terminate()`)
-/// are on two different Swift concurrency tasks with no lock between them.
-/// TSan will flag this as an unsynchronised read/write — that flag is a known
-/// accepted false-positive for this pattern. The happens-before relationship is
-/// real: `process.run()` returning successfully is an OS-level synchronisation
-/// point that guarantees the process exists before the write executes. The
-/// narrow scheduler window between `process.run()` returning and
-/// `box.process = process` executing is the only genuine race: if the timeout
-/// fires in that window, `nil?.terminate()` is a no-op and the shell runs to
-/// natural completion (sub-second for `zsh -c printf`). Accepted as bounded and
-/// harmless; the entire box disappears in the follow-up async refactor (#68).
+/// ## Accepted data race
+/// The write (`box.process = process`, before `run()`) and the read
+/// (`box.process?.terminate()`, after 10 s of sleep) are on two different Swift
+/// concurrency tasks with no lock or memory barrier between them. TSan will
+/// correctly flag this as an unsynchronised read/write — this is an accepted
+/// data race, not a false positive. It is safe in practice because:
+/// - The write always precedes `waitUntilExit()`, which blocks the subprocess
+///   arm's thread for the duration of the shell's life.
+/// - The read happens after 10 s of sleep — orders of magnitude after the write.
+/// - `Process.terminate()` is thread-safe (documented by Apple).
+/// - The remaining race window (timeout fires between task creation and
+///   `box.process = process` executing) results in `nil?.terminate()`, a no-op;
+///   the shell runs to natural completion (sub-second for `zsh -c printf`).
+/// Accepted as bounded and harmless; the entire box disappears in #68.
 ///
 /// ## Process dealloc does not terminate
 /// When `withTaskGroup` returns and `box` is released, ARC deallocates this
