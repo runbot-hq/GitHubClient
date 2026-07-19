@@ -134,17 +134,7 @@ public final class TokenCache: Sendable {
         // This suspends for ~50–200ms on the first call, then the result
         // is cached and all subsequent calls return from step 1 above.
         guard let value = await loginShellToken(logger: logger) else {
-            // Shell timed out, produced no token, or failed to launch.
-            // Set the failed flag so subsequent poll cycles don't re-spawn
-            // the shell indefinitely. Reset by invalidate() on sign-out.
             state.withLock { $0.shellFailed = true }
-            logger?.log(
-                "TokenCache › token() — login shell returned no token. "
-                + "If this is a Finder/Dock launch, check that GH_TOKEN or GITHUB_TOKEN "
-                + "is exported in ~/.zprofile or ~/.zshrc, or sign in via OAuth. "
-                + "If the shell failed to launch, check that /bin/zsh is executable.",
-                category: "transport"
-            )
             return nil
         }
         state.withLock { if $0.token == nil { $0.token = value } }
@@ -368,7 +358,7 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// - Returns: The resolved token, or `nil` if not found, timed out, or launch failed.
 @concurrent
 private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
-    let box = UncheckedProcessBox()
+    let box = ProcessBox()
     return await withTaskGroup(of: String?.self) { group in
         // Subprocess arm — spawn, drain stdout, wait, read.
         group.addTask {
@@ -398,20 +388,16 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // hang if this path is ever reached from a terminal-context caller
             // where stdin would otherwise be the user's terminal.
             process.standardInput = FileHandle.nullDevice
-            // Assign box.process BEFORE calling run() so the timeout arm can
-            // always call terminate() on a non-nil process. If run() throws,
-            // the defer below clears box.process to nil so the timeout arm
-            // sees nil and skips terminate() on a process that never launched.
-            box.process = process
+            // Store the process in the box before calling run() so the timeout arm
+            // can always reach it via terminate(). The defer below clears it on a
+            // run() throw so the timeout arm sees nil and skips terminate() cleanly.
+            box.state.withLock { $0 = process }
             // processIdentifier is assigned by the OS only when run() succeeds.
             // A value of 0 means run() never succeeded — which is exactly the
             // throw path. On the success path processIdentifier is a real PID
-            // (> 0) so the condition is false and box.process is left intact
+            // (> 0) so the condition is false and box.state is left intact
             // for the timeout arm to call terminate() if needed.
-            // Do NOT simplify to an unconditional nil — that would clear the
-            // process reference on the success path too, racing with the
-            // timeout arm's terminate() call.
-            defer { if process.processIdentifier == 0 { box.process = nil } }
+            defer { if process.processIdentifier == 0 { box.state.withLock { $0 = nil } } }
             // ⚠️ App Sandbox: Process.run() throws a permission error in a sandboxed
             // app. loginShellToken must be removed before enabling the sandbox
             // entitlement. See the loginShellToken doc comment for details.
@@ -424,7 +410,7 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
                     category: "transport"
                 )
                 // shellFailed is set by the caller (token()) on nil return —
-                // no need to set it here. The defer above clears box.process
+                // no need to set it here. The defer above clears box.state
                 // so the timeout arm skips terminate() cleanly.
                 return nil
             }
@@ -437,7 +423,7 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // drained and the child has exited naturally. See doc comment for details.
             let data = await drainPipe(outPipe)
             // waitUntilExit() does not honour Swift task cancellation.
-            // The timeout arm calls box.process?.terminate() as the kill path.
+            // The timeout arm calls box.state.withLock { $0 }?.terminate() as the kill path.
             // The drain above ensures this never deadlocks on a pipe-full condition.
             // Note: on the common fast path the shell has already exited by the time
             // drainPipe() returns (readDataToEndOfFile() unblocks when the write end
@@ -457,7 +443,19 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // CRLF line endings; a trailing \r would produce Bearer <token>\r and
             // every API call would return 401 silently.
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
+            if trimmed.isEmpty {
+                // The shell launched and ran successfully, but found no GH_TOKEN
+                // or GITHUB_TOKEN export in ~/.zprofile / ~/.zshrc.
+                // This is expected for OAuth-only users — not an error.
+                logger?.log(
+                    "TokenCache › login shell ran successfully but found no token export. "
+                    + "This is normal for OAuth-only users. "
+                    + "To use a PAT on Finder/Dock launches, export GH_TOKEN or GITHUB_TOKEN "
+                    + "in ~/.zprofile or ~/.zshrc.",
+                    category: "transport"
+                )
+                return nil
+            }
             #if DEBUG
             logger?.log("TokenCache › resolved from login shell (len=\(trimmed.count))", category: "transport")
             #endif
@@ -471,8 +469,14 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             } catch {
                 return nil
             }
-            logger?.log("TokenCache › login shell timed out — terminating", category: "transport")
-            box.process?.terminate()
+            logger?.log(
+                "TokenCache › login shell timed out after 10 s — terminating. "
+                + "If your ~/.zshrc has expensive startup hooks (oh-my-zsh, nvm, compinit, etc.), "
+                + "consider moving the GH_TOKEN export to ~/.zprofile instead, "
+                + "which is sourced without -i and avoids the full interactive init.",
+                category: "transport"
+            )
+            box.state.withLock { $0 }?.terminate()
             return nil
         }
         // group.next() returns the result of whichever arm completes first.
@@ -498,58 +502,32 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
 /// the child process exits or is terminated). Running it on a `DispatchQueue` thread
 /// keeps the blocking I/O off the Swift concurrency cooperative pool.
 ///
+/// `qos: .utility` signals background I/O intent — this is not interactive work.
+/// Under memory pressure, `.utility` is deprioritised less aggressively than the
+/// default global queue while still yielding to interactive QoS work.
+///
 /// On the timeout path: `terminate()` sends SIGTERM to the shell, which closes
 /// the pipe write end, causing `readDataToEndOfFile()` to return immediately with
 /// whatever was buffered. The continuation is resumed promptly — no hang.
 private func drainPipe(_ pipe: Pipe) async -> Data {
     await withCheckedContinuation { continuation in
-        DispatchQueue.global().async {
+        DispatchQueue.global(qos: .utility).async {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             continuation.resume(returning: data)
         }
     }
 }
 
-/// Shares the `Process` reference between the subprocess arm and the timeout arm.
+/// Shares the `Process` reference between the subprocess arm and the timeout arm
+/// behind a `Mutex` for formally safe cross-task access.
 ///
 /// `Process` is not `Sendable` so it cannot be captured directly across task
-/// boundaries. This box is `@unchecked Sendable` because the two arms access
-/// `process` without any synchronisation primitive — see the data race note below.
+/// boundaries. Wrapping it in a `Mutex<Process?>` gives us a properly `Sendable`
+/// container with no `@unchecked` annotation required — all reads and writes
+/// are synchronised by the lock.
+///
 /// A `defer` in the subprocess arm clears the box if `run()` throws, so the
 /// timeout arm sees `nil` and skips `terminate()` on a process that never launched.
-///
-/// ## Accepted data race (hardware-ordering-dependent, not formally safe)
-/// The write (`box.process = process`, before `run()`) and the read
-/// (`box.process?.terminate()`, after 10 s of sleep) are on two different Swift
-/// concurrency tasks with no lock, barrier, or `Mutex` between them. TSan will
-/// correctly flag this as an unsynchronised read/write. This is an accepted
-/// data race, not a false positive.
-///
-/// Safety in practice relies on hardware memory ordering, not on any guarantee
-/// from the Swift memory model. The Swift memory model does not promise that an
-/// unsynchronised write from Task A is visible to a read from Task B at any
-/// particular point — only properly synchronised accesses carry that guarantee.
-/// The argument below holds on Apple Silicon and x86 due to their strong
-/// memory models, but it is not formally provable from Swift semantics alone.
-/// Do NOT adapt this pattern assuming it is formally safe.
-///
-/// Why it holds in practice:
-/// - The write precedes `waitUntilExit()`, which blocks the subprocess arm's
-///   thread for the entire duration of the shell's life — effectively pinning
-///   the write well before the timeout arm could ever fire.
-/// - The read happens after 10 s of sleep — orders of magnitude after the write.
-/// - `Process.terminate()` is thread-safe (documented by Apple).
-/// - Window A: timeout fires between task creation and `box.process = process`
-///   → `nil?.terminate()`, a no-op; the shell runs to natural completion.
-/// - Window B: timeout fires between `box.process = process` and `process.run()`
-///   → `terminate()` on an unlaunched `Process`. `Process.terminate()` checks
-///   `isRunning` before issuing the kill syscall (verified against Foundation
-///   source: the implementation guards on `isRunning` and returns early when
-///   false, so `kill(processIdentifier, SIGTERM)` is never called on a process
-///   with `processIdentifier == 0`). This is a no-op. Both windows are bounded
-///   and harmless.
-///
-/// Accepted as bounded and harmless in practice.
 ///
 /// ## Process dealloc does not terminate
 /// When `withTaskGroup` returns and `box` is released, ARC deallocates this
@@ -559,7 +537,8 @@ private func drainPipe(_ pipe: Pipe) async -> Data {
 /// a second after SIGTERM (sent by the timeout arm) or after the command
 /// completes (subprocess arm). Do NOT rely on `Process` dealloc as a cleanup
 /// mechanism in any future adaptation of this pattern.
-private final class UncheckedProcessBox: @unchecked Sendable {
+private final class ProcessBox: Sendable {
     /// The spawned `/bin/zsh` process, or `nil` if not yet started or launch failed.
-    var process: Process?
+    /// Guarded by a `Mutex` for safe cross-task read/write without `@unchecked Sendable`.
+    let state = Mutex<Process?>(nil)
 }
