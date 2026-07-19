@@ -15,14 +15,46 @@ import Synchronization
 //   3. ProcessInfo env  (sync, covers terminal / CI launches)
 //   4. loginShellToken  (async subprocess — cold Finder launch only)
 //
-// The shell is spawned at most once per cache lifetime (cleared by invalidate()).
+// The shell is spawned at most once per cache lifetime for a .failed outcome
+// (timeout, launch error). A .notFound outcome (shell healthy, no export)
+// does NOT latch — the shell path is re-entered on the next token() call.
 // After a successful resolution the result is written to the in-memory cache
 // and all subsequent calls return immediately from step 1.
-//
-// If the shell times out, produces no token, or fails to launch, shellFailed
-// is set to true under the same Mutex. Subsequent token() calls short-circuit
-// before step 4, returning nil immediately without re-spawning. invalidate()
-// resets the flag so a sign-out / sign-in cycle gets exactly one fresh attempt.
+// invalidate() resets all state so a sign-out / sign-in cycle gets a fresh attempt.
+
+// MARK: - ShellResolutionOutcome
+
+/// Records the outcome of the most recent login-shell resolution attempt.
+///
+/// Stored inside `TokenCache.state` alongside the cached token so both fields
+/// are read and written atomically under the same `Mutex`.
+///
+/// ## Why an enum instead of a Bool
+/// The previous `shellFailed: Bool` flag collapsed two semantically distinct
+/// outcomes — "shell ran but found no export" and "shell failed to launch or
+/// timed out" — into a single latch. Both set the flag to `true`, permanently
+/// blocking re-entry for the process lifetime. That is correct for `.failed`
+/// (retrying a broken shell every 30 s is wasteful) but wrong for `.notFound`
+/// (an OAuth-only user who later adds `GH_TOKEN` to their profile should not
+/// need a relaunch to pick it up). The enum makes the policy explicit:
+/// only `.failed` latches; `.notFound` allows re-entry on the next call.
+private enum ShellResolutionOutcome {
+    /// No shell attempt has been made yet this cache lifetime.
+    case notAttempted
+    /// The shell launched and ran successfully but found no `GH_TOKEN` or
+    /// `GITHUB_TOKEN` export. The shell path is NOT latched — `token()` will
+    /// re-enter it on the next call, allowing the user to add an export
+    /// without relaunching the app.
+    case notFound
+    /// The shell timed out, failed to launch, or was blocked by the App Sandbox.
+    /// The shell path IS latched — `token()` short-circuits before step 4 on
+    /// every subsequent call until `invalidate()` resets the outcome.
+    /// Retrying a broken or sandbox-blocked shell every poll cycle (~30 s)
+    /// would be a persistent background thread burn with no benefit; the user
+    /// must take explicit action (fix `~/.zprofile`, remove the sandbox
+    /// entitlement, or sign in via OAuth) before a retry is useful.
+    case failed
+}
 
 /// A token cache that resolves from an injected `TokenStore` and/or environment variables,
 /// falling back to a login shell subprocess on a cold GUI-app launch.
@@ -38,20 +70,21 @@ public final class TokenCache: Sendable {
     ///
     /// Both fields are mutated together so reads and writes are always consistent:
     /// - `token`: the resolved token, or `nil` if not yet populated.
-    /// - `shellFailed`: set to `true` after a confirmed shell timeout, no-token
-    ///   result, or launch failure, preventing further shell re-spawns until
-    ///   `invalidate()` resets it.
+    /// - `shellOutcome`: tracks the result of the last login-shell attempt.
+    ///   See `ShellResolutionOutcome` for the per-case latch policy.
     ///
     /// ## Why one Mutex for both fields
-    /// `token` and `shellFailed` are always read and mutated as a pair:
-    /// `token()` reads `shellFailed` then writes one or the other, and
+    /// `token` and `shellOutcome` are always read and mutated as a pair:
+    /// `token()` reads `shellOutcome` then writes one or the other, and
     /// `invalidate()` resets both atomically. Two separate locks would require
     /// lock-ordering discipline to prevent deadlock, and would expose an
-    /// inconsistent intermediate state where `token` is cleared but `shellFailed`
-    /// is still `true` — permanently blocking the shell path after sign-out until
-    /// the second lock was also cleared. One lock is simpler and eliminates that
-    /// window entirely.
-    private let state = Mutex<(token: String?, shellFailed: Bool)>((token: nil, shellFailed: false))
+    /// inconsistent intermediate state where `token` is cleared but
+    /// `shellOutcome` is still `.failed` — permanently blocking the shell path
+    /// after sign-out until the second lock was also cleared. One lock is
+    /// simpler and eliminates that window entirely.
+    private let state = Mutex<(token: String?, shellOutcome: ShellResolutionOutcome)>(
+        (token: nil, shellOutcome: .notAttempted)
+    )
 
     /// Creates a new `TokenCache`.
     /// - Parameters:
@@ -80,23 +113,27 @@ public final class TokenCache: Sendable {
     /// declaration on the warm path is a single actor-hop check — negligible
     /// compared to any Keychain or subprocess I/O.
     ///
-    /// ## Why shell failure is permanent until `invalidate()`
-    /// Retrying on every call would spawn a new `/bin/zsh` on every poll cycle
-    /// (~30 s) for the process lifetime on any machine where the shell has no
-    /// token — a persistent background thread burn and a guaranteed 10-second
-    /// stall each cycle. A timed backoff would add a timestamp field and timer
-    /// logic that exists solely for a condition the user must fix manually anyway.
-    /// The chosen policy matches user mental model: act (fix `~/.zprofile`, set
-    /// the env var, sign in via OAuth), then the next sign-out/sign-in cycle
-    /// resets via `invalidate()`. Transient OS blips (`ENOMEM` at launch etc.)
-    /// are the one accepted gap — tracked in issue #68.
+    /// ## Shell latch policy
+    /// Step 4 behaviour depends on the outcome of the last shell attempt:
+    /// - `.notAttempted`: shell is spawned normally.
+    /// - `.notFound`: shell ran but found no export — NOT latched. Step 4 is
+    ///   re-entered on the next call. An OAuth-only user who later adds
+    ///   `GH_TOKEN` to their shell profile is unblocked without a relaunch.
+    /// - `.failed`: shell timed out, failed to launch, or was blocked by the
+    ///   App Sandbox — IS latched. Step 4 is short-circuited on every
+    ///   subsequent call until `invalidate()` resets the outcome. Retrying a
+    ///   broken shell every poll cycle (~30 s) would burn a background thread
+    ///   for no benefit; the user must take explicit action first.
     ///
-    /// The shell (step 4) is spawned at most once per cache lifetime. On success
-    /// the result is written to the in-memory cache so every subsequent call
-    /// returns immediately from step 1. On timeout, no-token result, or launch
-    /// failure, the `shellFailed` flag is set and all subsequent calls return `nil`
-    /// immediately without re-spawning the shell. `invalidate()` resets both the
-    /// cache and the flag, so a sign-out / sign-in cycle gets exactly one fresh attempt.
+    /// Transient OS blips (`ENOMEM` at launch etc.) are covered by the `.failed`
+    /// latch — the user would need to sign out and back in or relaunch. This is
+    /// an accepted trade-off tracked in issue #68.
+    ///
+    /// ## Why retrying `.failed` on every call is not the answer
+    /// A timed backoff would add a timestamp field and timer logic that exists
+    /// solely for a condition the user must fix manually anyway. The chosen
+    /// policy matches user mental model: act (fix `~/.zprofile`, sign in via
+    /// OAuth), then the next sign-out/sign-in cycle resets via `invalidate()`.
     ///
     /// For GUI app launches from Finder/Dock/login items, `launchd` does not source
     /// `~/.zprofile` or `~/.zshrc`, so `ProcessInfo` does not contain `GH_TOKEN`.
@@ -106,10 +143,10 @@ public final class TokenCache: Sendable {
     /// no env var, no shell export, or shell previously timed out or failed to launch).
     ///
     /// - Warning: Concurrent callers that simultaneously miss all fast paths (steps 1–3)
-    ///   will each spawn a separate `/bin/zsh` subprocess. The `shellFailed` guard and
+    ///   will each spawn a separate `/bin/zsh` subprocess. The `.failed` latch check and
     ///   the write-back to `state.token` are separate Mutex lock calls — there is no
-    ///   atomic "check-and-enter" operation. This means that `shellFailed` is NOT set
-    ///   until `loginShellToken` returns (which can take up to 10 s on timeout), so the
+    ///   atomic "check-and-enter" operation. This means the latch is NOT set until
+    ///   `loginShellToken` returns (which can take up to 10 s on timeout), so the
     ///   window where multiple callers can each independently enter the shell path spans
     ///   the full execution time of the shell, not just a scheduling instant. Correctness
     ///   is preserved (the `if $0.token == nil` Mutex guard in the write-back prevents a
@@ -130,43 +167,56 @@ public final class TokenCache: Sendable {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }
         if let envToken = resolveFromEnvironment() { return envToken }
-        // Short-circuit if the shell already failed on a prior call.
-        // Prevents re-spawning /bin/zsh on every poll cycle after a confirmed
-        // timeout, no-token result, or launch failure. Reset by invalidate().
-        // See "Why shell failure is permanent until invalidate()" above.
-        if state.withLock({ $0.shellFailed }) { return nil }
+        // Short-circuit if the shell previously failed (timeout / launch error /
+        // App Sandbox). .notFound does NOT short-circuit — re-entry is allowed so
+        // an OAuth-only user who later adds GH_TOKEN is unblocked without relaunching.
+        // See ShellResolutionOutcome and the -Warning: block above for the full
+        // concurrent-caller window: the latch is not set until loginShellToken
+        // returns, which can take up to 10 s — not just a scheduling instant.
+        if case .failed = state.withLock({ $0.shellOutcome }) { return nil }
         // All fast paths missed — cold Finder/Dock/login-item launch.
         // Spawn the login shell to source ~/.zprofile and ~/.zshrc.
-        // This suspends for ~50–200ms on the first call, then the result
-        // is cached and all subsequent calls return from step 1 above.
-        guard let value = await loginShellToken(logger: logger) else {
-            state.withLock { $0.shellFailed = true }
+        // This suspends for ~50–200 ms on the first call; the result is
+        // cached and all subsequent calls return from step 1 above.
+        let shellResult = await loginShellToken(logger: logger)
+        switch shellResult {
+        case .found(let value):
+            state.withLock { if $0.token == nil { $0.token = value } }
+            return value
+        case .notFound:
+            // Shell ran fine but no token was exported. Do NOT latch — allow
+            // re-entry on the next call. See ShellResolutionOutcome.notFound.
+            state.withLock { $0.shellOutcome = .notFound }
+            return nil
+        case .failed:
+            // Shell timed out, failed to launch, or was blocked by the sandbox.
+            // Latch to prevent re-spawning on every poll cycle. See .failed.
+            state.withLock { $0.shellOutcome = .failed }
             return nil
         }
-        state.withLock { if $0.token == nil { $0.token = value } }
-        return value
     }
 
-    /// Clears the in-memory token cache and resets the shell-failed flag.
+    /// Clears the in-memory token cache and resets the shell outcome to `.notAttempted`.
     ///
     /// Call after saving a new token or after sign-out so the next `token()`
     /// call re-resolves from the store or shell.
     ///
-    /// Resetting `shellFailed` here is intentional: a sign-out / sign-in cycle
+    /// Resetting `shellOutcome` here is intentional: a sign-out / sign-in cycle
     /// should get exactly one fresh shell attempt on the next `token()` call,
     /// even if the previous attempt timed out. Without this reset the user would
     /// be permanently locked out of the shell path for the process lifetime after
-    /// a single timeout, regardless of whether they subsequently fix their
-    /// `~/.zshrc` or reduce its startup cost.
+    /// a single `.failed` outcome, regardless of whether they subsequently fix
+    /// their `~/.zshrc` or reduce its startup cost.
     ///
-    /// Note the latency cost: the re-spawned shell adds ~50–200 ms to the first
-    /// poll cycle after sign-out on an affected launch configuration. This cost
-    /// recurs on every sign-out cycle (each `invalidate()` resets the flag), not
-    /// just once per process lifetime. It is cached immediately on success, so
-    /// only the first `token()` call after each `invalidate()` pays the penalty.
+    /// Note the latency cost on `.failed` reset: the re-spawned shell adds
+    /// ~50–200 ms to the first poll cycle after sign-out on an affected launch
+    /// configuration. This cost recurs on every sign-out cycle (each `invalidate()`
+    /// resets the outcome), not just once per process lifetime. It is cached
+    /// immediately on success, so only the first `token()` call after each
+    /// `invalidate()` pays the penalty.
     public func invalidate() {
-        state.withLock { $0 = (token: nil, shellFailed: false) }
-        logger?.log("TokenCache › invalidate — cache and shell-failed flag cleared", category: "transport")
+        state.withLock { $0 = (token: nil, shellOutcome: .notAttempted) }
+        logger?.log("TokenCache › invalidate — cache and shell outcome reset", category: "transport")
     }
 
     // MARK: - Private helpers
@@ -238,6 +288,19 @@ public final class TokenCache: Sendable {
 
 // MARK: - Login shell resolution (@concurrent for blocking I/O)
 
+/// The result of a login-shell token resolution attempt.
+///
+/// Returned by `loginShellToken` and consumed by `token()` to set
+/// `ShellResolutionOutcome` in the cache state.
+private enum ShellTokenResult {
+    /// The shell ran and found an exported token.
+    case found(String)
+    /// The shell ran successfully but found no `GH_TOKEN` / `GITHUB_TOKEN` export.
+    case notFound
+    /// The shell timed out, failed to launch, or was blocked by the App Sandbox.
+    case failed
+}
+
 /// The sentinel prefix written by the shell before the token value.
 /// Long enough that it cannot appear in `.zshrc` output by coincidence.
 /// The subprocess arm extracts only the sentinel-prefixed line, discarding
@@ -252,7 +315,7 @@ public final class TokenCache: Sendable {
 private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 
 /// Spawns `/bin/zsh -i -l` to recover `GH_TOKEN` or `GITHUB_TOKEN` from the
-/// user's shell profile and returns the token, or `nil` on failure or timeout.
+/// user's shell profile and returns a typed `ShellTokenResult`.
 ///
 /// ## @concurrent — blocking I/O off the main actor
 /// `waitUntilExit()` blocks a thread. `@concurrent` keeps that off any
@@ -291,11 +354,11 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// ## group.next() first-result semantics — timeout-path token discard (intentional)
 /// `group.next()` returns whichever arm completes first. If the subprocess arm
 /// finishes before 10 s it wins and the token is returned. If the timeout arm
-/// fires first, `group.next()` returns `nil` and `cancelAll()` is called —
+/// fires first, `group.next()` returns `.failed` and `cancelAll()` is called —
 /// any token the shell was about to produce is intentionally discarded.
-/// This is a deliberate fail-safe: returning `nil` after a timeout is safer
+/// This is a deliberate fail-safe: returning `.failed` after a timeout is safer
 /// than returning a token whose resolution time exceeded the budget. The caller
-/// (`token()`) sets `shellFailed = true` on nil return, preventing re-spawns.
+/// (`token()`) sets `shellOutcome = .failed` on this result, preventing re-spawns.
 ///
 /// ## Pipe buffer deadlock prevention (withCheckedContinuation drain)
 /// `waitUntilExit()` blocks until the child exits. If the child writes enough
@@ -347,9 +410,9 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// ## App Sandbox (not currently applicable — known cliff)
 /// `Process` is unavailable in a sandboxed Mac app. If the app is ever
 /// sandboxed, `process.run()` will throw a permission error, `loginShellToken`
-/// returns `nil`, and `token()` sets `shellFailed = true` — the user gets no
-/// token with no obvious diagnostic. The entire `loginShellToken` path must be
-/// removed before enabling the sandbox entitlement.
+/// returns `.failed`, and `token()` sets `shellOutcome = .failed` — the user
+/// gets no token with no obvious diagnostic. The entire `loginShellToken` path
+/// must be removed before enabling the sandbox entitlement.
 ///
 /// ## Thundering-herd on concurrent callers
 /// `loginShellToken` has no guard against concurrent callers — two `token()`
@@ -361,11 +424,12 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// at most one cold-launch shell is ever spawned. A future public API consumer
 /// that calls `token()` concurrently from multiple tasks should be aware of this.
 ///
-/// - Returns: The resolved token, or `nil` if not found, timed out, or launch failed.
+/// - Returns: A `ShellTokenResult` discriminating between a found token,
+///   a healthy shell with no export, and a launch/timeout failure.
 @concurrent
-private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
+private func loginShellToken(logger: (any GitHubLogger)?) async -> ShellTokenResult {
     let box = ProcessBox()
-    return await withTaskGroup(of: String?.self) { group in
+    return await withTaskGroup(of: ShellTokenResult.self) { group in
         // Subprocess arm — spawn, drain stdout, wait, read.
         group.addTask {
             // Cheap early-exit if the task group was cancelled before this arm
@@ -376,7 +440,7 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // after run() succeeds, the timeout arm's terminate() is the kill
             // path, or the shell runs to fast natural completion. Correctness
             // is unaffected either way.
-            guard !Task.isCancelled else { return nil }
+            guard !Task.isCancelled else { return .failed }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = [
@@ -395,30 +459,32 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // where stdin would otherwise be the user's terminal.
             process.standardInput = FileHandle.nullDevice
             // Store the process in the box before calling run() so the timeout arm
-            // can always reach it via terminate(). The defer below clears it on a
-            // run() throw so the timeout arm sees nil and skips terminate() cleanly.
+            // can always reach it via terminate(). The `launched` sentinel below
+            // clears the box on a run() throw so the timeout arm sees nil and
+            // skips terminate() cleanly.
             box.state.withLock { $0 = process }
-            // processIdentifier is assigned by the OS only when run() succeeds.
-            // A value of 0 means run() never succeeded — which is exactly the
-            // throw path. On the success path processIdentifier is a real PID
-            // (> 0) so the condition is false and box.state is left intact
-            // for the timeout arm to call terminate() if needed.
-            defer { if process.processIdentifier == 0 { box.state.withLock { $0 = nil } } }
+            // Explicit sentinel rather than checking processIdentifier == 0:
+            // Process.processIdentifier is documented as 0 before launch, but
+            // Apple's API makes no contract about its value after a run() throw.
+            // `launched` is set only after run() succeeds, so its meaning is
+            // unambiguous regardless of any future Process API change.
+            var launched = false
+            defer { if !launched { box.state.withLock { $0 = nil } } }
             // ⚠️ App Sandbox: Process.run() throws a permission error in a sandboxed
             // app. loginShellToken must be removed before enabling the sandbox
             // entitlement. See the loginShellToken doc comment for details.
             do {
                 try process.run()
+                launched = true
             } catch {
                 logger?.log(
                     "TokenCache › login shell failed to launch: \(error). "
                     + "Check that /bin/zsh is present and executable.",
                     category: "transport"
                 )
-                // shellFailed is set by the caller (token()) on nil return —
-                // no need to set it here. The defer above clears box.state
-                // so the timeout arm skips terminate() cleanly.
-                return nil
+                // The defer above clears box.state so the timeout arm skips
+                // terminate() cleanly. Caller sets shellOutcome = .failed on .failed return.
+                return .failed
             }
             // Drain stdout via withCheckedContinuation BEFORE calling waitUntilExit().
             // If the pipe kernel buffer (~64 KB on macOS) fills before the child exits,
@@ -437,7 +503,7 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // exited process checks isRunning internally and returns immediately —
             // it is not a hang risk even when called after the child is gone.
             process.waitUntilExit()
-            guard let raw = String(data: data, encoding: .utf8) else { return nil }
+            guard let raw = String(data: data, encoding: .utf8) else { return .failed }
             let value = raw
                 .components(separatedBy: .newlines)
                 .compactMap { line -> String? in
@@ -453,6 +519,9 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
                 // The shell launched and ran successfully, but found no GH_TOKEN
                 // or GITHUB_TOKEN export in ~/.zprofile / ~/.zshrc.
                 // This is expected for OAuth-only users — not an error.
+                // Return .notFound (not .failed) so the caller does NOT latch the
+                // shell path: the user can add an export and have it picked up
+                // on the next token() call without relaunching the app.
                 logger?.log(
                     "TokenCache › login shell ran successfully but found no token export. "
                     + "This is normal for OAuth-only users. "
@@ -460,12 +529,12 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
                     + "in ~/.zprofile or ~/.zshrc.",
                     category: "transport"
                 )
-                return nil
+                return .notFound
             }
             #if DEBUG
             logger?.log("TokenCache › resolved from login shell (len=\(trimmed.count))", category: "transport")
             #endif
-            return trimmed
+            return .found(trimmed)
         }
         // Timeout arm — kill the shell after 10s.
         // do/catch exits cleanly on cancellation without logging. See doc comment.
@@ -473,7 +542,7 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             do {
                 try await Task.sleep(for: .seconds(10))
             } catch {
-                return nil
+                return .failed
             }
             logger?.log(
                 "TokenCache › login shell timed out after 10 s — terminating. "
@@ -483,19 +552,19 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
                 category: "transport"
             )
             box.state.withLock { $0 }?.terminate()
-            return nil
+            return .failed
         }
         // group.next() returns the result of whichever arm completes first.
         // If the timeout arm wins, the shell's token (if any) is intentionally
         // discarded — fail-safe over fail-open. See doc comment for full rationale.
-        // The caller (token()) sets shellFailed = true on nil return.
+        // The caller (token()) sets shellOutcome = .failed on a .failed result.
         //
-        // String?? → String?: the ?? nil collapses the outer Optional (group.next()
-        // returns nil only when all tasks have already been collected). That path is
-        // structurally unreachable here — two tasks were added and only one
-        // group.next() call is made — so ?? nil exists solely to satisfy the type
-        // system, not as a real fallback.
-        let result: String? = await group.next() ?? nil
+        // ShellTokenResult?? → ShellTokenResult: the ?? .failed collapses the outer
+        // Optional (group.next() returns nil only when all tasks have already been
+        // collected). That path is structurally unreachable here — two tasks were
+        // added and only one group.next() call is made — so ?? .failed exists solely
+        // to satisfy the type system, not as a real fallback.
+        let result: ShellTokenResult = await group.next() ?? .failed
         group.cancelAll()
         return result
     }
@@ -532,8 +601,9 @@ private func drainPipe(_ pipe: Pipe) async -> Data {
 /// container with no `@unchecked` annotation required — all reads and writes
 /// are synchronised by the lock.
 ///
-/// A `defer` in the subprocess arm clears the box if `run()` throws, so the
-/// timeout arm sees `nil` and skips `terminate()` on a process that never launched.
+/// A `defer` in the subprocess arm clears the box if `run()` throws (guarded by
+/// the explicit `launched` sentinel), so the timeout arm sees `nil` and skips
+/// `terminate()` on a process that never launched.
 ///
 /// ## Process dealloc does not terminate
 /// When `withTaskGroup` returns and `box` is released, ARC deallocates this
