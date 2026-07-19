@@ -28,11 +28,23 @@ public struct GitHubWorkflowRun: Decodable, Sendable {
 
     /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        case id, name, status, conclusion
+        /// Maps `id`.
+        case id
+        /// Maps `name`.
+        case name
+        /// Maps `status`.
+        case status
+        /// Maps `conclusion`.
+        case conclusion
+        /// Maps `head_branch`.
         case headBranch = "head_branch"
+        /// Maps `head_sha`.
         case headSha = "head_sha"
+        /// Maps `html_url`.
         case htmlUrl = "html_url"
+        /// Maps `created_at`.
         case createdAt = "created_at"
+        /// Maps `updated_at`.
         case updatedAt = "updated_at"
     }
 }
@@ -98,13 +110,29 @@ public struct GitHubJob: Decodable, Identifiable, Equatable, Sendable {
     /// `var` — replaced wholesale when step data arrives; absent for queued jobs (see decoder note).
     public var steps: [GitHubStep]
 
+    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        case id, name, status, conclusion, steps
+        /// Maps `id`.
+        case id
+        /// Maps `name`.
+        case name
+        /// Maps `status`.
+        case status
+        /// Maps `conclusion`.
+        case conclusion
+        /// Maps `steps`.
+        case steps
+        /// Maps `run_id`.
         case runID = "run_id"
+        /// Maps `html_url`.
         case htmlUrl = "html_url"
+        /// Maps `runner_name`.
         case runnerName = "runner_name"
+        /// Maps `started_at`.
         case startedAt = "started_at"
+        /// Maps `completed_at`.
         case completedAt = "completed_at"
+        /// Maps `created_at`.
         case createdAt = "created_at"
     }
 
@@ -197,9 +225,19 @@ public struct GitHubStep: Decodable, Equatable, Sendable {
     /// Raw ISO 8601 date string — caller is responsible for parsing.
     public let completedAt: String?
 
+    /// Coding keys mapping snake_case JSON fields to camelCase Swift properties.
     enum CodingKeys: String, CodingKey {
-        case name, status, conclusion, number
+        /// Maps `name`.
+        case name
+        /// Maps `status`.
+        case status
+        /// Maps `conclusion`.
+        case conclusion
+        /// Maps `number`.
+        case number
+        /// Maps `started_at`.
         case startedAt = "started_at"
+        /// Maps `completed_at`.
         case completedAt = "completed_at"
     }
 
