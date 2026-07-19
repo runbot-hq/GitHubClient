@@ -297,6 +297,14 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     return await withTaskGroup(of: String?.self) { group in
         // Subprocess arm — spawn, drain stdout, wait, read.
         group.addTask {
+            // Cheap early-exit if the task group was cancelled before this arm
+            // was scheduled (e.g. loginShellToken itself was cancelled before
+            // any work started). This is a best-effort check only — it does not
+            // protect against cancellation racing with process.run() below.
+            // That window is intentionally unguarded: if the task is cancelled
+            // after run() succeeds, the timeout arm's terminate() is the kill
+            // path, or the shell runs to fast natural completion. Correctness
+            // is unaffected either way.
             guard !Task.isCancelled else { return nil }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -339,6 +347,11 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // waitUntilExit() does not honour Swift task cancellation.
             // The timeout arm calls box.process?.terminate() as the kill path.
             // The drain above ensures this never deadlocks on a pipe-full condition.
+            // Note: on the common fast path the shell has already exited by the time
+            // drainPipe() returns (readDataToEndOfFile() unblocks when the write end
+            // closes, which happens on shell exit). waitUntilExit() on an already-
+            // exited process checks isRunning internally and returns immediately —
+            // it is not a hang risk even when called after the child is gone.
             process.waitUntilExit()
             guard let raw = String(data: data, encoding: .utf8) else { return nil }
             let value = raw
@@ -373,7 +386,12 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
         // group.next() returns the result of whichever arm completes first.
         // If the timeout arm wins, the shell's token (if any) is intentionally
         // discarded — fail-safe over fail-open. See doc comment for full rationale.
-        // String?? → String?: ?? nil collapses outer-nil (empty group) to inner-nil.
+        //
+        // String?? → String?: the ?? nil collapses the outer Optional (group.next()
+        // returns nil only when all tasks have already been collected). That path is
+        // structurally unreachable here — two tasks were added and only one
+        // group.next() call is made — so ?? nil exists solely to satisfy the type
+        // system, not as a real fallback.
         let result: String? = await group.next() ?? nil
         group.cancelAll()
         return result
