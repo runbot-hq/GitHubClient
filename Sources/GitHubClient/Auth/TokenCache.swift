@@ -24,42 +24,41 @@ public final class TokenCache: Sendable {
     ///
     /// Set optimistically to `true` before the shell is spawned to prevent
     /// concurrent `warmUp()` calls each launching their own `/bin/zsh`.
-    /// Reset to `false` if the shell returns nil (timeout or absent token),
-    /// so a future `warmUp()` call can retry. Never reset by `invalidate()`.
+    /// Reset to `false` in two cases:
+    /// - Shell returned nil (timeout or absent token) — allows retry.
+    /// - `invalidate()` was called — allows re-warm after sign-out.
     ///
-    /// ## Why this is NOT a simple one-shot latch
-    /// The latch is **set before** the shell runs and **reset after** a failed
-    /// attempt. This means:
-    /// - Success: latch stays true — no further shell spawns needed.
-    /// - Failure (timeout / absent token): latch resets to false — next
-    ///   `warmUp()` call can retry. A machine that was slow at launch can
-    ///   recover; a user who installs their token mid-session can pick it up.
-    /// - Concurrent callers: both pass the latch check and both may spawn,
-    ///   but the `if $0 == nil` cache guard prevents a double-write.
-    ///   This thundering-herd window is accepted (same trade-off as the
-    ///   Keychain read path).
+    /// ## Concurrency: only one caller wins the Mutex
+    /// Two concurrent callers that both pass the fast-path checks
+    /// (`resolveFromStore`, `resolveFromEnvironment`) race at the
+    /// `warmUpInFlight.withLock` gate. The Mutex ensures only one wins
+    /// `shouldProceed = true`; the other hits `guard shouldProceed` and
+    /// returns early. They do **not** both spawn a shell.
+    ///
+    /// ## Latch reset on failure (retry is allowed)
+    /// A failed attempt (timeout, absent token, launch error) resets the
+    /// latch so the next `warmUp()` call can retry. A machine that was
+    /// slow at startup can recover; a user who installs their token and
+    /// re-warms does not need a full restart.
+    ///
+    /// ## Latch reset on invalidate()
+    /// `invalidate()` resets this latch alongside clearing the cache so
+    /// that a post-sign-out `warmUp()` call (e.g. in a reconnect flow)
+    /// can re-spawn the shell. Without this reset, `warmUp()` would
+    /// fast-path out on the stale latch and silently leave the cache
+    /// empty with no shell retry and no diagnostic.
     ///
     /// ## Why it is read in token() — a synchronous function
-    /// `token()` never touches the shell. It reads `warmUpInFlight` solely to
-    /// decide which diagnostic log message to emit when all three fast-paths
-    /// return nil. `warmUpInFlight == true` means "a shell ran and found
-    /// nothing" — actionable (check ~/.zprofile / ~/.zshrc). `false` means
-    /// "warmUp() was never called or not yet" — different message. The read
-    /// is diagnostic-only and has no effect on the return value of `token()`.
-    ///
-    /// ## Why it is NOT reset by invalidate()
-    /// Sign-out calls `invalidate()` then never calls `warmUp()` again in the
-    /// current flow. Resetting the latch in `invalidate()` would be a no-op
-    /// in practice and would only matter if `warmUp()` were ever called after
-    /// `invalidate()`. If that call flow is ever added, the caller must also
-    /// reset this latch, or `warmUp()` will silently no-op with the cache
-    /// empty. See `invalidate()` doc comment.
+    /// `token()` never touches the shell. It reads this flag solely to
+    /// pick the right diagnostic log when all fast-paths return nil.
+    /// `true` means "a shell ran and found nothing" (actionable: check
+    /// ~/.zprofile / ~/.zshrc). `false` means "warmUp() was never called
+    /// or not yet". The read has no effect on the return value of `token()`.
     ///
     /// ## Naming: warmUpInFlight vs warmUpAttempted
     /// The name reads as "currently running" but the semantics are broader:
-    /// "currently in progress OR previously succeeded". The name is kept
-    /// because renaming would churn all internal call sites with no behaviour
-    /// change. The semantics are fully documented here and at every read site.
+    /// "currently in progress OR previously succeeded". Kept as-is to avoid
+    /// churning all internal call sites. Semantics are fully documented here.
     private let warmUpInFlight = Mutex<Bool>(false)
 
     /// Creates a new `TokenCache`.
@@ -133,10 +132,10 @@ public final class TokenCache: Sendable {
     /// Checked in order before spawning a shell:
     /// 1. In-memory cache
     /// 2. `TokenStore` (Keychain) — prevents an env token from beating a valid
-    ///    Keychain token into cache on a fresh launch where `token()` hasn’t run yet.
+    ///    Keychain token into cache on a fresh launch where `token()` hasn't run yet.
     /// 3. Process environment (`ProcessInfo`) — covers terminal launches and CI.
     ///
-    /// ## Latch semantics on failure (retry is allowed)
+    /// ## Latch semantics (retry is allowed on failure)
     /// `warmUpInFlight` is set optimistically before the shell runs (to block
     /// concurrent spawns), then reset to `false` if the shell returns nil.
     /// A timeout or absent token does NOT permanently block future retries.
@@ -158,16 +157,14 @@ public final class TokenCache: Sendable {
             logger?.log("TokenCache › warmUp — resolved from process env, skipping login shell", category: "transport")
             return
         }
-        // Optimistically gate concurrent spawns. Reset to false on failure below
-        // so future warmUp() calls can retry. See warmUpInFlight declaration comment.
+        // Optimistically gate concurrent spawns. Only one caller wins this Mutex;
+        // the loser hits guard shouldProceed and returns early. See warmUpInFlight.
         let shouldProceed = warmUpInFlight.withLock { inFlight -> Bool in
             guard !inFlight else { return false }
             inFlight = true
             return true
         }
         guard shouldProceed else {
-            // Another caller is in-flight or already succeeded. Log which case
-            // applies so the outcome is visible in diagnostics.
             if cache.withLock({ $0 }) == nil {
                 logger?.log("TokenCache › warmUp — login shell already in flight or failed; cache still nil", category: "transport")
             } else {
@@ -178,8 +175,7 @@ public final class TokenCache: Sendable {
         logger?.log("TokenCache › warmUp — all fast-paths missed, attempting login shell resolution", category: "transport")
         guard let value = await loginShellToken(logger: logger) else {
             // Shell returned nil (timeout or absent token). Reset the latch so a
-            // future warmUp() call can retry. This is intentional — the latch is
-            // not a one-shot permanent gate. See warmUpInFlight declaration comment.
+            // future warmUp() call can retry. See warmUpInFlight declaration comment.
             warmUpInFlight.withLock { $0 = false }
             return
         }
@@ -187,22 +183,18 @@ public final class TokenCache: Sendable {
         // Latch stays true after success — no further shell spawns needed.
     }
 
-    /// Clears the in-memory token cache. Call after saving a new token or after sign-out.
+    /// Clears the in-memory token cache and resets the warm-up latch.
+    /// Call after saving a new token or after sign-out.
     ///
-    /// ## What this does NOT reset (intentional)
-    /// `invalidate()` clears `cache` but does **not** reset `warmUpInFlight`.
-    /// This is correct for the current call flow: sign-out calls `invalidate()`
-    /// and never calls `warmUp()` again. The next `token()` call falls through
-    /// to `resolveFromStore()` / `resolveFromEnvironment()` as usual.
-    ///
-    /// ## ⚠️ If warmUp() is ever called after invalidate()
-    /// `warmUp()` will fast-path out on `warmUpInFlight` and silently no-op,
-    /// leaving the cache empty with no shell retry. If that call flow is ever
-    /// added (e.g. post-sign-out re-warm), `warmUpInFlight` must also be reset
-    /// here, or the app will launch unauthenticated with no diagnostic.
+    /// Both `cache` and `warmUpInFlight` are reset so that a subsequent
+    /// `warmUp()` call (e.g. in a reconnect flow) can re-spawn the login
+    /// shell and re-populate the cache from scratch. Without resetting
+    /// the latch here, `warmUp()` would fast-path out on the stale
+    /// `warmUpInFlight == true` and silently leave the cache empty.
     public func invalidate() {
         cache.withLock { $0 = nil }
-        logger?.log("TokenCache › invalidate — cache cleared", category: "transport")
+        warmUpInFlight.withLock { $0 = false } // reset so post-invalidate warmUp() can retry
+        logger?.log("TokenCache › invalidate — cache and warm-up latch cleared", category: "transport")
     }
 
     // MARK: - Private helpers
@@ -219,14 +211,19 @@ public final class TokenCache: Sendable {
         return cached
     }
 
-    /// Loads the token from the `TokenStore`. Populates the cache on success.
+    /// Loads the token from the `TokenStore` and populates the cache on success.
     /// Empty strings are treated as absent (e.g. corrupted Keychain entry).
+    ///
+    /// ## Cache-write side effect (not a pure read)
+    /// This function writes to `cache` on success. It is named `resolveFrom…`
+    /// rather than `load…` to signal the resolve-and-cache pattern, but callers
+    /// should be aware the `@discardableResult` hides a cache mutation.
     ///
     /// ## Thundering-herd window (intentional)
     /// Two concurrent callers that both miss the in-memory cache may both call
     /// `tokenStore.load()`. The `if $0 == nil` Mutex guard prevents a double-
     /// write; the double Keychain read is idempotent and cheaper than an extra
-    /// init lock. This is an accepted trade-off, not a concurrency bug.
+    /// init lock. Accepted trade-off, not a concurrency bug.
     @discardableResult
     private func resolveFromStore() -> String? {
         guard let token = tokenStore.load(), !token.isEmpty else {
@@ -242,9 +239,13 @@ public final class TokenCache: Sendable {
         return token
     }
 
-    /// Reads `GH_TOKEN` or `GITHUB_TOKEN` from the process environment.
-    /// Populates the cache on success. Returns `nil` for Finder/Dock/login-item
+    /// Reads `GH_TOKEN` or `GITHUB_TOKEN` from the process environment and
+    /// populates the cache on success. Returns `nil` for Finder/Dock/login-item
     /// launches — use `warmUp()` at startup to bridge that gap.
+    ///
+    /// ## Cache-write side effect (not a pure read)
+    /// Same resolve-and-cache pattern as `resolveFromStore()`. The
+    /// `@discardableResult` hides a cache mutation on success.
     ///
     /// Same thundering-herd window as `resolveFromStore()` — accepted trade-off.
     @discardableResult
@@ -273,16 +274,16 @@ public final class TokenCache: Sendable {
 /// `Process` is not `Sendable` so it cannot be captured directly across task
 /// boundaries. This box is `@unchecked Sendable` because the access pattern
 /// is safe by construction:
-/// - Written exactly once: subprocess arm writes `box.process = process`
-///   immediately after `process.run()` succeeds, before `waitUntilExit()`.
-/// - Read at most once: timeout arm reads `box.process` only after
-///   `Task.sleep` completes (i.e. 10 s after both arms started).
-/// - TOCTOU between write and read: if the timeout arm fires in the narrow
-///   window after `process.run()` but before `box.process = process`, it
-///   reads `nil` and skips `terminate()`. The subprocess arm then calls
-///   `waitUntilExit()` and the process exits naturally — not a leak, just
-///   a missed early-termination. This window is accepted as a cosmetic
-///   trade-off; adding a lock would add complexity with no correctness gain.
+/// - Written exactly once: subprocess arm sets `box.process` immediately after
+///   `process.run()` succeeds, before `waitUntilExit()`.
+/// - Read at most once: timeout arm reads `box.process` only after its
+///   `Task.sleep` completes (i.e. at least 10 s after both arms started).
+/// - TOCTOU between write and read: if the timeout fires in the narrow window
+///   after `process.run()` but before `box.process = process`, the timeout arm
+///   reads nil and skips `terminate()`. The subprocess arm then calls
+///   `waitUntilExit()` and the process exits naturally — not a leak, just a
+///   missed early-termination. This window is accepted; a lock would add
+///   complexity with no correctness gain.
 private final class UncheckedProcessBox: @unchecked Sendable {
     /// The spawned process, or `nil` if not yet started or launch failed.
     var process: Process?
@@ -305,7 +306,7 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// **Do not move this into a method on `TokenCache`.**
 ///
 /// ## -i flag (intentional, not an oversight)
-/// `-i` sources `~/.zshrc`, where most users export `GH_TOKEN`. Without it
+/// `-i` sources `~/.zshrc`, where most users export `GH_TOKEN`. Without it,
 /// `-l` alone sources only `~/.zprofile` / `/etc/zprofile` and silently
 /// misses tokens set in `.zshrc`. Stdout noise from interactive mode is
 /// neutralised by the sentinel prefix strategy — not by removing `-i`.
@@ -329,12 +330,26 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// `waitUntilExit()` once `.zshrc` exceeds ~64 KB of stderr output.
 /// `/dev/null` has no buffer limit and needs no draining.
 ///
+/// ## readDataToEndOfFile() after SIGTERM — partial read is safe
+/// If the timeout arm calls `process.terminate()`, `waitUntilExit()`
+/// unblocks and `readDataToEndOfFile()` may return a partial stdout.
+/// The sentinel-scan + `guard !value.isEmpty` correctly returns nil for
+/// a partial or empty read. No token corruption is possible.
+///
 /// ## process.terminate() on timeout (not group.cancelAll() alone)
 /// `group.cancelAll()` cancels the Swift task, but `waitUntilExit()` does
-/// not honour Swift task cancellation (documented inline below). The
-/// timeout arm explicitly calls `box.process?.terminate()` so the shell
-/// is killed rather than orphaned. `terminate()` on a nil box (pre-launch
-/// cancellation window) or an already-exited process is a no-op on Darwin.
+/// not honour Swift task cancellation (documented inline below). The timeout
+/// arm explicitly calls `box.process?.terminate()` so the shell is killed
+/// rather than orphaned. `terminate()` on a nil box or already-exited
+/// process is a no-op on Darwin.
+///
+/// ## Timeout arm uses do/catch, not try? (intentional)
+/// `try? Task.sleep` silently swallows `CancellationError`. When the
+/// subprocess arm succeeds in under 10 s, `group.cancelAll()` cancels
+/// the timeout task — but `try?` would eat the error and fall through
+/// to the log + `terminate()` call, emitting a false "timed out" log on
+/// every successful warmup. `do { try ... } catch { return nil }` exits
+/// cleanly on cancellation with no log and no terminate() call.
 ///
 /// ## group.next() ?? nil — double-optional (not a mistake)
 /// `group.next()` returns `String??`. `?? nil` collapses outer-nil
@@ -351,10 +366,6 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     return await withTaskGroup(of: String?.self) { group in
         // Subprocess arm — spawn, wait, read stdout.
         group.addTask {
-            // Guard before spawning. If the task is already cancelled here
-            // (e.g. timeout fired before this arm was scheduled), skip the
-            // subprocess entirely. See UncheckedProcessBox comment for the
-            // narrow TOCTOU window that this guard cannot fully eliminate.
             guard !Task.isCancelled else { return nil }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -375,8 +386,8 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
                 return nil
             }
             // Share the reference so the timeout arm can call terminate().
-            // Written before waitUntilExit() so the timeout arm sees it if
-            // it fires after the process is running. See UncheckedProcessBox.
+            // Written before waitUntilExit() so the timeout arm sees it.
+            // See UncheckedProcessBox comment for the accepted TOCTOU window.
             box.process = process
             // waitUntilExit() does NOT honour Swift task cancellation.
             // The timeout arm calls box.process?.terminate() as the kill path.
@@ -410,11 +421,17 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             return value
         }
         // Timeout arm — kill the shell after 10 s and return nil.
-        // box.process is nil if the subprocess arm hasn’t reached process.run()
-        // yet; terminate() on nil is a no-op. See UncheckedProcessBox comment
-        // for the accepted TOCTOU window.
+        // Uses do/catch (not try?) so CancellationError exits cleanly without
+        // falling through to the log + terminate() call. See "Timeout arm uses
+        // do/catch" in the function doc comment.
+        // box.process is nil if the subprocess arm hasn't reached process.run()
+        // yet; terminate() on nil is a no-op. See UncheckedProcessBox.
         group.addTask {
-            try? await Task.sleep(for: .seconds(10))
+            do {
+                try await Task.sleep(for: .seconds(10))
+            } catch {
+                return nil // cancelled because subprocess arm already succeeded
+            }
             logger?.log("TokenCache › warmUp: login shell timed out — terminating", category: "transport")
             box.process?.terminate() // explicit kill — group.cancelAll() alone is not enough
             return nil
