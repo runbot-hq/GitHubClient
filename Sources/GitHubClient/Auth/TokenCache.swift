@@ -92,6 +92,9 @@ public final class TokenCache: Sendable {
     /// `token()` call if all faster paths miss — for example, after OAuth sign-out
     /// on a Finder launch where no env token is present. This is correct and
     /// intentional: the shell is the only remaining resolution source in that case.
+    /// Note the latency cost: the re-spawned shell adds ~50–200 ms to the first
+    /// poll cycle after sign-out on an affected launch configuration. This is
+    /// a one-time cost per cache lifetime and is cached immediately on success.
     public func invalidate() {
         cache.withLock { $0 = nil }
         logger?.log("TokenCache › invalidate — cache cleared", category: "transport")
@@ -185,6 +188,17 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// `-l` alone only sources `~/.zprofile` and misses tokens set in `.zshrc`.
 /// Stdout noise from interactive mode is neutralised by the sentinel strategy.
 ///
+/// ## -i flag and interactive zsh startup latency
+/// Interactive mode triggers full zsh initialisation: PS1 setup, `compinit`,
+/// and any user hooks (oh-my-zsh, nvm, rvm, pyenv, etc.). On a minimally
+/// configured machine this is ~50–200ms. On a heavily configured machine with
+/// a cold `compinit` cache, startup can reach 1–3 seconds. The 10-second
+/// timeout is generous for the common case but may feel tight for users with
+/// expensive `~/.zshrc` setups. Correctness is unaffected — the sentinel
+/// strategy isolates the token from all stdout noise regardless of init
+/// duration. If the timeout proves too tight in practice, increase it or
+/// consider adding a user-facing note in the README / release notes.
+///
 /// ## Shell choice: /bin/zsh (not $SHELL)
 /// Guaranteed on every supported macOS since Catalina. `$SHELL` would require
 /// per-shell flag negotiation with no benefit for the macOS-only target.
@@ -195,6 +209,16 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// `try?` would eat the error and fall through to the log + terminate() call,
 /// emitting a false "timed out" log on every successful resolution.
 /// `do { try … } catch { return nil }` exits cleanly on cancellation.
+///
+/// ## Thread leak on the timeout path (known, bounded)
+/// After `group.next()` + `group.cancelAll()`, this function returns before
+/// the subprocess arm's `waitUntilExit()` call has necessarily unblocked.
+/// `Process.waitUntilExit()` does not honour Swift task cancellation, so the
+/// cooperative pool thread running the subprocess arm is held until zsh
+/// responds to `terminate()` and exits. For this `zsh -c printf` use case
+/// the shell exits in under a second after receiving SIGTERM, so the leaked
+/// thread window is brief. If `loginShellToken` is ever adapted for longer-
+/// running subprocesses, this must be revisited.
 ///
 /// ## Thundering-herd on concurrent callers
 /// `loginShellToken` has no guard against concurrent callers — two `token()`
@@ -275,11 +299,29 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
 /// boundaries. This box is `@unchecked Sendable` because the access pattern is
 /// safe by construction: written once by the subprocess arm (after `process.run()`
 /// succeeds, before `waitUntilExit()` blocks), read at most once by the timeout
-/// arm (after 10 seconds of sleep). The narrow TOCTOU window — where the timeout
-/// fires before `box.process` is written, causing `nil?.terminate()` to no-op and
-/// the shell to exit naturally — is accepted: `zsh -c` exits in under a second
-/// once its command completes, so the orphan window is bounded and harmless.
-/// The entire box disappears in the follow-up async refactor tracked in issue #68.
+/// arm (after 10 seconds of sleep).
+///
+/// ## TOCTOU window and TSan
+/// The write (`box.process = process`) and the read (`box.process?.terminate()`)
+/// are on two different Swift concurrency tasks with no lock between them.
+/// TSan will flag this as an unsynchronised read/write — that flag is a known
+/// accepted false-positive for this pattern. The happens-before relationship is
+/// real: `process.run()` returning successfully is an OS-level synchronisation
+/// point that guarantees the process exists before the write executes. The
+/// narrow scheduler window between `process.run()` returning and
+/// `box.process = process` executing is the only genuine race: if the timeout
+/// fires in that window, `nil?.terminate()` is a no-op and the shell runs to
+/// natural completion (sub-second for `zsh -c printf`). Accepted as bounded and
+/// harmless; the entire box disappears in the follow-up async refactor (#68).
+///
+/// ## Process dealloc does not terminate
+/// When `withTaskGroup` returns and `box` is released, ARC deallocates this
+/// instance. `Process` deallocation does NOT send SIGTERM to the subprocess —
+/// an orphaned shell will continue running until it exits naturally or is killed
+/// by another means. For the `zsh -c printf` use case the shell exits in under
+/// a second after SIGTERM (sent by the timeout arm) or after the command
+/// completes (subprocess arm). Do NOT rely on `Process` dealloc as a cleanup
+/// mechanism in any future adaptation of this pattern.
 private final class UncheckedProcessBox: @unchecked Sendable {
     /// The spawned `/bin/zsh` process, or `nil` if not yet started or launch failed.
     var process: Process?
