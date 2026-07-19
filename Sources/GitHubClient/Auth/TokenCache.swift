@@ -119,13 +119,13 @@ public final class TokenCache: Sendable {
     ///
     /// ## Cache-write side effect (not a pure read)
     /// Writes to `cache` on success. Named `resolveFrom…` to signal the
-    /// resolve-and-cache pattern; the `@discardableResult` hides a cache mutation.
+    /// resolve-and-cache pattern; the write is the meaningful side-effect,
+    /// not the return value.
     ///
     /// ## Thundering-herd window (intentional)
     /// Two concurrent callers that both miss the in-memory cache may both call
     /// `tokenStore.load()`. The `if $0 == nil` Mutex guard prevents a double-write;
     /// the double Keychain read is idempotent and cheaper than an extra init lock.
-    @discardableResult
     private func resolveFromStore() -> String? {
         guard let token = tokenStore.load(), !token.isEmpty else {
             #if DEBUG
@@ -149,7 +149,6 @@ public final class TokenCache: Sendable {
     ///
     /// ## Cache-write side effect (not a pure read)
     /// Same resolve-and-cache pattern as `resolveFromStore()`.
-    @discardableResult
     private func resolveFromEnvironment() -> String? {
         for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
             if let envValue = ProcessInfo.processInfo.environment[key], !envValue.isEmpty {

@@ -16,11 +16,6 @@
 // CI note: GitHub Actions always injects GITHUB_TOKEN into the runner environment.
 // Every test wraps its body in withCleanEnv, which strips both vars and restores
 // them afterwards.
-//
-// token() is now async — all call sites use `await`. withCleanEnv has both a
-// sync overload (for non-async tests that only mutate env, not call token()) and
-// an async overload (for tests that call token()). The async overload is used by
-// all tests that call token() or invalidate().
 
 import Foundation
 import Testing
@@ -30,18 +25,6 @@ import Testing
 // MARK: - Helpers
 
 /// Strips both token env vars, runs body, then restores the previous values.
-/// Sync overload — used when body does not call token().
-private func withCleanEnv(_ body: () -> Void) {
-  let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
-  let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
-  unsetenv("GH_TOKEN")
-  unsetenv("GITHUB_TOKEN")
-  body()
-  if let prevGH { setenv("GH_TOKEN", prevGH, 1) } else { unsetenv("GH_TOKEN") }
-  if let prevGitHub { setenv("GITHUB_TOKEN", prevGitHub, 1) } else { unsetenv("GITHUB_TOKEN") }
-}
-
-/// Async overload — used when body calls token() or other async cache methods.
 private func withCleanEnv(_ body: () async -> Void) async {
   let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
   let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
@@ -53,16 +36,6 @@ private func withCleanEnv(_ body: () async -> Void) async {
 }
 
 /// Sets one env var for the duration of body, then restores the previous value.
-/// Sync overload.
-private func withEnv(_ key: String, value: String, _ body: () -> Void) {
-  let previous = ProcessInfo.processInfo.environment[key]
-  setenv(key, value, 1)
-  body()
-  if let previous { setenv(key, previous, 1) } else { unsetenv(key) }
-}
-
-/// Sets one env var for the duration of body, then restores the previous value.
-/// Async overload — used when body calls token().
 private func withEnv(_ key: String, value: String, _ body: () async -> Void) async {
   let previous = ProcessInfo.processInfo.environment[key]
   setenv(key, value, 1)
