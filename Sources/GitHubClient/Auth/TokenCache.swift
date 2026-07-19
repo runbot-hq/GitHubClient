@@ -73,7 +73,21 @@ public final class TokenCache: Sendable {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }
         if let envToken = resolveFromEnvironment() { return envToken }
-        logger?.log("TokenCache › token() — returning nil (no token from any source)", category: "transport")
+        // All sources returned nil. Check whether warmUp() already ran and failed so
+        // we can emit an actionable diagnostic instead of a generic "no token" log.
+        // This is the only place where a developer or user will see a log explaining
+        // *why* token resolution failed in a Finder-launch scenario.
+        let warmUpAlreadyRan = warmUpInFlight.withLock { $0 }
+        if warmUpAlreadyRan {
+            logger?.log(
+                "TokenCache › token() — returning nil: warmUp() already ran but resolved no token. "
+                + "If this is a Finder/Dock launch, check that GH_TOKEN or GITHUB_TOKEN is exported "
+                + "in ~/.zprofile or ~/.zshrc, or sign in via OAuth.",
+                category: "transport"
+            )
+        } else {
+            logger?.log("TokenCache › token() — returning nil (no token from any source)", category: "transport")
+        }
         return nil
     }
 
@@ -289,14 +303,19 @@ public final class TokenCache: Sendable {
 /// Marked `@concurrent` so `waitUntilExit()` occupies one cooperative thread
 /// pool worker without binding to any actor's serial executor (Principle 18).
 ///
-/// ## Pipe drain strategy
+/// ## stdout pipe drain strategy
 /// stdout is read with `readDataToEndOfFile()` **after** `waitUntilExit()` returns.
 /// The shell command is `echo -n` — output is at most ~100 bytes (token length).
 /// Reading after exit is safe: the pipe write-end is closed when the process exits,
 /// so `readDataToEndOfFile()` returns immediately with whatever was written.
 /// There is no pipe-buffer deadlock risk for payloads this small.
-/// (A large-output `.zshrc` that wrote >64 KB to stdout before the echo could
-/// theoretically block, but that scenario is not possible with this command.)
+///
+/// ## stderr drain strategy
+/// stderr is redirected to `FileHandle.nullDevice` (/dev/null). A Pipe() is
+/// deliberately NOT used for stderr: if the read end is never drained and the
+/// user's .zshrc emits more than the kernel pipe buffer (~64 KB) to stderr,
+/// zsh blocks on write() and waitUntilExit() hangs until the 10 s timeout fires.
+/// /dev/null has no buffer limit and requires no draining.
 ///
 /// ## Timeout / withTaskGroup race
 /// Two arms race inside `withTaskGroup`:
@@ -344,13 +363,12 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     process.arguments = ["-i", "-l", "-c", "echo -n ${GH_TOKEN:-$GITHUB_TOKEN}"]
 
     let outPipe = Pipe()
-    // errPipe is stored in a named variable (not assigned as an anonymous Pipe())
-    // to match the outPipe pattern and make FD lifetime explicit. Its contents are
-    // never read — it exists solely to suppress zsh startup warnings (compinit, etc.)
-    // from appearing in Console.app. Process closes both FDs on dealloc.
-    let errPipe = Pipe()
     process.standardOutput = outPipe
-    process.standardError = errPipe
+    // Redirect stderr to /dev/null rather than a Pipe. A Pipe whose read end is never
+    // drained would stall waitUntilExit() if .zshrc emits more than ~64 KB to stderr
+    // (e.g. verbose compinit output). /dev/null has no buffer limit and needs no drain.
+    process.standardError = FileHandle.standardError  // silenced below
+    process.standardError = FileHandle.nullDevice
 
     do {
         try process.run()
