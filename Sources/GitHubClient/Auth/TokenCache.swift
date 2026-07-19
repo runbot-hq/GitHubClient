@@ -218,6 +218,17 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// emitting a false "timed out" log on every successful resolution.
 /// `do { try … } catch { return nil }` exits cleanly on cancellation.
 ///
+/// ## group.next() first-result semantics — timeout-path token discard (intentional)
+/// `group.next()` returns whichever arm completes first. If the subprocess arm
+/// finishes before 10 s it wins and the token is returned. If the timeout arm
+/// fires first, `group.next()` returns `nil` and `cancelAll()` is called —
+/// any token the shell was about to produce is intentionally discarded.
+/// This is a deliberate fail-safe: returning `nil` after a timeout is safer
+/// than returning a token whose resolution time exceeded the budget. On the
+/// next poll cycle, `token()` will retry (the cache is still empty) and the
+/// shell will be re-spawned. The #68 async refactor removes this design
+/// entirely, making the timeout semantics moot.
+///
 /// ## Thread leak on the timeout path (known, bounded)
 /// After `group.next()` + `group.cancelAll()`, this function returns before
 /// the subprocess arm's `waitUntilExit()` call has necessarily unblocked.
@@ -227,6 +238,14 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// the shell exits in under a second after receiving SIGTERM, so the leaked
 /// thread window is brief. If `loginShellToken` is ever adapted for longer-
 /// running subprocesses, this must be revisited.
+///
+/// ## App Sandbox (not currently applicable — known cliff)
+/// `Process` is unavailable in a sandboxed Mac app. If the app is ever
+/// sandboxed, `process.run()` will throw a permission error, `loginShellToken`
+/// returns `nil`, and the user gets no token with no obvious diagnostic.
+/// The entire `loginShellToken` path must be removed before enabling the
+/// sandbox entitlement. The #68 async refactor replaces `Process` with a
+/// pure-Swift async resolution strategy and removes this dependency.
 ///
 /// ## Thundering-herd on concurrent callers
 /// `loginShellToken` has no guard against concurrent callers — two `token()`
@@ -269,6 +288,9 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             // box so the timeout arm sees nil and skips terminate() cleanly.
             box.process = process
             defer { if process.processIdentifier == 0 { box.process = nil } }
+            // ⚠️ App Sandbox: Process.run() throws a permission error in a sandboxed
+            // app. loginShellToken must be removed before enabling the sandbox
+            // entitlement. See the loginShellToken doc comment for details.
             do {
                 try process.run()
             } catch {
@@ -309,7 +331,10 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             box.process?.terminate()
             return nil
         }
-        // group.next() returns String??; ?? nil collapses outer-nil (empty group) to inner-nil.
+        // group.next() returns the result of whichever arm completes first.
+        // If the timeout arm wins, the shell's token (if any) is intentionally
+        // discarded — fail-safe over fail-open. See doc comment for full rationale.
+        // String?? → String?: ?? nil collapses outer-nil (empty group) to inner-nil.
         let result: String? = await group.next() ?? nil
         group.cancelAll()
         return result
