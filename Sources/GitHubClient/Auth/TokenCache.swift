@@ -309,6 +309,14 @@ public final class TokenCache: Sendable {
 
 // MARK: - Login shell resolution (Principle 18: @concurrent for blocking I/O)
 
+/// The sentinel prefix written by the shell command before the token value.
+/// Chosen to be long and app-specific enough that it cannot appear in .zshrc
+/// output by coincidence. The subprocess arm scans stdout line-by-line and
+/// extracts only the line carrying this prefix, discarding everything else.
+/// This makes token extraction immune to any stdout noise a user's .zshrc
+/// may emit (mise, nvm, oh-my-zsh, starship, greeting messages, etc.).
+private let shellTokenSentinel = "GH_TOKEN_VALUE:"
+
 /// Spawns a single interactive login shell (`/bin/zsh -i -l`) to recover
 /// `GH_TOKEN` or `GITHUB_TOKEN` from the user's shell profile.
 ///
@@ -319,22 +327,29 @@ public final class TokenCache: Sendable {
 /// without additional actor-annotation gymnastics — the free-function placement
 /// is what makes the annotation viable.
 ///
-/// ## stdout pipe drain strategy
+/// ## stdout pipe drain strategy — sentinel prefix isolation
+/// The shell command is:
+///     printf 'GH_TOKEN_VALUE:%s\n' "${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+/// rather than `echo -n <value>`. This writes the token on its own line with
+/// a known prefix. The subprocess arm reads all stdout, splits on newlines,
+/// and extracts only the line that starts with `GH_TOKEN_VALUE:`, discarding
+/// every other line. Any .zshrc stdout noise (mise initialisation, nvm banners,
+/// oh-my-zsh greeting messages, starship prompt setup, etc.) is silently dropped
+/// regardless of content — non-whitespace noise included.
+///
+/// **Why not echo -n + whitespace trim?**
+/// `trimmingCharacters` only strips leading/trailing whitespace. A .zshrc that
+/// writes even one non-whitespace byte to stdout before the echo would silently
+/// cache "<noise><token>" as the token, producing 401s for the entire process
+/// lifetime with no diagnostic. Sentinel isolation eliminates this class of
+/// corruption entirely.
+///
 /// stdout is read with `readDataToEndOfFile()` **after** `waitUntilExit()` returns.
-/// The shell command is `echo -n` — output is at most ~100 bytes (token length).
 /// Reading after exit is safe: the pipe write-end is closed when the process exits,
 /// so `readDataToEndOfFile()` returns immediately with whatever was written.
-/// There is no pipe-buffer deadlock risk for payloads this small.
-///
-/// The raw pipe data is trimmed with `trimmingCharacters(in: .whitespacesAndNewlines)`
-/// before the `!value.isEmpty` guard and before being written to cache. This
-/// eliminates the whitespace sub-case: a trailing newline from a misbehaving echo
-/// substitute, or leading whitespace from a `.zshrc` greeting written to stdout
-/// instead of stderr, would otherwise be silently cached as part of the token and
-/// produce 401s with no diagnostic. Arbitrary non-whitespace prefix noise from
-/// `.zshrc` `print` statements is not trimmed, but such a string would not be a
-/// valid GitHub token and would fail on first API call via the normal 401 recovery
-/// path — not silently.
+/// There is no pipe-buffer deadlock risk: even a noisy .zshrc that fills stdout
+/// will be at most a few KB, well below the ~64 KB kernel pipe buffer; and
+/// `waitUntilExit()` only returns after the process exits and closes the write end.
 ///
 /// ## stderr drain strategy
 /// stderr is redirected to `FileHandle.nullDevice` (/dev/null). A Pipe() is
@@ -382,7 +397,8 @@ public final class TokenCache: Sendable {
 /// `GITHUB_TOKEN` would cause zsh to abort with "GITHUB_TOKEN: parameter not
 /// set", writing nothing to stdout and leaving warmUp() silently unauthenticated.
 /// The explicit trailing `:-` provides an empty-string default that satisfies
-/// nounset; `!value.isEmpty` in the subprocess arm then correctly rejects it.
+/// nounset; a sentinel line with an empty value is extracted and rejected by
+/// `!value.isEmpty` in the subprocess arm.
 /// Priority matches `resolveFromEnvironment()`: GH_TOKEN first, GITHUB_TOKEN
 /// as fallback.
 ///
@@ -390,18 +406,9 @@ public final class TokenCache: Sendable {
 /// `-i` makes zsh run in interactive mode, which is required to source `~/.zshrc`
 /// (login-only `-l` sources `~/.zprofile` and `/etc/zprofile` but NOT `.zshrc`).
 /// Since most users export `GH_TOKEN` in `.zshrc`, removing `-i` would silently
-/// miss their token — the opposite of the intended fix.
-///
-/// A concern sometimes raised: interactive mode allows `.zshrc` to emit PS1
-/// sequences or other output to stdout via `print` rather than stderr, which
-/// could theoretically prefix the token value. In practice this cannot corrupt
-/// the result: `echo -n` is the **last** command on stdout, so any `.zshrc`
-/// noise lands before the token in the pipe. The subprocess arm trims whitespace
-/// and passes the whole string to `!value.isEmpty` — a prefixed value would not
-/// be a valid GitHub token, would fail GitHub API auth on first use, and would
-/// result in a normal 401 recovery. In the (very exotic) case of a `.zshrc` that
-/// writes exactly the right number of bytes of garbage before the token, that
-/// `.zshrc` is already broken in ways far beyond this function's scope to fix.
+/// miss their token — the opposite of the intended fix. Stdout noise from
+/// interactive mode is handled by the sentinel prefix strategy above, not by
+/// avoiding `-i`.
 ///
 /// ## Shell choice: why /bin/zsh and not $SHELL
 /// `/bin/zsh` is the macOS system default shell since Catalina (10.15) and is
@@ -422,14 +429,17 @@ public final class TokenCache: Sendable {
 private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    // printf with sentinel prefix rather than echo -n, so the token can be
+    // extracted unambiguously from any .zshrc stdout noise. See "stdout pipe
+    // drain strategy" in the function doc comment for the full rationale.
+    //
     // -i: required to source ~/.zshrc (most users export GH_TOKEN there).
     // -l: sources ~/.zprofile and /etc/zprofile.
-    // Removing -i would silently miss tokens set in .zshrc. See "-i flag and
-    // stdout cleanliness" in the function doc comment for why this is safe.
-    //
-    // Nested ${GITHUB_TOKEN:-} expansion guards against setopt nounset aborting
-    // when both vars are unset. See "Shell expansion" in the doc comment.
-    process.arguments = ["-i", "-l", "-c", "echo -n ${GH_TOKEN:-${GITHUB_TOKEN:-}}"]
+    // Nested ${GITHUB_TOKEN:-} expansion guards against setopt nounset.
+    process.arguments = [
+        "-i", "-l", "-c",
+        "printf '\(shellTokenSentinel)%s\\n' \"${GH_TOKEN:-${GITHUB_TOKEN:-}}\""
+    ]
 
     let outPipe = Pipe()
     process.standardOutput = outPipe
@@ -446,7 +456,6 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
     }
 
     return await withTaskGroup(of: String?.self) { group in
-        // Subprocess arm — wait for exit, then read stdout in one call.
         group.addTask {
             // Check cancellation before the blocking waitUntilExit() call.
             // waitUntilExit() does NOT honour Swift task cancellation; a cancelled
@@ -456,18 +465,22 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             guard !Task.isCancelled else { return nil }
             process.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            // Trim whitespace before the isEmpty check and before caching.
-            // A trailing newline from a misbehaving echo substitute, or leading
-            // whitespace from a .zshrc greeting written to stdout, would otherwise
-            // be silently baked into the cached token and produce 401s with no
-            // diagnostic. See "stdout pipe drain strategy" in the function doc comment.
             guard let raw = String(data: data, encoding: .utf8) else {
                 #if DEBUG
                 logger?.log("TokenCache › warmUp: login shell: stdout was not valid UTF-8", category: "transport")
                 #endif
                 return nil
             }
-            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Scan stdout line-by-line for the sentinel prefix and extract the
+            // token from that line only. All other lines (zshrc noise, PS1 setup,
+            // tool banners, etc.) are silently discarded regardless of content.
+            let value = raw
+                .components(separatedBy: .newlines)
+                .compactMap { line -> String? in
+                    guard line.hasPrefix(shellTokenSentinel) else { return nil }
+                    return String(line.dropFirst(shellTokenSentinel.count))
+                }
+                .first ?? ""
             guard !value.isEmpty else {
                 #if DEBUG
                 logger?.log("TokenCache › warmUp: login shell: no token found in shell environment", category: "transport")
