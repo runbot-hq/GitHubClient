@@ -103,11 +103,19 @@ public final class TokenCache: Sendable {
     /// subprocess; all others return immediately. The `cache` write at the end
     /// is independently guarded by its own `Mutex`.
     ///
+    /// ## Blocking I/O isolation (Principle 18)
+    /// The subprocess is run inside `loginShellToken(logger:)`, a `@concurrent`
+    /// async free function. `@concurrent` runs off any actor’s serial executor,
+    /// so `waitUntilExit()` blocks one cooperative thread pool worker without
+    /// stalling the caller. No `DispatchQueue` or `DispatchSemaphore` bridges
+    /// are used — the timeout is a structured `withTaskGroup` race and the pipe
+    /// is drained via `FileHandle.AsyncBytes`.
+    ///
     /// ## Performance
-    /// The subprocess runs on a `Task.detached` background thread with a 10-second
-    /// timeout. A single `/bin/zsh -i -l` invocation recovers both `GH_TOKEN` and
-    /// `GITHUB_TOKEN` (whichever is set) in one shell run (~50–100 ms). The result
-    /// is cached on first resolution; subsequent `warmUp()` calls return immediately.
+    /// The subprocess takes ~50–100 ms on first call with a 10-second timeout.
+    /// A single `/bin/zsh -i -l` invocation recovers both `GH_TOKEN` and
+    /// `GITHUB_TOKEN` in one shell run. The result is cached on first resolution;
+    /// subsequent `warmUp()` calls return immediately.
     public func warmUp() async {
         // Fast-path 1: in-memory cache already populated.
         guard cache.withLock({ $0 }) == nil else {
@@ -143,13 +151,11 @@ public final class TokenCache: Sendable {
             return
         }
         logger?.log("TokenCache › warmUp — all fast-paths missed, attempting login shell resolution", category: "transport")
-        // Strong capture: TokenCache is held for the app lifetime by GitHubClient.
-        // [weak self] would add a silent no-op failure mode (self nil → subprocess
-        // never runs → cache stays empty with no log or error). Strong capture is
-        // safe because TokenCache.deinit is unreachable during normal app operation.
-        await Task.detached(priority: .userInitiated) { [self] in
-            resolveFromLoginShell()
-        }.value
+        // loginShellToken is @concurrent — it runs off any actor's serial executor
+        // so waitUntilExit() inside it does not stall the caller. No Task.detached
+        // wrapper is needed; the direct await is sufficient and clearer.
+        guard let value = await loginShellToken(logger: logger) else { return }
+        cache.withLock { if $0 == nil { $0 = value } }
     }
 
     /// Clears the in-memory token cache. Call after saving a new token or after sign-out.
@@ -245,93 +251,103 @@ public final class TokenCache: Sendable {
         }
         return nil
     }
+}
 
-    /// Spawns a single interactive login shell to recover the first available GitHub
-    /// token from `GH_TOKEN` or `GITHUB_TOKEN`. Called only from `warmUp()` on a
-    /// `Task.detached` background thread — never from `token()`.
-    ///
-    /// ## Pipe drain (deadlock prevention)
-    /// stdout is drained concurrently on a separate `DispatchQueue` thread while
-    /// `waitUntilExit()` blocks the calling thread. Without concurrent draining, a
-    /// `.zshrc` that emits more than the OS pipe buffer (~64 KB on macOS) to stdout
-    /// before the `echo` runs would stall the shell waiting for a reader while
-    /// `waitUntilExit()` blocks waiting for the shell — a deadlock. Async draining
-    /// eliminates the buffer dependency entirely.
-    ///
-    /// ## Timeout (hang prevention)
-    /// A 10-second `DispatchSemaphore` timeout guards `waitUntilExit()`. If the shell
-    /// does not exit within 10 seconds (e.g. a `.zshrc` calling `nvm` with a broken
-    /// node version, or a network-backed prompt on a slow mount), the process is
-    /// terminated and the method returns `nil`. The app startup continues normally;
-    /// the worst outcome is that the env token is not recovered and the user sees an
-    /// unauthenticated state until they sign in via OAuth.
-    ///
-    /// ## Why a single subprocess (not one per key)
-    /// Uses `${GH_TOKEN:-$GITHUB_TOKEN}` to recover the first non-empty value in
-    /// one shell invocation (~50–100 ms), rather than spawning two processes.
-    ///
-    /// ## Security
-    /// No user input is interpolated into the shell command — the command string is
-    /// a hardcoded literal. There is no injection risk.
-    /// stderr is redirected to a separate `Pipe()` to suppress zsh startup warnings
-    /// (e.g. `compinit` insecure-directory warnings) from appearing in Console.app.
-    ///
-    /// ## Shell choice
-    /// `/bin/zsh` is the macOS default interactive shell since Catalina and is
-    /// guaranteed to exist at that path.
-    private func resolveFromLoginShell() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        // -i (interactive) + -l (login) causes zsh to source ~/.zprofile and ~/.zshrc.
-        // ${GH_TOKEN:-$GITHUB_TOKEN} expands to GH_TOKEN if set and non-empty,
-        // otherwise falls back to GITHUB_TOKEN. echo -n suppresses the trailing newline.
-        process.arguments = ["-i", "-l", "-c", "echo -n ${GH_TOKEN:-$GITHUB_TOKEN}"]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        // Suppress zsh startup warnings (compinit, etc.) from appearing in logs.
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            logger?.log("TokenCache › warmUp: login shell launch failed: \(error)", category: "transport")
-            return
+// MARK: - Login shell resolution (Principle 18: @concurrent for blocking I/O)
+
+/// Spawns a single interactive login shell to recover the first available GitHub
+/// token from `GH_TOKEN` or `GITHUB_TOKEN`.
+///
+/// Marked `@concurrent` so that `waitUntilExit()` — a blocking call — occupies
+/// one Swift cooperative thread pool worker without binding to any actor's serial
+/// executor. This is the pattern mandated by Principle 18 of principles.md:
+/// blocking I/O uses `@concurrent` free functions, not `DispatchQueue` bridges.
+///
+/// ## Pipe drain (deadlock prevention)
+/// stdout is read via `FileHandle.AsyncBytes` (`outPipe.fileHandleForReading.bytes`),
+/// an `AsyncSequence` that yields chunks as they arrive. This drains the pipe
+/// concurrently with the running shell without any `DispatchQueue`. A `.zshrc`
+/// emitting more than the OS pipe buffer (~64 KB) to stdout can no longer cause
+/// a deadlock — the async reader keeps the buffer empty regardless of output volume.
+///
+/// ## Timeout (hang prevention)
+/// A `withTaskGroup` race pits the subprocess task against a
+/// `Task.sleep(for: .seconds(10))` timeout arm. Whichever finishes first wins;
+/// `group.cancelAll()` cancels the loser. If the timeout arm wins it calls
+/// `process.terminate()` before returning `nil`, ensuring the shell is always
+/// cleaned up. This replaces the previous `DispatchSemaphore` + `terminationHandler`
+/// pattern with fully structured concurrency.
+///
+/// ## Security
+/// No user input is interpolated into the shell command — the command is a
+/// hardcoded literal. There is no injection risk.
+/// stderr is redirected to a separate `Pipe()` to suppress zsh startup warnings
+/// (e.g. `compinit` insecure-directory warnings) from appearing in Console.app.
+///
+/// ## Shell choice
+/// `/bin/zsh` is the macOS default interactive shell since Catalina and is
+/// guaranteed to exist at that path. `-i -l` causes zsh to source `~/.zprofile`
+/// and `~/.zshrc`, recovering any exported token.
+///
+/// - Parameter logger: Optional logger for diagnostic messages.
+/// - Returns: The resolved token string, or `nil` if not found or timed out.
+@concurrent
+private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    // -i (interactive) + -l (login) causes zsh to source ~/.zprofile and ~/.zshrc.
+    // ${GH_TOKEN:-$GITHUB_TOKEN} expands to GH_TOKEN if set and non-empty,
+    // otherwise falls back to GITHUB_TOKEN. echo -n suppresses the trailing newline.
+    process.arguments = ["-i", "-l", "-c", "echo -n ${GH_TOKEN:-$GITHUB_TOKEN}"]
+    let outPipe = Pipe()
+    process.standardOutput = outPipe
+    // Suppress zsh startup warnings (compinit, etc.) from appearing in Console.app.
+    process.standardError = Pipe()
+    do {
+        try process.run()
+    } catch {
+        logger?.log("TokenCache › warmUp: login shell launch failed: \(error)", category: "transport")
+        return nil
+    }
+
+    // Race the subprocess against a 10-second timeout using structured concurrency.
+    // The subprocess arm drains stdout via AsyncBytes (no pipe-buffer deadlock risk)
+    // and then calls waitUntilExit(). The timeout arm terminates the process if it
+    // wins. group.cancelAll() cancels the losing arm in both cases.
+    return await withTaskGroup(of: String?.self) { group in
+        // Subprocess arm: drain stdout as an AsyncSequence, then wait for exit.
+        group.addTask {
+            var data = Data()
+            // FileHandle.AsyncBytes yields chunks as the shell writes them,
+            // keeping the pipe buffer empty regardless of .zshrc output volume.
+            if let asyncBytes = try? outPipe.fileHandleForReading.bytes {
+                for try await byte in asyncBytes {
+                    data.append(byte)
+                }
+            }
+            process.waitUntilExit()
+            guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+                #if DEBUG
+                logger?.log("TokenCache › warmUp: login shell: neither GH_TOKEN nor GITHUB_TOKEN found in shell environment", category: "transport")
+                #endif
+                return nil
+            }
+            #if DEBUG
+            logger?.log("TokenCache › warmUp: resolved from login shell (len=\(value.count))", category: "transport")
+            #endif
+            return value
         }
-
-        // Drain stdout concurrently to prevent a pipe-buffer deadlock.
-        // If the pipe is not read while the process runs, a .zshrc that emits
-        // enough stdout to fill the OS buffer (~64 KB) will stall the shell;
-        // waitUntilExit() would then block forever waiting for a shell that is
-        // itself blocked waiting for a reader.
-        var outputData = Data()
-        let drainQueue = DispatchQueue(label: "TokenCache.loginShell.drain")
-        drainQueue.async {
-            outputData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        }
-
-        // Wait for the process to exit, with a 10-second timeout.
-        // A hanging .zshrc (e.g. nvm + broken node, network prompt on a slow mount)
-        // would otherwise block AppState.start() indefinitely.
-        let semaphore = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in semaphore.signal() }
-        let timedOut = semaphore.wait(timeout: .now() + 10) == .timedOut
-        if timedOut {
+        // Timeout arm: if the shell hasn’t finished in 10 seconds, terminate it.
+        group.addTask {
+            try? await Task.sleep(for: .seconds(10))
+            // Only reach here if not cancelled (i.e. we won the race).
             logger?.log("TokenCache › warmUp: login shell timed out after 10 s — terminating", category: "transport")
             process.terminate()
-            return
+            return nil
         }
-
-        // Ensure the concurrent drain has finished before we read outputData.
-        drainQueue.sync {}
-
-        guard let value = String(data: outputData, encoding: .utf8), !value.isEmpty else {
-            #if DEBUG
-            logger?.log("TokenCache › warmUp: login shell: neither GH_TOKEN nor GITHUB_TOKEN found in shell environment", category: "transport")
-            #endif
-            return
-        }
-        #if DEBUG
-        logger?.log("TokenCache › warmUp: resolved from login shell (len=\(value.count)), populating cache", category: "transport")
-        #endif
-        cache.withLock { if $0 == nil { $0 = value } }
+        // Take the first result (whichever arm finishes first) and cancel the other.
+        let result = await group.next() ?? nil
+        group.cancelAll()
+        return result
     }
 }
