@@ -25,6 +25,12 @@ import Testing
 // MARK: - Helpers
 
 /// Strips both token env vars, runs body, then restores the previous values.
+///
+/// ⚠️ SERIALIZED DEPENDENCY: `setenv`/`unsetenv` mutate the process-global
+/// environment. Correctness relies on the `@Suite(.serialized)` attribute on
+/// `GitHubTokenCacheTests` — if `.serialized` is ever removed, concurrent
+/// tests that both call `withCleanEnv` will race on `GH_TOKEN`/`GITHUB_TOKEN`
+/// and produce intermittent flakes.
 private func withCleanEnv(_ body: () async -> Void) async {
   let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
   let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
@@ -36,6 +42,7 @@ private func withCleanEnv(_ body: () async -> Void) async {
 }
 
 /// Sets one env var for the duration of body, then restores the previous value.
+/// See `withCleanEnv` for the `.serialized` dependency note.
 private func withEnv(_ key: String, value: String, _ body: () async -> Void) async {
   let previous = ProcessInfo.processInfo.environment[key]
   setenv(key, value, 1)

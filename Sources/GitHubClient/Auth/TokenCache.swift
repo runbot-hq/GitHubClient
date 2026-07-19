@@ -172,6 +172,13 @@ public final class TokenCache: Sendable {
 /// Long enough that it cannot appear in `.zshrc` output by coincidence.
 /// The subprocess arm extracts only the sentinel-prefixed line, discarding
 /// all other stdout — immune to any `.zshrc` noise regardless of content.
+///
+/// Sentinel collision: a token that itself begins with `GH_TOKEN_VALUE:` would
+/// have those leading characters stripped, producing a truncated invalid token.
+/// This is not a practical risk — all real GitHub PAT formats (`ghp_`,
+/// `github_pat_`, `ghs_`, etc.) are defined by GitHub and none begin with this
+/// sentinel. If GitHub ever issues a token format that starts with `GH_TOKEN_VALUE:`
+/// this assumption must be revisited.
 private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 
 /// Spawns `/bin/zsh -i -l` to recover `GH_TOKEN` or `GITHUB_TOKEN` from the
@@ -250,6 +257,12 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
             let outPipe = Pipe()
             process.standardOutput = outPipe
             process.standardError = FileHandle.nullDevice
+            // Redirect stdin to /dev/null. /bin/zsh -i (interactive mode) reads
+            // from stdin by default. For a Finder/Dock launch the inherited stdin
+            // is already the null device, but redirecting explicitly prevents a
+            // hang if this path is ever reached from a terminal-context caller
+            // where stdin would otherwise be the user's terminal.
+            process.standardInput = FileHandle.nullDevice
             // Assign box.process BEFORE calling run() so the timeout arm can
             // always call terminate() on a non-nil process. If run() throws,
             // processIdentifier is 0 (never launched) and the defer clears the
@@ -274,11 +287,15 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
                     return String(line.dropFirst(shellTokenSentinel.count))
                 }
                 .first ?? ""
-            guard !value.isEmpty else { return nil }
+            // Trim whitespace and carriage returns. Some terminal emulators write
+            // CRLF line endings; a trailing \r would produce Bearer <token>\r and
+            // every API call would return 401 silently.
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
             #if DEBUG
-            logger?.log("TokenCache › resolved from login shell (len=\(value.count))", category: "transport")
+            logger?.log("TokenCache › resolved from login shell (len=\(trimmed.count))", category: "transport")
             #endif
-            return value
+            return trimmed
         }
         // Timeout arm — kill the shell after 10s.
         // do/catch exits cleanly on cancellation without logging. See doc comment.
