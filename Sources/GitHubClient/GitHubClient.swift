@@ -65,10 +65,6 @@ public final class GitHubClient {
     /// The transport — handles all authenticated GitHub API requests.
     public let transport: any GitHubTransportProtocol
 
-    /// The token cache — held as a strong reference so `warmUp()` can call into it.
-    /// `nil` when created via the test init (mock transport owns its own token logic).
-    private let tokenCache: TokenCache?
-
     // MARK: - Production init
 
     /// Creates a fully wired `GitHubClient` backed by the macOS Keychain.
@@ -121,7 +117,6 @@ public final class GitHubClient {
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
-        self.tokenCache = cache
     }
 
     // MARK: - Test init
@@ -148,33 +143,5 @@ public final class GitHubClient {
     ) {
         self.oauthService = oauthService
         self.transport = transport
-        self.tokenCache = nil
-    }
-
-    // MARK: - Warm-up
-
-    /// Eagerly resolves the GitHub token before the first API call is made.
-    ///
-    /// Call this once in `AppState.start()` (or equivalent), **before** starting
-    /// the poll loop. It is a no-op when:
-    /// - A Keychain OAuth token is already present.
-    /// - The process environment already contains `GH_TOKEN` / `GITHUB_TOKEN`
-    ///   (terminal launch, CI).
-    ///
-    /// For GUI apps launched from Finder or the Dock, this bridges the macOS
-    /// launchd environment gap by spawning a login shell that sources `~/.zprofile`
-    /// and `~/.zshrc`, reading the token the same way a terminal would.
-    ///
-    /// The underlying `Process.waitUntilExit()` call is dispatched onto a
-    /// background thread via `withCheckedContinuation` so the main actor is
-    /// never blocked.
-    public func warmUp() async {
-        guard let cache = tokenCache else { return }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                cache.warmUpFromLoginShell()
-                continuation.resume()
-            }
-        }
     }
 }

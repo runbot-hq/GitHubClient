@@ -60,56 +60,6 @@ public final class TokenCache: Sendable {
         logger?.log("TokenCache › invalidate — cache cleared", category: "transport")
     }
 
-    // MARK: - Login-shell warm-up
-
-    /// Attempts to populate the token cache by reading `GH_TOKEN` or `GITHUB_TOKEN`
-    /// from a login shell, working around the macOS GUI app environment limitation.
-    ///
-    /// GUI apps launched from Finder, the Dock, or as login items are children of
-    /// `launchd` and therefore inherit an empty environment — `ProcessInfo.processInfo
-    /// .environment` never contains variables exported only in `~/.zprofile` or
-    /// `~/.zshrc`. This method bridges that gap by spawning a single, invisible
-    /// `/bin/zsh -l -c` subprocess that sources the user's shell startup files and
-    /// echoes the token value back to the app.
-    ///
-    /// ## When to call
-    /// Call this **once**, early in `AppDelegate.applicationDidFinishLaunching` (or
-    /// equivalent), **before** starting any API poll loop. `AppState.start()` is the
-    /// canonical call site via `GitHubClient.warmUp()`.
-    ///
-    /// ## No-op conditions
-    /// - A token is already cached (Keychain OAuth sign-in, previous `warmUp` call).
-    /// - The process-level environment already contains `GH_TOKEN` / `GITHUB_TOKEN`
-    ///   (terminal launch, CI environment). `resolveFromEnvironment()` will have
-    ///   already populated the cache before `warmUp` is called.
-    ///
-    /// ## Blocking
-    /// This method calls `Process.waitUntilExit()` and **must** be awaited on a
-    /// background executor (e.g. inside a `Task { ... }` or from an `async` context
-    /// dispatched off the main thread). `GitHubClient.warmUp()` handles this correctly
-    /// via `await withCheckedContinuation`.
-    public func warmUpFromLoginShell() {
-        // Fast-path: already have a token — nothing to do.
-        guard cache.withLock({ $0 }) == nil else {
-            logger?.log("TokenCache › warmUp — cache already populated, skipping login-shell probe", category: "transport")
-            return
-        }
-        // Also skip if resolveFromStore / resolveFromEnvironment already have a token.
-        if resolveFromStore() != nil || resolveFromEnvironment() != nil {
-            logger?.log("TokenCache › warmUp — token resolved without login-shell probe", category: "transport")
-            return
-        }
-        logger?.log("TokenCache › warmUp — no token yet, probing login shell for GH_TOKEN / GITHUB_TOKEN", category: "transport")
-        for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
-            if let value = readFromLoginShell(key: key), !value.isEmpty {
-                cache.withLock { if $0 == nil { $0 = value } }
-                logger?.log("TokenCache › warmUp — resolved \(key) from login shell (len=\(value.count))", category: "transport")
-                return
-            }
-        }
-        logger?.log("TokenCache › warmUp — login-shell probe found no token", category: "transport")
-    }
-
     // MARK: - Private helpers
 
     /// Reads the in-memory cache. Returns `nil` if not set.
@@ -188,33 +138,5 @@ public final class TokenCache: Sendable {
             #endif
         }
         return nil
-    }
-
-    /// Spawns `/bin/zsh -l -c "echo -n $KEY"` and returns the trimmed output.
-    ///
-    /// The `-l` (login) flag causes zsh to source `~/.zprofile` (and via that,
-    /// `~/.zshrc` on most setups), giving access to `export` statements that
-    /// launchd-launched GUI apps never inherit.
-    ///
-    /// stderr is silenced via a separate `Pipe()` to suppress zsh startup noise
-    /// (e.g. `zsh compinit` warnings) that would otherwise corrupt the output.
-    private func readFromLoginShell(key: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-l", "-c", "echo -n $\(key)"]
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            logger?.log("TokenCache › warmUp — failed to spawn login shell: \(error)", category: "transport")
-            return nil
-        }
-        process.waitUntilExit()
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .flatMap { $0.isEmpty ? nil : $0 }
     }
 }
