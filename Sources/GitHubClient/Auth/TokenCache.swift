@@ -257,5 +257,6 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> String? {
 /// read at most once (timeout arm, after 10s sleep). The narrow TOCTOU window
 /// where both arms overlap is accepted — see loginShellToken doc comment.
 private final class UncheckedProcessBox: @unchecked Sendable {
+    /// The spawned `/bin/zsh` process, or `nil` if not yet started or launch failed.
     var process: Process?
 }
