@@ -29,8 +29,11 @@ public final class OAuthService: OAuthServiceProtocol {
     private let decoder = JSONDecoder()
     /// Shared `JSONEncoder` — reused across token-exchange encode calls.
     private let encoder = JSONEncoder()
+    /// The default OAuth redirect URI, sourced from `GitHubConstants.oauthRedirectURI`.
+    /// Override via the `redirectURI` parameter on `OAuthService.init`.
+    public static let defaultRedirectURI: String = GitHubConstants.oauthRedirectURI
     /// The OAuth redirect URI. Must match the value registered in the GitHub OAuth app settings.
-    private let redirectURI = GitHubConstants.oauthRedirectURI
+    private let redirectURI: String
     /// OAuth scopes requested during sign-in. Set at init time via the `scopes` parameter.
     private let scopes: [String]
     /// GitHub OAuth authorisation URL.
@@ -72,6 +75,10 @@ public final class OAuthService: OAuthServiceProtocol {
     ///     is passed (fires in both debug and release builds — this is intentional; an empty
     ///     scopes array is a programming error, not a runtime condition).
     ///     Use `GitHubScopes` constants for type safety and discoverability.
+    ///   - redirectURI: The OAuth redirect URI sent to GitHub during authorisation.
+    ///     Defaults to `OAuthService.defaultRedirectURI` (`GitHubConstants.oauthRedirectURI`).
+    ///     Override for staging environments, white-label builds, or a second OAuth app.
+    ///     Existing call sites are unaffected — omitting this parameter preserves current behaviour.
     ///   - logger: Optional logger for diagnostic messages.
     ///   - session: The `URLSessionProtocol` used for token-exchange requests. Defaults to `URLSession.shared`.
     ///     Inject a `MockURLSession` in tests to avoid real network calls.
@@ -86,6 +93,7 @@ public final class OAuthService: OAuthServiceProtocol {
         clientSecret: String,
         tokenStore: any TokenStore,
         scopes: [String] = GitHubScopes.default,
+        redirectURI: String = OAuthService.defaultRedirectURI,
         logger: (any GitHubLogger)? = nil,
         session: any URLSessionProtocol = URLSession.shared,
         onTokenSaved: (() -> Void)? = nil,
@@ -93,6 +101,7 @@ public final class OAuthService: OAuthServiceProtocol {
     ) {
         precondition(!scopes.isEmpty, "OAuthService: scopes must not be empty — pass at least one GitHubScopes constant")
         self.scopes = scopes
+        self.redirectURI = redirectURI
         self.clientID = clientID
         self.clientSecret = clientSecret
         self.tokenStore = tokenStore
