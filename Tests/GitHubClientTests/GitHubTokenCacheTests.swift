@@ -242,17 +242,24 @@ struct GitHubTokenCacheTests {
   /// returns .notFound, not .failed. This test cannot synthetically produce a
   /// .failed outcome without a loginShellToken injection point (which doesn't
   /// exist — it's a private free function). What it DOES validate is that
-  /// after the shell path has been entered and returned (any outcome), a call
-  /// with a seeded store token still resolves correctly — confirming the state
-  /// machine hasn't been corrupted. The .failed latch specifically is an
-  /// untestable invariant at this level; tracked for a future loginShellToken
-  /// injection seam in issue #69.
+  /// after the shell path has been entered and returned (any outcome), a fresh
+  /// cache instance backed by a seeded store resolves correctly — confirming
+  /// the store path is unaffected by a prior shell attempt on a different
+  /// instance. The .failed latch specifically is an untestable invariant at
+  /// this level; tracked for a future loginShellToken injection seam in issue #69.
+  ///
+  /// ## What this test does NOT validate
+  /// Same-instance recovery after .notFound: this test creates a separate
+  /// seededCache rather than re-using `cache`. That recovery path is exercised
+  /// by token_shellNotFound_doesNotLatch (re-entry) and invalidate_resetsShellOutcome
+  /// (reset path). This test's scope is strictly: "store resolution on a fresh
+  /// instance is unaffected by prior shell activity elsewhere."
   ///
   /// ## CI note
   /// This test spawns /bin/zsh once, then resolves from the store. The .timeLimit
   /// below makes the shell-spawn budget explicit and catches hangs on loaded runners.
   @Test(.timeLimit(.minutes(1)))
-  func token_afterShellPath_storeTokenStillResolves() async {
+  func token_freshCacheAfterShellPath_storeTokenResolves() async {
     await withCleanEnv {
       let cache = makeCache()  // empty store, no env vars — forces shell path
       // First call enters shell path (returns nil, .notFound outcome).

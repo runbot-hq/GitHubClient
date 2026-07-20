@@ -467,13 +467,17 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 ///
 /// ## Thread leak on the timeout path (known, bounded)
 /// After `group.next()` + `group.cancelAll()`, this function returns before
-/// the subprocess arm's `waitUntilExit()` call has necessarily unblocked.
-/// `Process.waitUntilExit()` does not honour Swift task cancellation, so the
-/// cooperative pool thread running the subprocess arm is held until zsh
-/// responds to `terminate()` and exits. For this `zsh -c printf` use case
-/// the shell exits in under a second after receiving SIGTERM, so the leaked
-/// thread window is brief. If `loginShellToken` is ever adapted for longer-
-/// running subprocesses, this must be revisited.
+/// both leaked resources have necessarily resolved:
+/// 1. The `DispatchQueue` thread running `drainPipe` — unblocks promptly
+///    once SIGTERM causes the shell to exit and close the pipe write end.
+/// 2. The cooperative pool thread running the subprocess arm — holds
+///    `waitUntilExit()` until zsh actually exits after SIGTERM.
+/// Both threads are held until the shell exits. For this `zsh -c printf` use
+/// case zsh exits in under a second after SIGTERM, so the window is brief.
+/// If `loginShellToken` is ever adapted for longer-running subprocesses,
+/// consider adding a SIGKILL after a grace period — SIGTERM is not guaranteed
+/// to be honoured promptly by shells with custom `trap … TERM` handlers or
+/// by zsh in certain zle (line-editor) states.
 ///
 /// ## App Sandbox (not currently applicable — known cliff)
 /// `Process` is unavailable in a sandboxed Mac app. If the app is ever
