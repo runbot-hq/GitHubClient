@@ -5,7 +5,7 @@ A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls 
 ## Features
 
 - **Dual authentication** — OAuth Authorization Code flow for interactive users; `GH_TOKEN` / `GITHUB_TOKEN` env var for CI and automation. Same call site, no branching
-- **Layered token resolution** — resolved at call time from memory cache → Keychain → env var; subsequent calls served from cache
+- **Layered token resolution** — resolved at call time from memory cache → Keychain → env var → login shell; subsequent calls served from cache
 - **Direct REST over `URLSession`** — no code generation, no auto-generated OpenAPI types, no third-party networking layer
 - **Rate-limit aware** — automatic backoff and retry on 429 / 403 rate-limit responses
 - **Link-header pagination** — cursor-based pagination handled transparently
@@ -124,6 +124,30 @@ At every API call, the token is resolved in this order — first match wins:
 2. `TokenStore` (Keychain by default)
 3. `GH_TOKEN` environment variable
 4. `GITHUB_TOKEN` environment variable
+5. Login shell subprocess (`/bin/zsh -i -l`) — Finder/Dock/login-item launches only
+
+### Login shell fallback (Finder / Dock launches)
+
+macOS GUI apps launched from Finder, the Dock, or as login items are spawned by
+`launchd`, which does not source `~/.zprofile` or `~/.zshrc`. `ProcessInfo` therefore
+never contains `GH_TOKEN` in those contexts, even when the token is correctly exported
+in your shell profile. Step 5 bridges this gap by spawning `/bin/zsh -i -l` on the
+first cache miss and reading the exported token from the shell's environment.
+
+**The shell is spawned at most once per launch.** On success the result is written to
+the in-memory cache and all subsequent calls return immediately from step 1. If the
+shell finds no token, times out, or fails to launch, the result is recorded and no
+further shell spawns occur until the user signs out (which calls `invalidate()`).
+
+**10-second timeout.** The shell subprocess has a 10-second budget to start and
+print the token. This is generous for most setups (~50–200 ms), but users with
+heavy `~/.zshrc` configurations — oh-my-zsh, nvm, rvm, pyenv, a cold `compinit`
+cache, etc. — may see the timeout fire before the shell finishes initialising.
+
+If you hit the timeout:
+- Move your `GH_TOKEN` export to `~/.zprofile` instead of `~/.zshrc`. The library
+  spawns `/bin/zsh -i -l`, but a lighter profile reduces startup time significantly.
+- Alternatively, sign in via OAuth — the Keychain path (step 2) never involves a shell.
 
 ### Bring your own token store
 
@@ -260,7 +284,7 @@ Sources/GitHubClient/
 ├── Auth/
 │   ├── OAuthService.swift                ← Authorization Code flow, CSRF protection
 │   ├── OAuthServiceProtocol.swift
-│   └── TokenCache.swift                  ← memory cache → TokenStore → env var resolution
+│   └── TokenCache.swift                  ← memory cache → TokenStore → env var → login shell resolution
 ├── Transport/
 │   ├── GitHubTransportProtocol.swift
 │   ├── GitHubURLSessionTransport.swift   ← URLSession, rate-limit backoff, ExecuteResult pipeline
@@ -302,7 +326,7 @@ workflow, job, or step fields in parallel.
 | `GitHubJob` | `API/GitHubWorkflowAPI.swift` | Individual job within a workflow run |
 | `GitHubStep` | `API/GitHubWorkflowAPI.swift` | Step within a `GitHubJob` |
 | `GitHubRunsFetchResult` | `API/GitHubWorkflowAPI.swift` | Typed fetch outcome: `.success`, `.rateLimited`, `.authFailure`, `.noToken` |
-| `TokenCache` | `Auth/TokenCache.swift` | Layered token resolver (memory → Keychain → env) |
+| `TokenCache` | `Auth/TokenCache.swift` | Layered token resolver (memory → Keychain → env → login shell) |
 | `KeychainTokenStore` | `API/KeychainTokenStore.swift` | Concrete `TokenStore` via `Security.framework` |
 
 ## Why not the official GitHub SDK?

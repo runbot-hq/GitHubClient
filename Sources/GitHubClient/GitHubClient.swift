@@ -17,33 +17,12 @@ import Foundation
 //       logger: MyLogger()
 //   )
 //
-// Custom scopes (optional — defaults to GitHubScopes.default):
-//
-//   let github = GitHubClient(
-//       clientID: "your-client-id",
-//       clientSecret: "your-client-secret",
-//       service: "com.example.myapp",
-//       account: "github-oauth-token",
-//       scopes: GitHubScopes.default + [GitHubScopes.readUser]
-//   )
-//
 // Tests inject mocks via the secondary init:
 //
 //   let github = GitHubClient(
 //       oauthService: MockOAuthService(),
 //       transport: MockTransport()
 //   )
-//
-// ## Why a facade?
-//
-// Without this type, `OAuthService`, `GitHubTransport`, and `TokenCache`
-// are constructed independently with no shared token path:
-//
-// - `OAuthService` saves tokens to `KeychainTokenStore`.
-// - `GitHubTransport` reads tokens via a separate closure.
-// - `TokenCache` exists but is never wired into either.
-//
-// This facade is the single wiring point that closes all three gaps.
 
 /// A facade that owns and wires `OAuthService`, `GitHubTransport`, and
 /// `TokenCache` under a single initialiser.
@@ -54,8 +33,7 @@ import Foundation
 /// ## Isolation
 /// `GitHubClient` is `@MainActor`-isolated at the type level because
 /// `oauthService` stores `any OAuthServiceProtocol` whose protocol is
-/// `@MainActor`-isolated. This makes the isolation boundary compiler-enforced
-/// rather than relying on call-site convention.
+/// `@MainActor`-isolated.
 @MainActor
 public final class GitHubClient {
 
@@ -74,18 +52,12 @@ public final class GitHubClient {
     /// path. `TokenCache.invalidate()` is called automatically after every
     /// successful sign-in and sign-out.
     ///
-    /// Must be called on the main actor because `OAuthService.init` is
-    /// `@MainActor`-isolated. `AppDelegate` — the only production call site —
-    /// satisfies this requirement automatically.
-    ///
     /// - Parameters:
     ///   - clientID: The GitHub OAuth app client ID.
     ///   - clientSecret: The GitHub OAuth app client secret.
-    ///   - service: The keychain service name (e.g. your app's bundle identifier).
-    ///   - account: The keychain account name (e.g. `"github-oauth-token"`).
-    ///   - scopes: The OAuth scopes to request during sign-in. Defaults to
-    ///     `GitHubScopes.default`. Must not be empty. Use `GitHubScopes`
-    ///     constants for type safety and discoverability.
+    ///   - service: The keychain service name.
+    ///   - account: The keychain account name.
+    ///   - scopes: The OAuth scopes to request. Defaults to `GitHubScopes.default`.
     ///   - logger: Optional logger for diagnostic messages.
     @MainActor
     public init(
@@ -105,15 +77,30 @@ public final class GitHubClient {
             scopes: scopes,
             logger: logger,
             session: URLSession.shared,
+            // Both callbacks call invalidate() so the next token() call re-resolves
+            // from the store after any credential change. Side-effect: a user whose
+            // shell is broken (.failed latch) will re-spawn /bin/zsh on the next
+            // token() call after *both* sign-in and sign-out — not just sign-out.
+            // Low-frequency and intentional; tracked in #68.
             onTokenSaved: { cache.invalidate() },
             onTokenDeleted: { cache.invalidate() }
         )
         let transport = GitHubTransport(
-            tokenProvider: { cache.token() },
+            tokenProvider: { await cache.token() },
             logger: logger
         )
-        // Write through the internal backing store to avoid triggering the
-        // #DeprecatedDeclaration warning on the public `sharedGitHubTransport` alias.
+        // ⚠️ NOT a dead assignment — this is load-bearing module wiring.
+        // sharedTransportStorage is the backing var read by currentTransport
+        // (GitHubTransportShims.swift). Every free-function shim in the module
+        // (ghAPI, ghPost, cancelRun, deleteRunnerByID, etc.) resolves its
+        // transport via `currentTransport`, which falls back to
+        // sharedTransportStorage when no @TaskLocal override is in scope.
+        // Without this write, every shim call in a production app would use
+        // the default no-token GitHubTransport() constructed at module load —
+        // all API calls would return 401 until the user re-launches.
+        // Periphery / compiler "assigned but never read" warnings are false
+        // positives here: the value IS read, just indirectly through
+        // currentTransport in a different file.
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
@@ -123,20 +110,16 @@ public final class GitHubClient {
 
     /// Creates a `GitHubClient` with injected protocol mocks.
     ///
-    /// Use in tests to avoid Keychain or network access. Inject a
-    /// `MockOAuthService` and `MockTransport` at whatever granularity
-    /// the test requires.
+    /// Accepts `any OAuthServiceProtocol` and `any GitHubTransportProtocol`
+    /// directly, so the caller controls all behaviour at mock-construction time.
     ///
-    /// Intentionally nonisolated — it only assigns protocol existentials
-    /// and never calls any `@MainActor`-isolated code directly.
-    ///
-    /// - Note: Does **not** accept a `scopes:` parameter — it takes
-    ///   `any OAuthServiceProtocol` directly, which already encapsulates
-    ///   scope configuration. No changes needed here.
-    ///
-    /// - Parameters:
-    ///   - oauthService: A mock or stub conforming to `OAuthServiceProtocol`.
-    ///   - transport: A mock or stub conforming to `GitHubTransportProtocol`.
+    /// WHY NO `scopes:` PARAMETER:
+    /// The production init accepts `scopes:` to pass them through to
+    /// `OAuthService`. The test init bypasses `OAuthService` entirely — the
+    /// caller passes a fully-constructed mock, which already encodes whatever
+    /// scope behaviour the test requires. Adding `scopes:` here would be
+    /// misleading: there is no `OAuthService` to forward them to, and a test
+    /// author who adds scopes expecting OAuth behaviour would get a silent no-op.
     public init(
         oauthService: any OAuthServiceProtocol,
         transport: any GitHubTransportProtocol
