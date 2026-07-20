@@ -9,7 +9,7 @@ import Synchronization
 ///
 /// Returned by `loginShellToken` and consumed by `token()` to set
 /// `ShellResolutionOutcome` in the cache state.
-private enum ShellTokenResult {
+enum ShellTokenResult {
     /// The shell ran and found an exported token.
     case found(String)
     /// The shell ran successfully but found no `GH_TOKEN` / `GITHUB_TOKEN` export.
@@ -168,7 +168,7 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// - Returns: A `ShellTokenResult` discriminating between a found token,
 ///   a healthy shell with no export, and a launch/timeout failure.
 @concurrent
-private func loginShellToken(logger: (any GitHubLogger)?) async -> ShellTokenResult {
+func loginShellToken(logger: (any GitHubLogger)?) async -> ShellTokenResult {
     let box = ProcessBox()
     return await withTaskGroup(of: ShellTokenResult.self) { group in
         // Subprocess arm — spawn, drain stdout, wait, read.
