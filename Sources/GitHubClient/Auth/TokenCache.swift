@@ -262,6 +262,26 @@ public final class TokenCache: Sendable {
         logger?.log("TokenCache › invalidate — cache and shell outcome reset", category: "transport")
     }
 
+    // MARK: - Synchronous cache peek
+
+    /// Returns the token that is currently held in the in-memory cache, or `nil`
+    /// if no token has been resolved yet during this process lifetime.
+    ///
+    /// This is a **non-async, zero-I/O** read of the Mutex-guarded state — it
+    /// will never spawn a login shell, read the Keychain, or check env vars.
+    /// It reflects only what a prior `token()` call has already resolved and
+    /// written into the cache.
+    ///
+    /// ## Why this exists
+    /// UI code (e.g. `SettingsView`) needs a synchronous answer to "do we have
+    /// a token right now?" to decide which status indicator to show. Callers
+    /// that need a fully-resolved token (including shell fallback) must still
+    /// call `token()`. This property answers only: "has any prior resolution
+    /// already succeeded?"
+    public var cachedToken: String? {
+        state.withLock { $0.token }
+    }
+
     // MARK: - Private helpers
 
     /// Returns the token from the in-memory cache, or `nil` if not yet populated.

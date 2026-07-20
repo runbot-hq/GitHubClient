@@ -43,6 +43,14 @@ public final class GitHubClient {
     /// The transport — handles all authenticated GitHub API requests.
     public let transport: any GitHubTransportProtocol
 
+    /// The in-memory token cache shared between `oauthService` and `transport`.
+    ///
+    /// Exposed so that callers can read `cachedToken` synchronously to reflect
+    /// the current resolved token state in UI without going `async`.
+    /// Do not call `invalidate()` directly — that is handled automatically by
+    /// the `onTokenSaved` / `onTokenDeleted` callbacks wired in `init`.
+    public let tokenCache: TokenCache
+
     // MARK: - Production init
 
     /// Creates a fully wired `GitHubClient` backed by the macOS Keychain.
@@ -104,6 +112,7 @@ public final class GitHubClient {
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
+        self.tokenCache = cache
     }
 
     // MARK: - Test init
@@ -122,9 +131,11 @@ public final class GitHubClient {
     /// author who adds scopes expecting OAuth behaviour would get a silent no-op.
     public init(
         oauthService: any OAuthServiceProtocol,
-        transport: any GitHubTransportProtocol
+        transport: any GitHubTransportProtocol,
+        tokenCache: TokenCache = TokenCache(tokenStore: NullTokenStore())
     ) {
         self.oauthService = oauthService
         self.transport = transport
+        self.tokenCache = tokenCache
     }
 }
