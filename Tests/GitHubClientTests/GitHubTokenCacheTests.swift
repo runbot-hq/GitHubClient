@@ -189,35 +189,57 @@ struct GitHubTokenCacheTests {
 
   // MARK: - token() — shell outcome latch
 
-  /// After the login shell returns .notFound (no token exported), subsequent
-  /// token() calls must re-enter the shell path — .notFound does NOT latch.
+  /// Verifies that `.notFound` does not latch: a second `token()` call after the
+  /// shell finds no export must re-enter the shell path, not short-circuit.
   ///
   /// ## How this test reaches the shell path
-  /// loginShellToken is a private free function with no injection point. The
+  /// `loginShellToken` is a private free function with no injection point. The
   /// test runs with a clean environment and empty store so all fast paths miss
-  /// and token() falls through to loginShellToken. The real /bin/zsh spawns,
-  /// finds no exported token (env is clean), and returns .notFound. token()
-  /// sets shellOutcome = .notFound. On the second call, the .notFound outcome
+  /// and `token()` falls through to `loginShellToken`. The real `/bin/zsh` spawns,
+  /// finds no exported token (env is clean), and returns `.notFound`. `token()`
+  /// sets `shellOutcome = .notFound`. On the second call, the `.notFound` outcome
   /// does NOT short-circuit — the shell path is re-entered.
   ///
   /// ## What this test validates
-  /// That .notFound does not permanently block re-entry. An OAuth-only user
-  /// who later adds GH_TOKEN to their shell profile should have it picked up
-  /// on the next token() call without relaunching. Both calls return nil here
+  /// That `.notFound` does not permanently block re-entry. An OAuth-only user
+  /// who later adds `GH_TOKEN` to their shell profile should have it picked up
+  /// on the next `token()` call without relaunching. Both calls return `nil` here
   /// (env is still clean), but the absence of a short-circuit is the invariant
   /// being validated — confirmed by the fact that both calls complete without
-  /// hanging on the fast-path (if the latch had fired, the second call would
-  /// have returned instantly; if it didn't, it re-entered the shell).
+  /// hanging (if the latch had fired, the second call would have returned
+  /// instantly from the `.failed` guard; if it didn't, it re-entered the shell).
+  ///
+  /// ## Why there is no call-count assertion
+  /// Proving re-entry absence by call count requires an injection seam on
+  /// `loginShellToken` — a `ShellTokenResolver` protocol or closure parameter
+  /// on `TokenCache.init` — so a spy can observe invocations.
+  ///
+  /// That seam is intentionally absent. The cost:
+  /// - Permanent public/internal interface surface on `TokenCache`
+  /// - A mock type that travels with every future init-signature change
+  /// - All of this to count calls on a private free function that has no
+  ///   observable side-effect other than timing and return value
+  ///
+  /// The benefit does not justify the cost because:
+  /// 1. A fast re-entry is not a user-visible bug — it is a known background
+  ///    cost already tracked and accepted in issue #68.
+  /// 2. Once #68 ships (timestamp cooldown), re-entry is impossible by
+  ///    construction, making a call-count assertion permanently moot.
+  /// 3. The `.timeLimit(.minutes(1))` guard below already catches the failure
+  ///    mode that matters in production: a hang from a latched re-entry loop.
+  ///
+  /// If #68 is reverted or the cooldown logic is removed, revisit this decision
+  /// at that time — not before.
   ///
   /// ## .notFound re-entry cost (TODO #68)
-  /// Because .notFound does not latch, an OAuth-only user launched from Finder
-  /// will re-spawn /bin/zsh on every poll cycle (~30 s) for the app lifetime.
+  /// Because `.notFound` does not latch, an OAuth-only user launched from Finder
+  /// will re-spawn `/bin/zsh` on every poll cycle (~30 s) for the app lifetime.
   /// This is the current accepted behaviour. A timestamp-based cooldown in
-  /// ShellResolutionOutcome is the right long-term fix — tracked in issue #68.
+  /// `ShellResolutionOutcome` is the right long-term fix — tracked in issue #68.
   ///
   /// ## CI note
-  /// This test spawns /bin/zsh TWICE. On GitHub Actions runners /bin/zsh exits
-  /// quickly (~200 ms per spawn). Total wall time ~400 ms. The .timeLimit below
+  /// This test spawns `/bin/zsh` TWICE. On GitHub Actions runners `/bin/zsh` exits
+  /// quickly (~200 ms per spawn). Total wall time ~400 ms. The `.timeLimit` below
   /// makes the budget explicit and catches hangs on loaded runners.
   @Test(.timeLimit(.minutes(1)))
   func token_shellNotFound_doesNotLatch() async {
@@ -246,7 +268,8 @@ struct GitHubTokenCacheTests {
   /// cache instance backed by a seeded store resolves correctly — confirming
   /// the store path is unaffected by a prior shell attempt on a different
   /// instance. The .failed latch specifically is an untestable invariant at
-  /// this level; tracked for a future loginShellToken injection seam in issue #69.
+  /// this level; the injection seam is not worth adding — see the rationale
+  /// in `token_shellNotFound_doesNotLatch` above.
   ///
   /// ## Why this test uses a second `TokenCache` instance (intentional)
   /// `seededCache` is a *new* instance, not `cache` after store-seeding. This
@@ -294,7 +317,8 @@ struct GitHubTokenCacheTests {
   /// This test cannot distinguish "shell re-entered after invalidate" from
   /// "shell re-entered because .notFound never latches" — both produce the
   /// same nil return. The .failed latch reset by invalidate() is an untestable
-  /// invariant at this level; tracked in issue #69.
+  /// invariant at this level; the injection seam is not worth adding — see the
+  /// rationale in `token_shellNotFound_doesNotLatch` above.
   ///
   /// ## CI note
   /// This test spawns /bin/zsh twice. The .timeLimit below makes the budget
