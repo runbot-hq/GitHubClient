@@ -660,6 +660,22 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> ShellTokenRes
 /// On the timeout path: `terminate()` sends SIGTERM to the shell, which closes
 /// the pipe write end, causing `readDataToEndOfFile()` to return immediately with
 /// whatever was buffered. The continuation is resumed promptly — no hang.
+///
+/// ## Never-resume bound (withCheckedContinuation safety)
+/// `withCheckedContinuation` requires the continuation to be resumed exactly once.
+/// The only call site is inside `DispatchQueue.global(qos:).async` — a simple
+/// fire-and-forget closure with no error path, no early return, and no throw.
+/// `readDataToEndOfFile()` is an Objective-C method that raises an `NSException`
+/// on a closed or invalid file handle. However, `outPipe` is created immediately
+/// before `process.run()` in the subprocess arm — it is a freshly allocated
+/// `Pipe()` whose read end is never closed before `drainPipe()` is called. The
+/// write end is closed only when the child process exits or `terminate()` is
+/// called, both of which cause `readDataToEndOfFile()` to return normally rather
+/// than raise. There is therefore no reachable code path in which the continuation
+/// goes unresolved. If this function is ever adapted to drain a pipe whose file
+/// handle may already be closed at call time, wrapping `readDataToEndOfFile()`
+/// in an Objective-C `@try/@catch` shim (or switching to the `AsyncBytes` API)
+/// becomes required to preserve the resume-exactly-once invariant.
 private func drainPipe(_ pipe: Pipe) async -> Data {
     await withCheckedContinuation { continuation in
         DispatchQueue.global(qos: .utility).async {
