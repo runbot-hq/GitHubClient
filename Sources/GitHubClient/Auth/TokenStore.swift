@@ -36,12 +36,12 @@ public protocol TokenStore: Sendable {
 /// `save(_:)` and `delete()` without touching any persistent storage.
 ///
 /// ## Why this is in Sources, not Tests
-/// `GitHubClient`'s test init declares `tokenCache: TokenCache = TokenCache(tokenStore: NullTokenStore())`
-/// as a default parameter value. Default parameter values are evaluated at the
-/// call site and must therefore be visible wherever the init is called —
-/// including in app targets that depend on `GitHubClient`. A type defined only
-/// in the test target is invisible to app-target call sites, so `NullTokenStore`
-/// lives here instead.
+/// `GitHubClient`'s test init resolves a `nil` `tokenCache` argument to
+/// `TokenCache(tokenStore: NullTokenStore())` inside the init body. Because
+/// that expression is in a function body (not a default argument value), the
+/// internal visibility of `NullTokenStore` is sufficient — it does not need
+/// to be public. It lives in Sources rather than Tests so the production
+/// `GitHubClient` module can construct it without a test-target dependency.
 struct NullTokenStore: TokenStore {
     /// Always returns `nil` — no token is stored.
     nonisolated func load() -> String? { nil }

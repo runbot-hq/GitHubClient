@@ -132,10 +132,10 @@ public final class GitHubClient {
     public init(
         oauthService: any OAuthServiceProtocol,
         transport: any GitHubTransportProtocol,
-        tokenCache: TokenCache = TokenCache(tokenStore: NullTokenStore())
+        tokenCache: TokenCache? = nil
     ) {
         self.oauthService = oauthService
         self.transport = transport
-        self.tokenCache = tokenCache
+        self.tokenCache = tokenCache ?? TokenCache(tokenStore: NullTokenStore())
     }
 }
