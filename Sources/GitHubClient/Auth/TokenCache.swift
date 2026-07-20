@@ -64,6 +64,18 @@ private enum ShellResolutionOutcome {
     /// the user is unblocked the moment they add an export without relaunching.
     /// The cooldown described in point 2 above is the right long-term fix and
     /// is a schema-free addition when the cost proves unacceptable in practice.
+    ///
+    /// ## Why .notFound is NOT latched like .failed
+    /// The only user who reaches this path on every poll cycle is a PAT-only
+    /// user launched from Finder with no `GH_TOKEN` in their shell profile —
+    /// which is precisely the user this feature exists to unblock. Latching
+    /// `.notFound` the same as `.failed` (i.e. blocking re-entry until
+    /// `invalidate()`) would permanently prevent them from picking up a newly
+    /// added export without a sign-out/sign-in cycle, defeating the feature.
+    /// OAuth users never reach step 4 at all (step 2 resolves from Keychain),
+    /// so the poll cost does not affect them. The accepted cost is bounded and
+    /// measurable; the cooldown in issue #68 is the right mitigation when data
+    /// confirms it is necessary — not a preemptive latch that breaks the UX.
     case notFound  // TODO: #68 — add a timestamp-based cooldown so .notFound does not re-spawn /bin/zsh on every poll cycle (~30 s) for OAuth-only Finder-launch users
     /// The shell timed out, failed to launch, or was blocked by the App Sandbox.
     /// The shell path IS latched — `token()` short-circuits before step 4 on
