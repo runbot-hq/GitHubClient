@@ -138,6 +138,10 @@ public final class TokenCache: Sendable {
         self.init(tokenStore: tokenStore, logger: logger, shellResolver: nil)
     }
 
+    /// Designated initialiser. Internal so `ShellTokenResult` stays out of the
+    /// public API surface. Pass a `shellResolver` stub in tests to avoid
+    /// spawning a real `/bin/zsh` subprocess. Production callers use the public
+    /// `convenience init` which defaults `shellResolver` to `loginShellToken`.
     init(
         tokenStore: any TokenStore,
         logger: (any GitHubLogger)? = nil,
