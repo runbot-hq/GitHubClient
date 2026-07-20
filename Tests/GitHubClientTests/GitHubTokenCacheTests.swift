@@ -209,10 +209,18 @@ struct GitHubTokenCacheTests {
   /// hanging on the fast-path (if the latch had fired, the second call would
   /// have returned instantly; if it didn't, it re-entered the shell).
   ///
+  /// ## .notFound re-entry cost (TODO #68)
+  /// Because .notFound does not latch, an OAuth-only user launched from Finder
+  /// will re-spawn /bin/zsh on every poll cycle (~30 s) for the app lifetime.
+  /// This is the current accepted behaviour. A timestamp-based cooldown in
+  /// ShellResolutionOutcome is the right long-term fix — tracked in issue #68.
+  ///
   /// ## CI note
   /// This test spawns /bin/zsh TWICE. On GitHub Actions runners /bin/zsh exits
-  /// quickly (~200 ms). Total wall time ~400 ms. Safe to run in CI.
-  @Test func token_shellNotFound_doesNotLatch() async {
+  /// quickly (~200 ms per spawn). Total wall time ~400 ms. The .timeLimit below
+  /// makes the budget explicit and catches hangs on loaded runners.
+  @Test(.timeLimit(.minutes(1)))
+  func token_shellNotFound_doesNotLatch() async {
     await withCleanEnv {
       let cache = makeCache()  // empty store, no env vars
       // First call: shell spawns, finds no token, returns .notFound.
@@ -241,8 +249,10 @@ struct GitHubTokenCacheTests {
   /// injection seam in issue #69.
   ///
   /// ## CI note
-  /// This test spawns /bin/zsh once, then resolves from the store. Safe in CI.
-  @Test func token_afterShellPath_storeTokenStillResolves() async {
+  /// This test spawns /bin/zsh once, then resolves from the store. The .timeLimit
+  /// below makes the shell-spawn budget explicit and catches hangs on loaded runners.
+  @Test(.timeLimit(.minutes(1)))
+  func token_afterShellPath_storeTokenStillResolves() async {
     await withCleanEnv {
       let cache = makeCache()  // empty store, no env vars — forces shell path
       // First call enters shell path (returns nil, .notFound outcome).
@@ -274,7 +284,12 @@ struct GitHubTokenCacheTests {
   /// "shell re-entered because .notFound never latches" — both produce the
   /// same nil return. The .failed latch reset by invalidate() is an untestable
   /// invariant at this level; tracked in issue #69.
-  @Test func invalidate_resetsShellOutcome() async {
+  ///
+  /// ## CI note
+  /// This test spawns /bin/zsh twice. The .timeLimit below makes the budget
+  /// explicit and catches hangs on loaded runners.
+  @Test(.timeLimit(.minutes(1)))
+  func invalidate_resetsShellOutcome() async {
     await withCleanEnv {
       let cache = makeCache()  // empty store
       // Enter shell path — returns nil (.notFound outcome, no latch).
