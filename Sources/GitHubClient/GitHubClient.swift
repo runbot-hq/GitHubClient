@@ -17,6 +17,26 @@ import Foundation
 //       logger: MyLogger()
 //   )
 //
+// Custom scopes (optional — defaults to GitHubScopes.default):
+//
+//   let github = GitHubClient(
+//       clientID: "your-client-id",
+//       clientSecret: "your-client-secret",
+//       service: "com.example.myapp",
+//       account: "github-oauth-token",
+//       scopes: GitHubScopes.default + [GitHubScopes.readUser]
+//   )
+//
+// Custom redirect URI (optional — defaults to OAuthService.defaultRedirectURI):
+//
+//   let github = GitHubClient(
+//       clientID: "your-client-id",
+//       clientSecret: "your-client-secret",
+//       service: "com.example.myapp",
+//       account: "github-oauth-token",
+//       redirectURI: "myapp-staging://oauth/callback"
+//   )
+//
 // Tests inject mocks via the secondary init:
 //
 //   let github = GitHubClient(
@@ -86,9 +106,15 @@ public final class GitHubClient {
     /// - Parameters:
     ///   - clientID: The GitHub OAuth app client ID.
     ///   - clientSecret: The GitHub OAuth app client secret.
-    ///   - service: The keychain service name.
-    ///   - account: The keychain account name.
-    ///   - scopes: The OAuth scopes to request. Defaults to `GitHubScopes.default`.
+    ///   - service: The keychain service name (e.g. your app's bundle identifier).
+    ///   - account: The keychain account name (e.g. `"github-oauth-token"`).
+    ///   - scopes: The OAuth scopes to request during sign-in. Defaults to
+    ///     `GitHubScopes.default`. Must not be empty. Use `GitHubScopes`
+    ///     constants for type safety and discoverability.
+    ///   - redirectURI: The OAuth redirect URI sent to GitHub during authorisation.
+    ///     Defaults to `OAuthService.defaultRedirectURI` (`GitHubConstants.oauthRedirectURI`).
+    ///     Override for staging environments, white-label builds, or a second OAuth app.
+    ///     Existing call sites are unaffected — omitting this parameter preserves current behaviour.
     ///   - logger: Optional logger for diagnostic messages.
     @MainActor
     public init(
@@ -97,6 +123,7 @@ public final class GitHubClient {
         service: String,
         account: String,
         scopes: [String] = GitHubScopes.default,
+        redirectURI: String = OAuthService.defaultRedirectURI,
         logger: (any GitHubLogger)? = nil
     ) {
         let store = KeychainTokenStore(service: service, account: account, logger: logger)
@@ -106,6 +133,7 @@ public final class GitHubClient {
             clientSecret: clientSecret,
             tokenStore: store,
             scopes: scopes,
+            redirectURI: redirectURI,
             logger: logger,
             session: URLSession.shared,
             // Both callbacks call invalidate() so the next token() call re-resolves
@@ -159,6 +187,14 @@ public final class GitHubClient {
     /// credential rotation and need `cachedToken` to reflect the new state must
     /// call `tokenCache.invalidate()` manually, or pass a pre-populated
     /// `TokenCache` instance via the `tokenCache` parameter.
+    ///
+    /// - Note: Does **not** accept a `scopes:` or `redirectURI:` parameter —
+    ///   it takes `any OAuthServiceProtocol` directly, which already encapsulates
+    ///   both scope and redirect URI configuration. No changes needed here.
+    ///
+    /// - Parameters:
+    ///   - oauthService: A mock or stub conforming to `OAuthServiceProtocol`.
+    ///   - transport: A mock or stub conforming to `GitHubTransportProtocol`.
     public init(
         oauthService: any OAuthServiceProtocol,
         transport: any GitHubTransportProtocol,
