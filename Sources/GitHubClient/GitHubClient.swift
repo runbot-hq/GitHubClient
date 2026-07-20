@@ -45,11 +45,34 @@ public final class GitHubClient {
 
     /// The in-memory token cache shared between `oauthService` and `transport`.
     ///
-    /// Exposed so that callers can read `cachedToken` synchronously to reflect
-    /// the current resolved token state in UI without going `async`.
-    /// Do not call `invalidate()` directly — that is handled automatically by
-    /// the `onTokenSaved` / `onTokenDeleted` callbacks wired in `init`.
-    public let tokenCache: TokenCache
+    /// Kept private to prevent callers from invoking `invalidate()` or `token()`
+    /// directly — both operations are managed internally via the
+    /// `onTokenSaved` / `onTokenDeleted` callbacks wired in `init`.
+    /// Use `cachedToken` for read-only UI status checks.
+    private let _tokenCache: TokenCache
+
+    /// The token that the in-memory cache has already resolved, or `nil` if no
+    /// `token()` call has completed yet during this process lifetime.
+    ///
+    /// This is a **synchronous, zero-I/O** read — it never spawns a login shell,
+    /// reads the Keychain, or checks environment variables. It reflects only what
+    /// a prior `token()` call has already resolved.
+    ///
+    /// ## Typical use
+    /// UI code that needs to show an auth-status indicator without going `async`
+    /// can read this property after at least one `token()` call has completed
+    /// (e.g. from a `.task` modifier that awaits `token()` on appear).
+    public var cachedToken: String? { _tokenCache.cachedToken }
+
+    /// Resolves and returns the current token, running the full resolution chain
+    /// if needed (Keychain → environment → login-shell fallback).
+    ///
+    /// This is the same path used by every authenticated API call. Call it from
+    /// a `.task` modifier or other async context to warm the cache and then read
+    /// `cachedToken` synchronously for UI status checks.
+    public func token() async -> String? {
+        await _tokenCache.token()
+    }
 
     // MARK: - Production init
 
@@ -112,7 +135,7 @@ public final class GitHubClient {
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
-        self.tokenCache = cache
+        self._tokenCache = cache
     }
 
     // MARK: - Test init
@@ -129,6 +152,13 @@ public final class GitHubClient {
     /// scope behaviour the test requires. Adding `scopes:` here would be
     /// misleading: there is no `OAuthService` to forward them to, and a test
     /// author who adds scopes expecting OAuth behaviour would get a silent no-op.
+    ///
+    /// ## `tokenCache` and `invalidate()` in tests
+    /// The test init does **not** wire `onTokenSaved` / `onTokenDeleted` callbacks
+    /// — there is no `OAuthService` to fire them. Tests that exercise sign-out or
+    /// credential rotation and need `cachedToken` to reflect the new state must
+    /// call `tokenCache.invalidate()` manually, or pass a pre-populated
+    /// `TokenCache` instance via the `tokenCache` parameter.
     public init(
         oauthService: any OAuthServiceProtocol,
         transport: any GitHubTransportProtocol,
@@ -136,6 +166,6 @@ public final class GitHubClient {
     ) {
         self.oauthService = oauthService
         self.transport = transport
-        self.tokenCache = tokenCache ?? TokenCache(tokenStore: NullTokenStore())
+        self._tokenCache = tokenCache ?? TokenCache(tokenStore: NullTokenStore())
     }
 }
