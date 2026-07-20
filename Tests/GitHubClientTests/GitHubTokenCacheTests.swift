@@ -18,6 +18,7 @@
 // them afterwards.
 
 import Foundation
+import Synchronization
 import Testing
 
 @testable import GitHubClient
@@ -202,57 +203,25 @@ struct GitHubTokenCacheTests {
   // MARK: - token() — shell outcome latch
 
   /// Verifies that `.notFound` does not latch: a second `token()` call after the
-  /// shell finds no export must re-enter the shell path, not short-circuit.
+  /// resolver reports no export must re-enter the shell path, not short-circuit.
   ///
   /// ## How this test reaches the shell path
-  /// `loginShellToken` is a private free function with no injection point. The
-  /// test runs with a clean environment and empty store so all fast paths miss
-  /// and `token()` falls through to `loginShellToken`. The real `/bin/zsh` spawns,
-  /// finds no exported token (env is clean), and returns `.notFound`. `token()`
-  /// sets `shellOutcome = .notFound`. On the second call, the `.notFound` outcome
-  /// does NOT short-circuit — the shell path is re-entered.
+  /// A `.notFound` `shellResolver` stub is injected via `makeCache`, so no real
+  /// `/bin/zsh` subprocess is spawned. The store is empty and env vars are
+  /// stripped, so all fast paths miss and `token()` reaches the resolver twice.
   ///
   /// ## What this test validates
   /// That `.notFound` does not permanently block re-entry. An OAuth-only user
   /// who later adds `GH_TOKEN` to their shell profile should have it picked up
-  /// on the next `token()` call without relaunching. Both calls return `nil` here
-  /// (env is still clean), but the absence of a short-circuit is the invariant
-  /// being validated — confirmed by the fact that both calls complete without
-  /// hanging (if the latch had fired, the second call would have returned
-  /// instantly from the `.failed` guard; if it didn't, it re-entered the shell).
-  ///
-  /// ## Why there is no call-count assertion
-  /// Proving re-entry absence by call count requires an injection seam on
-  /// `loginShellToken` — a `ShellTokenResolver` protocol or closure parameter
-  /// on `TokenCache.init` — so a spy can observe invocations.
-  ///
-  /// That seam is intentionally absent. The cost:
-  /// - Permanent public/internal interface surface on `TokenCache`
-  /// - A mock type that travels with every future init-signature change
-  /// - All of this to count calls on a private free function that has no
-  ///   observable side-effect other than timing and return value
-  ///
-  /// The benefit does not justify the cost because:
-  /// 1. A fast re-entry is not a user-visible bug — it is a known background
-  ///    cost already tracked and accepted in issue #68.
-  /// 2. Once #68 ships (timestamp cooldown), re-entry is impossible by
-  ///    construction, making a call-count assertion permanently moot.
-  /// 3. The `.timeLimit(.minutes(1))` guard below already catches the failure
-  ///    mode that matters in production: a hang from a latched re-entry loop.
-  ///
-  /// If #68 is reverted or the cooldown logic is removed, revisit this decision
-  /// at that time — not before.
+  /// on the next `token()` call without relaunching. Both calls return `nil`
+  /// here, but the resolver is invoked on both calls — confirmed by the
+  /// call-count assertion below.
   ///
   /// ## .notFound re-entry cost (TODO #68)
   /// Because `.notFound` does not latch, an OAuth-only user launched from Finder
-  /// will re-spawn `/bin/zsh` on every poll cycle (~30 s) for the app lifetime.
-  /// This is the current accepted behaviour. A timestamp-based cooldown in
-  /// `ShellResolutionOutcome` is the right long-term fix — tracked in issue #68.
-  ///
-  /// ## CI note
-  /// This test spawns `/bin/zsh` TWICE. On GitHub Actions runners `/bin/zsh` exits
-  /// quickly (~200 ms per spawn). Total wall time ~400 ms. The `.timeLimit` below
-  /// makes the budget explicit and catches hangs on loaded runners.
+  /// will re-enter shell resolution on every poll cycle (~30 s) for the app
+  /// lifetime. A timestamp-based cooldown in `ShellResolutionOutcome` is the
+  /// right long-term fix — tracked in issue #68.
   @Test
   func token_shellNotFound_doesNotLatch() async {
     await withCleanEnv {
@@ -267,35 +236,18 @@ struct GitHubTokenCacheTests {
     }
   }
 
-  /// After the login shell returns .failed (timeout or launch error), subsequent
-  /// token() calls must NOT re-enter the shell path — .failed IS latched.
+  /// After shell-path resolution, a fresh cache instance backed by a seeded
+  /// store must resolve from the store correctly.
   ///
-  /// ## How this test reaches the .failed outcome without a real failure
-  /// In CI, /bin/zsh is always present and the env is clean, so loginShellToken
-  /// returns .notFound, not .failed. This test cannot synthetically produce a
-  /// .failed outcome without a loginShellToken injection point (which doesn't
-  /// exist — it's a private free function). What it DOES validate is that
-  /// after the shell path has been entered and returned (any outcome), a fresh
-  /// cache instance backed by a seeded store resolves correctly — confirming
-  /// the store path is unaffected by a prior shell attempt on a different
-  /// instance. The .failed latch specifically is an untestable invariant at
-  /// this level; the injection seam is not worth adding — see the rationale
-  /// in `token_shellNotFound_doesNotLatch` above.
+  /// ## How this test reaches the shell path
+  /// A `.notFound` `shellResolver` stub is injected via `makeCache`, so no real
+  /// `/bin/zsh` subprocess is spawned.
   ///
   /// ## Why this test uses a second `TokenCache` instance (intentional)
-  /// `seededCache` is a *new* instance, not `cache` after store-seeding. This
-  /// is deliberate — the test's scope is strictly "store resolution on a fresh
-  /// instance is unaffected by prior shell activity on a different instance."
-  /// Same-instance recovery (i.e. seed the store on the *existing* `cache`,
-  /// then call `token()` again without `invalidate()`) is NOT tested here
-  /// because that path requires an `invalidate()` call to clear the in-memory
-  /// nil and re-enter `resolveFromStore()`. That invariant is covered by
-  /// `invalidate_resetsShellOutcome` and `token_shellNotFound_doesNotLatch`.
-  /// The split is intentional; using a second instance here is not a gap.
-  ///
-  /// ## CI note
-  /// This test spawns /bin/zsh once, then resolves from the store. The .timeLimit
-  /// below makes the shell-spawn budget explicit and catches hangs on loaded runners.
+  /// `seededCache` is a new instance, not `cache` after store-seeding. The
+  /// scope is strictly: store resolution on a fresh instance is unaffected by
+  /// a prior shell-path attempt on a different instance. Same-instance recovery
+  /// is covered by `invalidate_resetsShellOutcome`.
   @Test
   func token_freshCacheAfterShellPath_storeTokenResolves() async {
     await withCleanEnv {
@@ -311,28 +263,15 @@ struct GitHubTokenCacheTests {
     }
   }
 
-  /// After invalidate(), shellOutcome resets to .notAttempted so the next
-  /// token() call re-enters the shell path for exactly one fresh attempt.
+  /// After `invalidate()`, `shellOutcome` resets to `.notAttempted` so the
+  /// next `token()` call re-enters the shell path for a fresh attempt.
   ///
   /// ## What this test validates
-  /// That invalidate() resets shellOutcome (not just state.token). Under the
-  /// old Bool-based shellFailed design, both .notFound and .failed set the
-  /// flag — invalidate() was the only escape hatch for .failed outcomes.
-  /// Under the new enum design, .notFound never latches, so invalidate()'s
-  /// shellOutcome reset matters primarily for .failed — but the reset still
-  /// runs unconditionally and is tested here via the .notFound path (the only
-  /// path reachable without a loginShellToken injection point).
-  ///
-  /// ## Known gap
-  /// This test cannot distinguish "shell re-entered after invalidate" from
-  /// "shell re-entered because .notFound never latches" — both produce the
-  /// same nil return. The .failed latch reset by invalidate() is an untestable
-  /// invariant at this level; the injection seam is not worth adding — see the
-  /// rationale in `token_shellNotFound_doesNotLatch` above.
-  ///
-  /// ## CI note
-  /// This test spawns /bin/zsh twice. The .timeLimit below makes the budget
-  /// explicit and catches hangs on loaded runners.
+  /// That `invalidate()` resets `shellOutcome`, not just `state.token`. A
+  /// `.notFound` stub is injected so no real `/bin/zsh` subprocess is spawned.
+  /// The `.failed` latch reset is covered separately by
+  /// `token_shellFailed_latches` + `invalidate_resetsShellOutcome` exercised
+  /// with a `.failed` stub if needed — the seam makes it possible.
   @Test
   func invalidate_resetsShellOutcome() async {
     await withCleanEnv {
@@ -345,6 +284,35 @@ struct GitHubTokenCacheTests {
       // full chain — resolver is called again, returns .notFound, still nil.
       let second = await cache.token()
       #expect(second == nil)
+    }
+  }
+
+  /// After the shell resolver returns `.failed`, subsequent `token()` calls must
+  /// NOT re-enter the shell path — `.failed` IS a permanent latch.
+  ///
+  /// ## What this test validates
+  /// A `.failed` stub is injected for the first call. After `token()` records
+  /// `.failed`, it must short-circuit on the second call without invoking the
+  /// resolver again — confirmed by the call-count assertion.
+  @Test
+  func token_shellFailed_latches() async {
+    await withCleanEnv {
+      let counter = Mutex<Int>(0)
+      let cache = TokenCache(
+        tokenStore: MockTokenStore(initial: nil),
+        shellResolver: { _ in
+          counter.withLock { $0 += 1 }
+          return .failed
+        }
+      )
+      let first = await cache.token()
+      #expect(first == nil)
+      #expect(counter.withLock { $0 } == 1)
+
+      let second = await cache.token()
+      #expect(second == nil)
+      // Resolver must NOT be called again — .failed is latched.
+      #expect(counter.withLock { $0 } == 1)
     }
   }
 
