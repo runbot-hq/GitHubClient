@@ -298,6 +298,13 @@ public final class TokenCache: Sendable {
     /// double-write; the double Keychain read is idempotent and cheaper than
     /// an extra init lock.
     private func resolveFromStore() -> String? {
+        // The two failure modes (nil = no Keychain entry, empty = corrupted entry)
+        // are deliberately collapsed into one guard. Both are treated identically:
+        // return nil and fall through to the next resolution step. Separating them
+        // into two guards with distinct log messages adds branching for a distinction
+        // that has no actionable difference — the caller cannot recover differently
+        // based on nil vs. empty. The log message below covers both cases; if field
+        // diagnosis ever requires the distinction, split this guard at that point.
         guard let token = tokenStore.load(), !token.isEmpty else {
             #if DEBUG
             logger?.log("TokenCache › token store returned nil or empty", category: "transport")

@@ -248,12 +248,16 @@ struct GitHubTokenCacheTests {
   /// instance. The .failed latch specifically is an untestable invariant at
   /// this level; tracked for a future loginShellToken injection seam in issue #69.
   ///
-  /// ## What this test does NOT validate
-  /// Same-instance recovery after .notFound: this test creates a separate
-  /// seededCache rather than re-using `cache`. That recovery path is exercised
-  /// by token_shellNotFound_doesNotLatch (re-entry) and invalidate_resetsShellOutcome
-  /// (reset path). This test's scope is strictly: "store resolution on a fresh
-  /// instance is unaffected by prior shell activity elsewhere."
+  /// ## Why this test uses a second `TokenCache` instance (intentional)
+  /// `seededCache` is a *new* instance, not `cache` after store-seeding. This
+  /// is deliberate — the test's scope is strictly "store resolution on a fresh
+  /// instance is unaffected by prior shell activity on a different instance."
+  /// Same-instance recovery (i.e. seed the store on the *existing* `cache`,
+  /// then call `token()` again without `invalidate()`) is NOT tested here
+  /// because that path requires an `invalidate()` call to clear the in-memory
+  /// nil and re-enter `resolveFromStore()`. That invariant is covered by
+  /// `invalidate_resetsShellOutcome` and `token_shellNotFound_doesNotLatch`.
+  /// The split is intentional; using a second instance here is not a gap.
   ///
   /// ## CI note
   /// This test spawns /bin/zsh once, then resolves from the store. The .timeLimit

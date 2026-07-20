@@ -71,6 +71,14 @@ public struct GitHubTransport: GitHubTransportProtocol {
 
   /// Creates a `GitHubTransport` with the given dependencies.
   ///
+  /// SOURCE-PACKAGE NOTE — `tokenProvider: async` is not an ABI break:
+  /// `GitHubClient` is distributed as an SPM source package (no `type: .dynamic`
+  /// in `Package.swift`). Every consumer recompiles from source, so there is no
+  /// binary ABI to break. Additionally, Swift auto-promotes a synchronous
+  /// `@Sendable () -> String?` closure to `@Sendable () async -> String?` at the
+  /// call site — existing callers that pass a sync closure continue to compile
+  /// without modification. No semver bump is required for this change.
+  ///
   /// WHY `tokenProvider` HAS A `nil` DEFAULT:
   /// The `nil` default (resolved to `{ nil }` in the body) exists so that
   /// `GitHubTransport()` compiles in test and standalone contexts that do not
