@@ -56,6 +56,14 @@ private enum ShellResolutionOutcome {
     ///    most once per 60 s rather than on every poll cycle) could be added
     ///    here without a schema change. Collapsing to `.notAttempted` would
     ///    require a new case or a separate field at that point.
+    ///
+    /// ## Poll cost for OAuth-only Finder-launch users
+    /// An OAuth-only user launched from Finder has no `GH_TOKEN` export, so
+    /// every poll cycle (~30 s) re-enters the shell path and spawns `/bin/zsh`.
+    /// This is a known accepted cost: the shell exits quickly (~50–200 ms) and
+    /// the user is unblocked the moment they add an export without relaunching.
+    /// The cooldown described in point 2 above is the right long-term fix and
+    /// is a schema-free addition when the cost proves unacceptable in practice.
     case notFound
     /// The shell timed out, failed to launch, or was blocked by the App Sandbox.
     /// The shell path IS latched — `token()` short-circuits before step 4 on
@@ -346,6 +354,12 @@ private enum ShellTokenResult {
 /// `github_pat_`, `ghs_`, etc.) are defined by GitHub and none begin with this
 /// sentinel. If GitHub ever issues a token format that starts with `GH_TOKEN_VALUE:`
 /// this assumption must be revisited.
+///
+/// printf argument safety: the token value is passed as the `%s` argument, not
+/// as part of the format string. Any `%` characters in the token value are not
+/// interpreted as format specifiers — only `%` in the format string itself
+/// would be. Real GitHub PAT formats do not contain `%`, but this is safe
+/// regardless of token content.
 private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 
 /// Spawns `/bin/zsh -i -l` to recover `GH_TOKEN` or `GITHUB_TOKEN` from the
@@ -389,6 +403,9 @@ private let shellTokenSentinel = "GH_TOKEN_VALUE:"
 /// `try?` would eat the error and fall through to the log + terminate() call,
 /// emitting a false "timed out" log on every successful resolution.
 /// `do { try … } catch { return nil }` exits cleanly on cancellation.
+/// Note: the `.failed` returned by the cancelled timeout arm is consumed by
+/// structured concurrency's implicit group teardown — it is never collected
+/// by a second `group.next()` call, and has no effect on the caller.
 ///
 /// ## group.next() first-result semantics — timeout-path token discard (intentional)
 /// `group.next()` returns whichever arm completes first. If the subprocess arm
@@ -593,6 +610,9 @@ private func loginShellToken(logger: (any GitHubLogger)?) async -> ShellTokenRes
             do {
                 try await Task.sleep(for: .seconds(10))
             } catch {
+                // CancellationError from group.cancelAll() when the subprocess arm won.
+                // The .failed return value here is consumed by structured concurrency's
+                // implicit group teardown — it is never collected and has no effect.
                 return .failed
             }
             logger?.log(
