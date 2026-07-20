@@ -77,6 +77,11 @@ public final class GitHubClient {
             scopes: scopes,
             logger: logger,
             session: URLSession.shared,
+            // Both callbacks call invalidate() so the next token() call re-resolves
+            // from the store after any credential change. Side-effect: a user whose
+            // shell is broken (.failed latch) will re-spawn /bin/zsh on the next
+            // token() call after *both* sign-in and sign-out — not just sign-out.
+            // Low-frequency and intentional; tracked in #68.
             onTokenSaved: { cache.invalidate() },
             onTokenDeleted: { cache.invalidate() }
         )
