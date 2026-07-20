@@ -56,8 +56,20 @@ private func withEnv(_ key: String, value: String, _ body: () async -> Void) asy
 struct GitHubTokenCacheTests {
 
   /// Builds a fresh `TokenCache` backed by an (optionally seeded) `MockTokenStore`.
-  private func makeCache(storeToken: String? = nil) -> TokenCache {
-    TokenCache(tokenStore: MockTokenStore(initial: storeToken))
+  ///
+  /// `shellResult` overrides the login-shell resolution step so tests never
+  /// spawn a real `/bin/zsh` subprocess. Defaults to `.notFound` (instant,
+  /// no I/O) which is correct for all nil-path and env-var tests. Pass
+  /// `.found("token")` or `.failed` for tests that exercise shell-specific
+  /// behaviour.
+  private func makeCache(
+    storeToken: String? = nil,
+    shellResult: ShellTokenResult = .notFound
+  ) -> TokenCache {
+    TokenCache(
+      tokenStore: MockTokenStore(initial: storeToken),
+      shellResolver: { _ in shellResult }
+    )
   }
 
   // MARK: - token() — nil path
@@ -241,16 +253,15 @@ struct GitHubTokenCacheTests {
   /// This test spawns `/bin/zsh` TWICE. On GitHub Actions runners `/bin/zsh` exits
   /// quickly (~200 ms per spawn). Total wall time ~400 ms. The `.timeLimit` below
   /// makes the budget explicit and catches hangs on loaded runners.
-  @Test(.timeLimit(.minutes(1)))
+  @Test
   func token_shellNotFound_doesNotLatch() async {
     await withCleanEnv {
-      let cache = makeCache()  // empty store, no env vars
-      // First call: shell spawns, finds no token, returns .notFound.
-      // shellOutcome set to .notFound — NOT a latch.
+      // Inject .notFound stub so no real /bin/zsh subprocess is spawned.
+      let cache = makeCache(shellResult: .notFound)
+      // First call: resolver returns .notFound, shellOutcome set to .notFound — NOT a latch.
       let first = await cache.token()
       #expect(first == nil)
-      // Second call: .notFound does not short-circuit — shell re-enters.
-      // Still nil (env still clean), but the path was re-entered.
+      // Second call: .notFound does not short-circuit — resolver is re-entered.
       let second = await cache.token()
       #expect(second == nil)
     }
@@ -285,16 +296,15 @@ struct GitHubTokenCacheTests {
   /// ## CI note
   /// This test spawns /bin/zsh once, then resolves from the store. The .timeLimit
   /// below makes the shell-spawn budget explicit and catches hangs on loaded runners.
-  @Test(.timeLimit(.minutes(1)))
+  @Test
   func token_freshCacheAfterShellPath_storeTokenResolves() async {
     await withCleanEnv {
-      let cache = makeCache()  // empty store, no env vars — forces shell path
-      // First call enters shell path (returns nil, .notFound outcome).
+      // Inject .notFound stub — exercises the shell path without spawning /bin/zsh.
+      let cache = makeCache(shellResult: .notFound)
       let first = await cache.token()
       #expect(first == nil)
-      // Seed the store with a token (simulates OAuth sign-in after Finder launch).
-      // A real TokenCache would call invalidate() on sign-in, but here we just
-      // confirm that a new cache instance resolves from store correctly.
+      // A new cache seeded with a store token resolves from store, unaffected by
+      // the prior shell outcome on a different instance.
       let seededCache = makeCache(storeToken: "store-token-after-shell")
       let second = await seededCache.token()
       #expect(second == "store-token-after-shell")
@@ -323,17 +333,16 @@ struct GitHubTokenCacheTests {
   /// ## CI note
   /// This test spawns /bin/zsh twice. The .timeLimit below makes the budget
   /// explicit and catches hangs on loaded runners.
-  @Test(.timeLimit(.minutes(1)))
+  @Test
   func invalidate_resetsShellOutcome() async {
     await withCleanEnv {
-      let cache = makeCache()  // empty store
-      // Enter shell path — returns nil (.notFound outcome, no latch).
+      // Inject .notFound stub — no real /bin/zsh spawn needed.
+      let cache = makeCache(shellResult: .notFound)
       let first = await cache.token()
       #expect(first == nil)
-      // Reset all state.
       cache.invalidate()
       // After invalidate(), outcome is .notAttempted. token() re-enters the
-      // full chain — shell re-spawns, finds nothing, returns nil again.
+      // full chain — resolver is called again, returns .notFound, still nil.
       let second = await cache.token()
       #expect(second == nil)
     }

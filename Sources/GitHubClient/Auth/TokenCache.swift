@@ -99,6 +99,14 @@ public final class TokenCache: Sendable {
     /// An optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
 
+    /// Resolves a token via the login shell.
+    ///
+    /// Defaults to the real `loginShellToken` free function. Overridable in
+    /// tests via the `shellResolver` init parameter so test suites never spawn
+    /// a real `/bin/zsh` subprocess — avoiding the 10-second timeout on
+    /// nil-path tests and keeping the suite fast on both local and CI runners.
+    let shellResolver: @Sendable ((any GitHubLogger)?) async -> ShellTokenResult
+
     /// Combined cache state guarded by a single `Mutex`.
     ///
     /// Both fields are mutated together so reads and writes are always consistent:
@@ -123,9 +131,21 @@ public final class TokenCache: Sendable {
     /// - Parameters:
     ///   - tokenStore: The backing store used to load/save/delete the token.
     ///   - logger: Optional logger for diagnostic messages.
-    public init(tokenStore: any TokenStore, logger: (any GitHubLogger)? = nil) {
+    ///   - shellResolver: Overrides the login-shell resolution step. Pass a
+    ///     stub in tests to avoid spawning a real `/bin/zsh` subprocess.
+    ///     Defaults to the real `loginShellToken` free function in production.
+    public convenience init(tokenStore: any TokenStore, logger: (any GitHubLogger)? = nil) {
+        self.init(tokenStore: tokenStore, logger: logger, shellResolver: nil)
+    }
+
+    init(
+        tokenStore: any TokenStore,
+        logger: (any GitHubLogger)? = nil,
+        shellResolver: (@Sendable ((any GitHubLogger)?) async -> ShellTokenResult)? = nil
+    ) {
         self.tokenStore = tokenStore
         self.logger = logger
+        self.shellResolver = shellResolver ?? { logger in await loginShellToken(logger: logger) }
     }
 
     // MARK: - Public API
@@ -215,7 +235,7 @@ public final class TokenCache: Sendable {
         // /bin/zsh — the latch is not set until loginShellToken returns.
         // Safe today (RunnerPoller is serial); see -Warning: above for the
         // full window and the fix if a concurrent caller is ever added.
-        let shellResult = await loginShellToken(logger: logger)
+        let shellResult = await shellResolver(logger)
         switch shellResult {
         case .found(let value):
             state.withLock { if $0.token == nil { $0.token = value } }
