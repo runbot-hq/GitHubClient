@@ -64,7 +64,7 @@ private enum ShellResolutionOutcome {
     /// the user is unblocked the moment they add an export without relaunching.
     /// The cooldown described in point 2 above is the right long-term fix and
     /// is a schema-free addition when the cost proves unacceptable in practice.
-    case notFound
+    case notFound  // TODO: #68 — add a timestamp-based cooldown so .notFound does not re-spawn /bin/zsh on every poll cycle (~30 s) for OAuth-only Finder-launch users
     /// The shell timed out, failed to launch, or was blocked by the App Sandbox.
     /// The shell path IS latched — `token()` short-circuits before step 4 on
     /// every subsequent call until `invalidate()` resets the outcome.
