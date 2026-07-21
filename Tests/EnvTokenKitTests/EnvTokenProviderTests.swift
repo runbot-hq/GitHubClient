@@ -140,6 +140,14 @@ struct EnvTokenProviderTests {
     /// `.failed` latches because retrying a broken or sandbox-blocked shell on every
     /// poll cycle (~30 s) would be a persistent background thread burn with no benefit.
     /// The latch is cleared only by an explicit `invalidate()` call (e.g. sign-out).
+    ///
+    /// ## Why this asserts on call count, not on the return value
+    /// The latch invariant is that the resolver is not called again — not that
+    /// `token()` returns nil. Asserting `second == nil` was a cross-suite env-var
+    /// race: another suite (GitHubTokenCache) can hold GH_TOKEN in the process
+    /// environment at the same suspension point, causing `resolveFromEnvironment()`
+    /// to fire before the latch check and return a non-nil value even when the latch
+    /// is working correctly. The call-count assertion is race-free and sufficient.
     @Test func envProvider_shellFailed_latches() async {
         await withCleanEnv {
             let resolverCallCount = Mutex<Int>(0)
