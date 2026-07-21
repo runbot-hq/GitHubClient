@@ -4,9 +4,8 @@ import Foundation
 import Synchronization
 
 @testable import GitHubClient
-// ⚠️ @testable import EnvTokenKit removed — StubEnvTokenProvider no longer
-// couples to EnvTokenKit's internal ShellTokenResult type. The stub now owns
-// its own result vocabulary via StubEnvResult below.
+import EnvTokenKit  // required: conformance declaration 'StubEnvTokenProvider: EnvTokenProviding' must
+                    // name the protocol through a direct import, not via GitHubClient's re-export.
 
 // MARK: - StubEnvResult
 
