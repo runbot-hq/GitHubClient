@@ -100,7 +100,7 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// exercise the shell-fallback path never touch the live process environment
     /// — eliminating the cross-suite `setenv`/`unsetenv` race on CI where
     /// `GITHUB_TOKEN` is always present in the runner environment.
-    let envLookup: @Sendable (String) -> String?
+    private let envLookup: @Sendable (String) -> String?
 
     /// Shell outcome state guarded by a `Mutex`.
     ///
