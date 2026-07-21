@@ -1,5 +1,5 @@
 // KeychainTokenStore.swift
-// OAuthTokenKit
+// GitHubClient
 
 import Foundation
 import Security

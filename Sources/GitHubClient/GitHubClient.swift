@@ -115,7 +115,7 @@ public final class GitHubClient {
     ///     `GitHubScopes.default`. Must not be empty. Use `GitHubScopes`
     ///     constants for type safety and discoverability.
     ///   - redirectURI: The OAuth redirect URI sent to GitHub during authorisation.
-    ///     Defaults to `OAuthService.defaultRedirectURI` (`GitHubConstants.oauthRedirectURI`).
+    ///     Defaults to `OAuthService.defaultRedirectURI` (`runbot://oauth/callback`).
     ///     Override for staging environments, white-label builds, or a second OAuth app.
     ///     Existing call sites are unaffected — omitting this parameter preserves current behaviour.
     ///   - logger: Optional logger for diagnostic messages.
@@ -148,7 +148,7 @@ public final class GitHubClient {
             tokenStore: store,
             scopes: scopes,
             redirectURI: redirectURI,
-            log: log,
+            logger: logger,
             session: URLSession.shared,
             // Both callbacks call invalidate() so the next token() call re-resolves
             // from the store after any credential change. invalidate() resets both
@@ -211,6 +211,9 @@ public final class GitHubClient {
     /// - Parameters:
     ///   - oauthService: A mock or stub conforming to `OAuthServiceProtocol`.
     ///   - transport: A mock or stub conforming to `GitHubTransportProtocol`.
+    ///   - tokenCache: An optional pre-configured `TokenCache`. When `nil` a
+    ///     `NullTokenStore`-backed cache is constructed automatically — suitable
+    ///     for tests that do not exercise the token-resolution path.
     public init(
         oauthService: any OAuthServiceProtocol,
         transport: any GitHubTransportProtocol,

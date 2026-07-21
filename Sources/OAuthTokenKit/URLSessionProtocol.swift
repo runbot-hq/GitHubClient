@@ -1,6 +1,5 @@
 // URLSessionProtocol.swift
-// OAuthTokenKit
-// Migrated from: Sources/GitHubClient/Auth/URLSessionProtocol.swift
+// GitHubClient
 import Foundation
 
 // MARK: - URLSessionProtocol

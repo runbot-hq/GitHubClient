@@ -1,5 +1,5 @@
 // OAuthService.swift
-// OAuthTokenKit
+// GitHubClient
 import Foundation
 
 // MARK: - OAuthService
@@ -29,17 +29,17 @@ public final class OAuthService: OAuthServiceProtocol {
     private let decoder = JSONDecoder()
     /// Shared `JSONEncoder` — reused across token-exchange encode calls.
     private let encoder = JSONEncoder()
-    /// The default OAuth redirect URI, sourced from `GitHubConstants.oauthRedirectURI`.
+    /// The default OAuth redirect URI for the RunBot OAuth app.
     /// Override via the `redirectURI` parameter on `OAuthService.init`.
-    public static let defaultRedirectURI: String = "runbot://oauth/callback"
+    public static let defaultRedirectURI: String = "runbot://oauth/callback" // NOSONAR
     /// The OAuth redirect URI. Must match the value registered in the GitHub OAuth app settings.
     private let redirectURI: String
     /// OAuth scopes requested during sign-in. Set at init time via the `scopes` parameter.
     private let scopes: [String]
     /// GitHub OAuth authorisation URL.
-    private let authorizeURL = "https://github.com/login/oauth/authorize"
+    private let authorizeURL = "https://github.com/login/oauth/authorize" // NOSONAR
     /// GitHub OAuth token-exchange URL.
-    private let accessTokenURL = "https://github.com/login/oauth/access_token"
+    private let accessTokenURL = "https://github.com/login/oauth/access_token" // NOSONAR
     /// CSRF nonce generated in makeSignInURL(), verified in handleCallback(). Cleared after use.
     private var pendingState: String?
 
@@ -54,8 +54,8 @@ public final class OAuthService: OAuthServiceProtocol {
     private let clientSecret: String
     /// The backing store used to save/delete/load the OAuth token.
     private let tokenStore: any TokenStore
-    /// Optional log closure for diagnostic messages.
-    private let log: (@Sendable (String, String) -> Void)?
+    /// Optional logger for diagnostic messages.
+    private let logger: (any GitHubLogger)?
     /// The `URLSessionProtocol` used for token-exchange network calls. Defaults to `URLSession.shared`.
     /// Injected at init time so tests can supply a mock session without swizzling.
     private let session: any URLSessionProtocol
@@ -76,15 +76,14 @@ public final class OAuthService: OAuthServiceProtocol {
     ///     scopes array is a programming error, not a runtime condition).
     ///     Use `GitHubScopes` constants for type safety and discoverability.
     ///   - redirectURI: The OAuth redirect URI sent to GitHub during authorisation. Defaults to
-    ///     `OAuthService.defaultRedirectURI` (i.e. `GitHubConstants.oauthRedirectURI`).
+    ///     `OAuthService.defaultRedirectURI` (`runbot://oauth/callback`).
     ///     Override for staging environments, white-label builds, or a second OAuth app.
     ///     No `precondition` guards against an empty string — an empty URI is a runtime
     ///     misconfiguration, not a programming error; GitHub will reject it at authorisation
     ///     time with a descriptive error. This is intentionally asymmetric with the `scopes`
     ///     guard (an empty scopes array has no recoverable fallback; an empty URI does).
     ///     Existing call sites that omit this parameter are unaffected.
-    ///   - log: Optional log closure `(message, category)` for diagnostic messages.
-    ///     Bridged from `GitHubLogger` by `GitHubClient.swift` at wiring time.
+    ///   - logger: Optional logger for diagnostic messages.
     ///   - session: The `URLSessionProtocol` used for token-exchange requests. Defaults to `URLSession.shared`.
     ///     Inject a `MockURLSession` in tests to avoid real network calls.
     ///   - onTokenSaved: Optional callback invoked after a successful token save.
@@ -99,7 +98,7 @@ public final class OAuthService: OAuthServiceProtocol {
         tokenStore: any TokenStore,
         scopes: [String] = GitHubScopes.default,
         redirectURI: String = OAuthService.defaultRedirectURI,
-        log: (@Sendable (String, String) -> Void)? = nil,
+        logger: (any GitHubLogger)? = nil,
         session: any URLSessionProtocol = URLSession.shared,
         onTokenSaved: (() -> Void)? = nil,
         onTokenDeleted: (() -> Void)? = nil
@@ -110,7 +109,7 @@ public final class OAuthService: OAuthServiceProtocol {
         self.clientID = clientID
         self.clientSecret = clientSecret
         self.tokenStore = tokenStore
-        self.log = log
+        self.logger = logger
         self.session = session
         self.onTokenSaved = onTokenSaved
         self.onTokenDeleted = onTokenDeleted
@@ -178,7 +177,7 @@ public final class OAuthService: OAuthServiceProtocol {
 
     /// Yields `success` to every registered sign-in continuation.
     private func fireSignIn(_ success: Bool) {
-        log?("OAuthService › fireSignIn — success=\(success), consumers=\(signInContinuations.count)", "transport")
+        logger?.log("OAuthService › fireSignIn — success=\(success), consumers=\(signInContinuations.count)", category: "transport")
         signInContinuations.values.forEach { $0.yield(success) }
     }
 
@@ -186,11 +185,11 @@ public final class OAuthService: OAuthServiceProtocol {
 
     /// Builds a GitHub OAuth authorize URL with a CSRF state nonce.
     public func makeSignInURL() -> URL? {
-        log?("OAuthService › makeSignInURL — building OAuth URL", "transport")
+        logger?.log("OAuthService › makeSignInURL — building OAuth URL", category: "transport")
         let state = UUID().uuidString
         pendingState = state
         guard var comps = URLComponents(string: authorizeURL) else {
-            log?("OAuthService › makeSignInURL: malformed authorizeURL — aborting", "transport")
+            logger?.log("OAuthService › makeSignInURL: malformed authorizeURL — aborting", category: "transport")
             pendingState = nil
             return nil
         }
@@ -201,11 +200,11 @@ public final class OAuthService: OAuthServiceProtocol {
             URLQueryItem(name: "state", value: state)
         ]
         guard let url = comps.url else {
-            log?("OAuthService › makeSignInURL: failed to build URL — aborting", "transport")
+            logger?.log("OAuthService › makeSignInURL: failed to build URL — aborting", category: "transport")
             pendingState = nil
             return nil
         }
-        log?("OAuthService › makeSignInURL — URL built, returning to caller", "transport")
+        logger?.log("OAuthService › makeSignInURL — URL built, returning to caller", category: "transport")
         return url
     }
 
@@ -222,15 +221,15 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Permanent UI lock-out is a worse failure mode than a recoverable ghost
     /// entry, so we always proceed.
     public func signOut() {
-        log?("OAuthService › signOut — called, pendingState=\(pendingState != nil ? "set" : "nil")", "transport")
+        logger?.log("OAuthService › signOut — called, pendingState=\(pendingState != nil ? "set" : "nil")", category: "transport")
         pendingState = nil
         let deleted = tokenStore.delete()
-        log?("OAuthService › signOut — tokenStore.delete result=\(deleted)", "transport")
+        logger?.log("OAuthService › signOut — tokenStore.delete result=\(deleted)", category: "transport")
         if !deleted {
-            log?("OAuthService › signOut — tokenStore.delete failed (best-effort); proceeding with cache clear and sign-out event", "transport")
+            logger?.log("OAuthService › signOut — tokenStore.delete failed (best-effort); proceeding with cache clear and sign-out event", category: "transport")
         }
         onTokenDeleted?()
-        log?("OAuthService › signOut — emitting didSignOut to \(signOutContinuations.count) consumer(s)", "transport")
+        logger?.log("OAuthService › signOut — emitting didSignOut to \(signOutContinuations.count) consumer(s)", category: "transport")
         signOutContinuations.values.forEach { $0.yield(()) }
     }
 
@@ -245,10 +244,10 @@ public final class OAuthService: OAuthServiceProtocol {
         // parameter which is sensitive for a short window. Never log url.absoluteString
         // or url.query here; doing so would leak the live credential into unified logs.
         let safeURL = "\(url.scheme ?? "")://\(url.host ?? "")"
-        log?("OAuthService › handleCallback — url=\(safeURL)", "transport")
+        logger?.log("OAuthService › handleCallback — url=\(safeURL)", category: "transport")
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let code = comps.queryItems?.first(where: { $0.name == "code" })?.value else {
-            log?("OAuthService › handleCallback — missing code param, calling fireSignIn(false)", "transport")
+            logger?.log("OAuthService › handleCallback — missing code param, calling fireSignIn(false)", category: "transport")
             // Bug fix (PR #55): clear the nonce even on a codeless callback.
             // Without this, a codeless redirect (no `code` param) left pendingState
             // populated, allowing a second callback with the same state to reuse the
@@ -259,18 +258,18 @@ public final class OAuthService: OAuthServiceProtocol {
             return
         }
         guard let returnedState = comps.queryItems?.first(where: { $0.name == "state" })?.value else {
-            log?("OAuthService › handleCallback: no state param in redirect URL", "transport")
+            logger?.log("OAuthService › handleCallback: no state param in redirect URL", category: "transport")
             pendingState = nil
             fireSignIn(false)
             return
         }
         guard returnedState == pendingState else {
-            log?("OAuthService › handleCallback: state mismatch — possible CSRF attempt, rejecting", "transport")
+            logger?.log("OAuthService › handleCallback: state mismatch — possible CSRF attempt, rejecting", category: "transport")
             pendingState = nil
             fireSignIn(false)
             return
         }
-        log?("OAuthService › handleCallback — state OK, exchanging code", "transport")
+        logger?.log("OAuthService › handleCallback — state OK, exchanging code", category: "transport")
         pendingState = nil
         Task { await exchangeCode(code) }
     }
@@ -286,12 +285,12 @@ public final class OAuthService: OAuthServiceProtocol {
     /// 5. Calls `onTokenSaved` to allow callers to invalidate external caches.
     /// 6. Notifies sign-in consumers of the result.
     private func exchangeCode(_ code: String) async {
-        log?("OAuthService › exchangeCode — POST to GitHub", "transport")
+        logger?.log("OAuthService › exchangeCode — POST to GitHub", category: "transport")
         let req: URLRequest
         do {
             req = try makeTokenRequest(code: code)
         } catch {
-            log?("OAuthService › exchangeCode: failed to encode request body — aborting", "transport")
+            logger?.log("OAuthService › exchangeCode: failed to encode request body — aborting", category: "transport")
             fireSignIn(false)
             return
         }
@@ -299,7 +298,7 @@ public final class OAuthService: OAuthServiceProtocol {
         do {
             data = try await fetchTokenData(request: req)
         } catch {
-            log?("OAuthService › exchangeCode: network error — \(error.localizedDescription), calling fireSignIn(false)", "transport")
+            logger?.log("OAuthService › exchangeCode: network error — \(error.localizedDescription), calling fireSignIn(false)", category: "transport")
             fireSignIn(false)
             return
         }
@@ -307,7 +306,7 @@ public final class OAuthService: OAuthServiceProtocol {
         do {
             response = try decoder.decode(OAuthTokenResponse.self, from: data)
         } catch {
-            log?("OAuthService › exchangeCode: decode error — \(error.localizedDescription), calling fireSignIn(false)", "transport")
+            logger?.log("OAuthService › exchangeCode: decode error — \(error.localizedDescription), calling fireSignIn(false)", category: "transport")
             fireSignIn(false)
             return
         }
@@ -315,13 +314,13 @@ public final class OAuthService: OAuthServiceProtocol {
             fireSignIn(false)
             return
         }
-        log?("OAuthService › exchangeCode — got access_token (len=\(token.count)), saving to store", "transport")
+        logger?.log("OAuthService › exchangeCode — got access_token (len=\(token.count)), saving to store", category: "transport")
         let saved = tokenStore.save(token)
-        log?("OAuthService › exchangeCode — tokenStore.save result=\(saved), calling fireSignIn(\(saved))", "transport")
+        logger?.log("OAuthService › exchangeCode — tokenStore.save result=\(saved), calling fireSignIn(\(saved))", category: "transport")
         if saved {
             onTokenSaved?()
         } else {
-            log?("OAuthService › exchangeCode: tokenStore.save failed", "transport")
+            logger?.log("OAuthService › exchangeCode: tokenStore.save failed", category: "transport")
         }
         fireSignIn(saved)
     }
@@ -356,11 +355,11 @@ public final class OAuthService: OAuthServiceProtocol {
     private func handleTokenResponse(_ response: OAuthTokenResponse) -> String? {
         if let errorCode = response.error {
             let desc = response.errorDescription ?? ""
-            log?("OAuthService › exchangeCode: GitHub error=\(errorCode) \(desc)", "transport")
+            logger?.log("OAuthService › exchangeCode: GitHub error=\(errorCode) \(desc)", category: "transport")
             return nil
         }
         guard let token = response.accessToken, !token.isEmpty else {
-            log?("OAuthService › exchangeCode: no access_token in response — keys=\(response.debugKeys)", "transport")
+            logger?.log("OAuthService › exchangeCode: no access_token in response — keys=\(response.debugKeys)", category: "transport")
             return nil
         }
         return token

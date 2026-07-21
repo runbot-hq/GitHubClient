@@ -1,5 +1,5 @@
 // TokenStore.swift
-// OAuthTokenKit
+// GitHubClient
 import Foundation
 
 // MARK: - TokenStore
@@ -58,6 +58,7 @@ public protocol TokenStore: Sendable {
 /// `public` visibility is required so both `GitHubClient` and its test targets
 /// can construct it without a test-target dependency.
 public struct NullTokenStore: TokenStore, Sendable {
+    /// Creates a new `NullTokenStore`.
     public init() {}
     /// Always returns `nil` — no token is stored.
     public nonisolated func load() -> String? { nil }

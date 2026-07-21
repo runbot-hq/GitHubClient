@@ -1,5 +1,5 @@
 // OAuthServicing.swift
-// OAuthTokenKit
+// GitHubClient
 import Foundation
 
 // MARK: - OAuthServiceProtocol
