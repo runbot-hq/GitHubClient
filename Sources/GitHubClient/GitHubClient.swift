@@ -1,6 +1,7 @@
 // GitHubClient.swift
 // GitHubClient
 import Foundation
+internal import EnvTokenKit
 
 // MARK: - GitHubClient
 //
@@ -98,10 +99,11 @@ public final class GitHubClient {
 
     /// Creates a fully wired `GitHubClient` backed by the macOS Keychain.
     ///
-    /// Internally constructs one `KeychainTokenStore`, one `TokenCache`, one
-    /// `OAuthService`, and one `GitHubTransport` — all sharing the same token
-    /// path. `TokenCache.invalidate()` is called automatically after every
-    /// successful sign-in and sign-out.
+    /// Internally constructs one `KeychainTokenStore`, one `EnvTokenProvider`,
+    /// one `TokenCache`, one `OAuthService`, and one `GitHubTransport` — all
+    /// sharing the same token path. `TokenCache.invalidate()` is called
+    /// automatically after every successful sign-in and sign-out, which resets
+    /// both the in-memory token cache and `EnvTokenProvider`'s shell outcome latch.
     ///
     /// - Parameters:
     ///   - clientID: The GitHub OAuth app client ID.
@@ -126,8 +128,17 @@ public final class GitHubClient {
         redirectURI: String = OAuthService.defaultRedirectURI,
         logger: (any GitHubLogger)? = nil
     ) {
+        // Bridge GitHubLogger → log closure for kit injection.
+        // GitHubLogger stays in GitHubClient/Transport — kits are closure-injected
+        // to avoid any shared logger dependency between targets.
+        let log: (@Sendable (String, String) -> Void)? = logger.map { l in
+            { message, category in l.log(message, category: category) }
+        }
         let store = KeychainTokenStore(service: service, account: account, logger: logger)
-        let cache = TokenCache(tokenStore: store, logger: logger)
+        // EnvTokenProvider is the only EnvTokenKit concrete type named in this file.
+        // TokenCache knows only `any EnvTokenProviding` — see TokenCache Boundary Rule in #74.
+        let envProvider = EnvTokenProvider(log: log)
+        let cache = TokenCache(tokenStore: store, logger: logger, envProvider: envProvider)
         let oauth = OAuthService(
             clientID: clientID,
             clientSecret: clientSecret,
@@ -137,10 +148,12 @@ public final class GitHubClient {
             logger: logger,
             session: URLSession.shared,
             // Both callbacks call invalidate() so the next token() call re-resolves
-            // from the store after any credential change. Side-effect: a user whose
-            // shell is broken (.failed latch) will re-spawn /bin/zsh on the next
-            // token() call after *both* sign-in and sign-out — not just sign-out.
-            // Low-frequency and intentional; tracked in #68.
+            // from the store after any credential change. invalidate() resets both
+            // the in-memory token cache AND EnvTokenProvider's shell outcome latch —
+            // see EnvTokenProvider.invalidate() for the full .failed vs .notFound
+            // reset policy. Side-effect: a user whose shell is broken (.failed latch)
+            // will re-spawn /bin/zsh on the next token() call after *both* sign-in
+            // and sign-out — not just sign-out. Low-frequency and intentional; tracked in #68.
             onTokenSaved: { cache.invalidate() },
             onTokenDeleted: { cache.invalidate() }
         )
