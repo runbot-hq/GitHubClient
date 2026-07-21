@@ -222,7 +222,11 @@ public final class TokenCache: Sendable {
 /// Injected by `TokenCache.init(tokenStore:)` (the test convenience init)
 /// when the caller does not supply a real provider. Always returns `nil`
 /// from `token()` and ignores `invalidate()` calls.
-private struct NullEnvTokenProvider: EnvTokenProviding {
+///
+/// `internal` (not `private`) so that `EnvTokenKit` test targets and any
+/// `GitHubClient` wrapper that builds its own `TokenCache` can inject it
+/// explicitly without needing a full stub conformance.
+internal struct NullEnvTokenProvider: EnvTokenProviding {
     /// Always returns `nil` — no env var or shell resolution is performed.
     func token() async -> String? { nil }
     /// No-op — there is no state to reset.
