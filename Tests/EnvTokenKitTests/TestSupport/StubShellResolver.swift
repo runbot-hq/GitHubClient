@@ -24,9 +24,9 @@ final class SendableCounter: @unchecked Sendable {
 /// Returns a shell resolver closure that always returns `result` and
 /// increments `counter` on each invocation.
 ///
-/// `counter` is consumed into a local `let` before the closure is formed so
-/// the `@Sendable` closure captures the local binding, not the parameter.
-/// `Mutex` is `Sendable`, so the capture is safe across concurrency domains.
+/// `SendableCounter` is a `final class` marked `@unchecked Sendable`, so the
+/// `@Sendable` closure captures the reference safely across concurrency domains.
+/// The internal `Mutex` guards the count against concurrent increments.
 ///
 /// ## Usage
 ///     let counter = SendableCounter()
@@ -37,9 +37,8 @@ func countingResolver(
     returning result: ShellTokenResult,
     counter: SendableCounter
 ) -> @Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult {
-    let _counter = consume counter
-    return { _ in
-        _counter.withLock { $0 += 1 }
+    { _ in
+        counter.increment()
         return result
     }
 }
