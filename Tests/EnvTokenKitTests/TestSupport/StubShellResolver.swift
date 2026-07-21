@@ -28,6 +28,7 @@ final class SendableCounter: @unchecked Sendable {
 /// `@Sendable` closure captures the reference safely across concurrency domains.
 /// The internal `Mutex` guards the count against concurrent increments.
 ///
+
 /// ## Usage
 ///     let counter = SendableCounter()
 ///     let provider = EnvTokenProvider(
