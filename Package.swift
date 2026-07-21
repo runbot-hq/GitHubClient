@@ -11,7 +11,10 @@ let package = Package(
             name: "EnvTokenKit",
             targets: ["EnvTokenKit"]
         ),
-        // OAuthTokenKit product added in Step 7
+        .library(
+            name: "OAuthTokenKit",
+            targets: ["OAuthTokenKit"]
+        ),
         .library(
             name: "GitHubClient",
             targets: ["GitHubClient"]
@@ -26,9 +29,16 @@ let package = Package(
             ]
         ),
         .target(
+            name: "OAuthTokenKit",
+            path: "Sources/OAuthTokenKit",
+            // No dependency on EnvTokenKit — completely independent peer target
+            swiftSettings: [
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault")
+            ]
+        ),
+        .target(
             name: "GitHubClient",
-            // OAuthTokenKit dependency added in Step 7
-            dependencies: ["EnvTokenKit"],
+            dependencies: ["EnvTokenKit", "OAuthTokenKit"],
             path: "Sources/GitHubClient",
             exclude: ["README.md"],
             swiftSettings: [
