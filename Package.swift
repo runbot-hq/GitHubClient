@@ -52,6 +52,14 @@ let package = Package(
             swiftSettings: [
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault")
             ]
+        ),
+        .testTarget(
+            name: "OAuthTokenKitTests",
+            dependencies: ["OAuthTokenKit"],
+            path: "Tests/OAuthTokenKitTests",
+            swiftSettings: [
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault")
+            ]
         )
     ]
 )
