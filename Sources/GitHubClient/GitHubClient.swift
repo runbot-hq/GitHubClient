@@ -2,6 +2,7 @@
 // GitHubClient
 import Foundation
 internal import EnvTokenKit
+internal import OAuthTokenKit
 
 // MARK: - GitHubClient
 //
@@ -134,7 +135,9 @@ public final class GitHubClient {
         let log: (@Sendable (String, String) -> Void)? = logger.map { l in
             { message, category in l.log(message, category: category) }
         }
-        let store = KeychainTokenStore(service: service, account: account, logger: logger)
+        // KeychainTokenStore and OAuthService are OAuthTokenKit concrete types.
+        // internal import OAuthTokenKit ensures they never leak into GitHubClient's public API.
+        let store = KeychainTokenStore(service: service, account: account, log: log)
         // EnvTokenProvider is the only EnvTokenKit concrete type named in this file.
         // TokenCache knows only `any EnvTokenProviding` — see TokenCache Boundary Rule in #74.
         let envProvider = EnvTokenProvider(log: log)
@@ -145,7 +148,7 @@ public final class GitHubClient {
             tokenStore: store,
             scopes: scopes,
             redirectURI: redirectURI,
-            logger: logger,
+            log: log,
             session: URLSession.shared,
             // Both callbacks call invalidate() so the next token() call re-resolves
             // from the store after any credential change. invalidate() resets both
