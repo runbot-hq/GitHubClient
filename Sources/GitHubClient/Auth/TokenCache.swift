@@ -107,6 +107,14 @@ public final class TokenCache: Sendable {
     /// 3. `GH_TOKEN` / `GITHUB_TOKEN` process environment — covers terminal / CI launches
     /// 4. Login shell subprocess — cold Finder/Dock/login-item launch only
     ///
+    /// ## Why `async` when steps 1–3 are synchronous
+    /// Steps 1–3 are synchronous and return without ever suspending. The function
+    /// is `async` solely because step 4 (`loginShellToken`, inside `EnvTokenProvider`)
+    /// is unavoidably async — it uses `@concurrent` + `withTaskGroup` + `waitUntilExit()`.
+    /// Swift does not allow a non-async function to call an async one. The cost of the
+    /// `async` declaration on the warm path is a single actor-hop check — negligible
+    /// compared to any Keychain or subprocess I/O.
+    ///
     /// Returns `nil` if no token is available from any source.
     ///
     /// ## Why `async` when steps 1–3 are synchronous
@@ -140,6 +148,20 @@ public final class TokenCache: Sendable {
     ///
     /// Call after saving a new token or after sign-out so the next `token()`
     /// call re-resolves from the store or shell.
+    ///
+    /// Resetting `envProvider` here is intentional: a sign-out / sign-in cycle
+    /// should get exactly one fresh shell attempt on the next `token()` call,
+    /// even if the previous attempt timed out. Without this reset the user would
+    /// be permanently locked out of the shell path for the process lifetime after
+    /// a single `.failed` outcome, regardless of whether they subsequently fix
+    /// their `~/.zshrc` or reduce its startup cost.
+    ///
+    /// Note the latency cost on `.failed` reset: the re-spawned shell adds
+    /// ~50–200 ms to the first poll cycle after sign-out on an affected launch
+    /// configuration. This cost recurs on every sign-out cycle (each `invalidate()`
+    /// resets the outcome), not just once per process lifetime. It is cached
+    /// immediately on success, so only the first `token()` call after each
+    /// `invalidate()` pays the penalty.
     public func invalidate() {
         state.withLock { $0 = nil }
         envProvider.invalidate()
@@ -171,7 +193,21 @@ public final class TokenCache: Sendable {
 
     /// Loads the token from the `TokenStore`, populates the cache on success, and returns it.
     ///
-    /// Empty strings are treated as absent (corrupted Keychain entry).
+    /// Empty strings are treated as absent (e.g. corrupted Keychain entry).
+    ///
+    /// ## Cache-write side effect (not a pure read)
+    /// Writes to `state` on success. Named `resolveFrom…` to signal the
+    /// resolve-and-cache pattern; the write is the meaningful side-effect,
+    /// not the return value.
+    ///
+    /// ## Why the two failure modes are collapsed
+    /// Both `nil` (no Keychain entry) and empty string (corrupted entry) are
+    /// treated identically: return nil and fall through to the next resolution
+    /// step. Separating them into two guards with distinct log messages adds
+    /// branching for a distinction that has no actionable difference — the caller
+    /// cannot recover differently based on nil vs. empty. The log message below
+    /// covers both cases; if field diagnosis ever requires the distinction, split
+    /// this guard at that point.
     private func resolveFromStore() -> String? {
         guard let token = tokenStore.load(), !token.isEmpty else {
             #if DEBUG
