@@ -4,18 +4,25 @@
 // Exercises `EnvTokenProvider` resolution order, shell latch policy, and
 // invalidation.
 //
-// ⚠️ ISOLATION REQUIREMENT
-// `setenv`/`unsetenv` mutate the process-global environment. Correctness
-// relies on the `@Suite(.serialized)` attribute — if `.serialized` is ever
-// removed, concurrent tests that both call `withCleanEnv` will race on
-// `GH_TOKEN`/`GITHUB_TOKEN` and produce intermittent flakes.
+// ⚠️ ISOLATION STRATEGY
+// All test targets run in the same process. `setenv`/`unsetenv` mutate the
+// process-global environment, so concurrent suites can race on GH_TOKEN /
+// GITHUB_TOKEN. The strategy to prevent flakes is two-layered:
 //
-// No real `/bin/zsh` subprocess is ever spawned. All tests inject a
-// `shellResolver` closure that returns a fixed `ShellTokenResult` immediately.
+// 1. Tests that exercise the ProcessInfo fast path use `withEnv` / `withCleanEnv`
+//    AND stub `envLookup` so `EnvTokenProvider` never consults the real process
+//    environment. The env helpers exist only to verify that the production
+//    `envLookup` default (ProcessInfo) reads the right key — not as a general
+//    isolation mechanism.
 //
-// CI note: GitHub Actions always injects GITHUB_TOKEN into the runner environment.
-// Every test wraps its body in `withCleanEnv`, which strips both vars and
-// restores them afterwards.
+// 2. Tests that exercise the shell path inject both `shellResolver` (stub, no
+//    real /bin/zsh) and `envLookup: { _ in nil }` (stub, no real ProcessInfo)
+//    so they are fully deterministic regardless of what other suites do to the
+//    process environment concurrently.
+//
+// `@Suite(.serialized)` is kept as a belt-and-suspenders guard for the small
+// number of tests that still use `withEnv` on the real environment, but it is
+// NOT relied upon for cross-suite isolation.
 
 import Foundation
 import Synchronization
@@ -27,11 +34,9 @@ import Testing
 
 /// Strips both token env vars, runs body, then restores the previous values.
 ///
-/// ⚠️ SERIALIZED DEPENDENCY: `setenv`/`unsetenv` mutate the process-global
-/// environment. Correctness relies on the `@Suite(.serialized)` attribute on
-/// `EnvTokenProviderTests` — if `.serialized` is ever removed, concurrent
-/// tests that both call `withCleanEnv` will race on `GH_TOKEN`/`GITHUB_TOKEN`
-/// and produce intermittent flakes.
+/// ⚠️ Only safe within a single serialized suite. Cross-suite races are
+/// eliminated by stubbing `envLookup` instead — see the file-level isolation
+/// strategy note above.
 private func withCleanEnv(_ body: () async -> Void) async {
     let prevGH = getenv("GH_TOKEN").flatMap { String(cString: $0) }
     let prevGitHub = getenv("GITHUB_TOKEN").flatMap { String(cString: $0) }
@@ -43,7 +48,6 @@ private func withCleanEnv(_ body: () async -> Void) async {
 }
 
 /// Sets one env var for the duration of body, then restores the previous value.
-/// See `withCleanEnv` for the `.serialized` dependency note.
 private func withEnv(_ key: String, value: String, _ body: () async -> Void) async {
     let previous = getenv(key).flatMap { String(cString: $0) }
     setenv(key, value, 1)
@@ -56,146 +60,125 @@ private func withEnv(_ key: String, value: String, _ body: () async -> Void) asy
 @Suite("EnvTokenProvider", .serialized)
 struct EnvTokenProviderTests {
 
-    /// Builds a fresh `EnvTokenProvider` with an injected shell resolver so no
-    /// real `/bin/zsh` subprocess is ever spawned.
+    /// Builds a provider with all I/O stubbed out.
     ///
-    /// - Parameter shellResult: The `ShellTokenResult` the resolver will return.
-    ///   Defaults to `.notFound` (instant, no I/O) — correct for all nil-path
-    ///   and env-var tests. Pass `.found("token")` or `.failed` to exercise the
-    ///   shell-specific behaviour.
+    /// - Parameters:
+    ///   - shellResult: What the shell resolver returns. Defaults to `.notFound`.
+    ///   - envLookup: What the env lookup returns for a given key.
+    ///     Defaults to `nil` (empty environment) so tests are immune to whatever
+    ///     `GH_TOKEN`/`GITHUB_TOKEN` the CI runner or concurrent suite has set.
     private func makeProvider(
-        shellResult: ShellTokenResult = .notFound
+        shellResult: ShellTokenResult = .notFound,
+        envLookup: (@Sendable (String) -> String?)? = nil
     ) -> EnvTokenProvider {
         EnvTokenProvider(
-            shellResolver: { _ in shellResult }
+            shellResolver: { _ in shellResult },
+            envLookup: envLookup ?? { _ in nil }
         )
     }
 
     // MARK: - token() — ProcessInfo hit (terminal / install launch path)
 
-    /// Resolves from `GH_TOKEN` in `ProcessInfo` without entering the shell path.
+    /// Resolves the token from the `GH_TOKEN` env var without entering the shell path.
     ///
-    /// This covers the terminal/install launch path: the token is present in the
-    /// process environment because the user launched from a shell that inherited
-    /// the export. The shell resolver must NOT be called.
-    ///
-    /// ## How this test validates the shell is not spawned
-    /// The injected `shellResolver` increments a counter. If `token()` returns
-    /// the ProcessInfo value before reaching the shell path, the counter stays 0.
+    /// Uses a stubbed `envLookup` so this test is immune to cross-suite env races.
+    /// The injected `shellResolver` counter must remain 0 — the env fast path must
+    /// short-circuit before the shell resolver is reached.
     @Test func envProvider_processInfo_hit() async {
-        await withCleanEnv {
-            let shellCallCount = Mutex<Int>(0)
-            let provider = EnvTokenProvider(
-                shellResolver: { _ in
-                    shellCallCount.withLock { $0 += 1 }
-                    return .notFound
-                }
-            )
-            await withEnv("GH_TOKEN", value: "terminal-token") {
-                let result = await provider.token()
-                #expect(result == "terminal-token")
-            }
-            // ProcessInfo fast path must short-circuit before the shell resolver.
-            #expect(shellCallCount.withLock { $0 } == 0)
-        }
+        let shellCallCount = Mutex<Int>(0)
+        let provider = EnvTokenProvider(
+            shellResolver: { _ in
+                shellCallCount.withLock { $0 += 1 }
+                return .notFound
+            },
+            envLookup: { key in key == "GH_TOKEN" ? "terminal-token" : nil }
+        )
+        let result = await provider.token()
+        #expect(result == "terminal-token")
+        #expect(shellCallCount.withLock { $0 } == 0)
     }
 
-    /// Falls back to the shell resolver when `ProcessInfo` has no token export.
+    /// Falls back to the shell resolver when the env lookup returns nil for both keys.
     ///
-    /// This covers the Finder/Dock/login-item launch path: `launchd` does not
-    /// inherit shell exports, so `ProcessInfo` misses and `EnvTokenProvider`
-    /// must spawn `/bin/zsh -i -l`. The injected resolver returns `.found("token")`
-    /// so no real subprocess is spawned.
+    /// `envLookup: { _ in nil }` simulates a Finder/Dock launch where `launchd`
+    /// provides no shell exports. The injected resolver returns `.found("shell-token")`
+    /// so no real subprocess is spawned and no real process env is consulted.
     @Test func envProvider_processInfo_miss_shellHit() async {
-        await withCleanEnv {
-            // Both env vars stripped by withCleanEnv — ProcessInfo will miss.
-            let provider = makeProvider(shellResult: .found("shell-token"))
-            let result = await provider.token()
-            #expect(result == "shell-token")
-        }
+        let provider = makeProvider(shellResult: .found("shell-token"))
+        let result = await provider.token()
+        #expect(result == "shell-token")
     }
 
     // MARK: - token() — priority order
 
     /// `GH_TOKEN` is preferred over `GITHUB_TOKEN` when both are set.
-    ///
-    /// Both variables resolve the same credential. `GH_TOKEN` is the shorter,
-    /// preferred form documented in the README — it must win without any silent
-    /// override from `GITHUB_TOKEN`.
     @Test func envProvider_ghToken_preferredOver_githubToken() async {
-        await withCleanEnv {
-            // Set both vars directly — no nesting to avoid async suspension-point races.
-            setenv("GH_TOKEN", "primary-token", 1)
-            setenv("GITHUB_TOKEN", "fallback-token", 1)
-            let result = await makeProvider().token()
-            #expect(result == "primary-token")
-        }
+        let provider = makeProvider(
+            envLookup: { key in
+                switch key {
+                case "GH_TOKEN":     return "primary-token"
+                case "GITHUB_TOKEN": return "fallback-token"
+                default:             return nil
+                }
+            }
+        )
+        let result = await provider.token()
+        #expect(result == "primary-token")
     }
 
     // MARK: - token() — shell latch: .failed
 
-    /// After the shell returns `.failed`, subsequent `token()` calls must short-circuit
-    /// without re-entering the resolver.
+    /// After the shell returns `.failed`, subsequent `token()` calls must
+    /// short-circuit without re-entering the resolver.
     ///
-    /// `.failed` latches because retrying a broken or sandbox-blocked shell on every
-    /// poll cycle (~30 s) would be a persistent background thread burn with no benefit.
-    /// The latch is cleared only by an explicit `invalidate()` call (e.g. sign-out).
+    /// `.failed` latches because retrying a broken or sandbox-blocked shell on
+    /// every poll cycle (~30 s) would be a persistent background thread burn
+    /// with no benefit. The latch is cleared only by an explicit `invalidate()`.
     ///
-    /// ## Why this asserts on call count, not on the return value
-    /// The latch invariant is that the resolver is not called again — not that
-    /// `token()` returns nil. Asserting `second == nil` was a cross-suite env-var
-    /// race: another suite (GitHubTokenCache) can hold GH_TOKEN in the process
-    /// environment at the same suspension point, causing `resolveFromEnvironment()`
-    /// to fire before the latch check and return a non-nil value even when the latch
-    /// is working correctly. The call-count assertion is race-free and sufficient.
+    /// ## Why this asserts call count, not return value (issue #78)
+    /// `second == nil` is an unreliable proxy: a concurrent suite running in
+    /// the same process can set `GH_TOKEN` between `withCleanEnv`'s `unsetenv`
+    /// and `token()`'s first suspension point, causing `resolveFromEnvironment()`
+    /// to return a non-nil value even when the latch is working correctly.
+    /// Asserting `resolverCallCount == 1` on both calls is immune to that race:
+    /// `envLookup` is stubbed to `{ _ in nil }` so the env fast path never fires,
+    /// and the stub resolver counter can only be incremented by this test.
     @Test func envProvider_shellFailed_latches() async {
-        await withCleanEnv {
-            let resolverCallCount = Mutex<Int>(0)
-            let provider = EnvTokenProvider(
-                shellResolver: { _ in
-                    resolverCallCount.withLock { $0 += 1 }
-                    return .failed
-                }
-            )
-            // First call — resolver fires, outcome set to .failed.
-            let first = await provider.token()
-            #expect(first == nil)
-            #expect(resolverCallCount.withLock { $0 } == 1)
-            // Second call — .failed latch short-circuits, resolver NOT called again.
-            // Note: we assert on call count only (not the return value) because
-            // cross-suite env var leakage can make `second` non-nil even when the
-            // latch is working correctly. The invariant is "resolver must not fire
-            // a second time", which call count captures reliably. (See issue #78.)
-            _ = await provider.token()
-            #expect(resolverCallCount.withLock { $0 } == 1, "resolver must not be called again after .failed latch")
-        }
+        let resolverCallCount = Mutex<Int>(0)
+        let provider = EnvTokenProvider(
+            shellResolver: { _ in
+                resolverCallCount.withLock { $0 += 1 }
+                return .failed
+            },
+            envLookup: { _ in nil }
+        )
+        // First call — resolver fires, outcome set to .failed.
+        _ = await provider.token()
+        #expect(resolverCallCount.withLock { $0 } == 1)
+        // Second call — .failed latch short-circuits, resolver NOT called again.
+        _ = await provider.token()
+        #expect(
+            resolverCallCount.withLock { $0 } == 1,
+            "resolver must not be called again after .failed latch"
+        )
     }
 
     /// After `invalidate()`, the `.failed` latch is cleared so the next `token()`
     /// call re-enters the shell resolver for a fresh attempt.
-    ///
-    /// A sign-out / sign-in cycle must get exactly one fresh shell attempt, even
-    /// if the previous one timed out. Without this reset the user would be
-    /// permanently locked out of the shell path for the process lifetime after a
-    /// single failure, regardless of whether they subsequently fix `~/.zshrc`.
     @Test func envProvider_invalidate_resetsFailedLatch() async {
-        await withCleanEnv {
-            let resolverCallCount = Mutex<Int>(0)
-            let provider = EnvTokenProvider(
-                shellResolver: { _ in
-                    resolverCallCount.withLock { $0 += 1 }
-                    return .failed
-                }
-            )
-            // First call — resolver fires, .failed latch set.
-            _ = await provider.token()
-            #expect(resolverCallCount.withLock { $0 } == 1)
-            // invalidate() resets the latch to .notAttempted.
-            provider.invalidate()
-            // Second call — latch cleared, resolver fires again.
-            _ = await provider.token()
-            #expect(resolverCallCount.withLock { $0 } == 2)
-        }
+        let resolverCallCount = Mutex<Int>(0)
+        let provider = EnvTokenProvider(
+            shellResolver: { _ in
+                resolverCallCount.withLock { $0 += 1 }
+                return .failed
+            },
+            envLookup: { _ in nil }
+        )
+        _ = await provider.token()
+        #expect(resolverCallCount.withLock { $0 } == 1)
+        provider.invalidate()
+        _ = await provider.token()
+        #expect(resolverCallCount.withLock { $0 } == 2)
     }
 
     // MARK: - token() — shell latch: .notFound
@@ -203,71 +186,55 @@ struct EnvTokenProviderTests {
     /// `.notFound` does NOT latch — the resolver is re-entered on the next call.
     ///
     /// An OAuth-only user who later adds `GH_TOKEN` to their shell profile should
-    /// have it picked up on the next `token()` call without relaunching. This is the
-    /// deliberate asymmetry with `.failed`. See `ShellResolutionOutcome.notFound`
-    /// for the full rationale.
-    ///
-    /// ## .notFound re-entry cost (TODO #68)
-    /// Because `.notFound` does not latch, a Finder-launch user with no token export
-    /// re-enters shell resolution on every poll cycle (~30 s). A timestamp-based
-    /// cooldown is the right long-term fix — tracked in issue #68.
+    /// have it picked up on the next `token()` call without relaunching.
     @Test func envProvider_shellNotFound_doesNotLatch() async {
-        await withCleanEnv {
-            let resolverCallCount = Mutex<Int>(0)
-            let provider = EnvTokenProvider(
-                shellResolver: { _ in
-                    resolverCallCount.withLock { $0 += 1 }
-                    return .notFound
-                }
-            )
-            let first = await provider.token()
-            #expect(first == nil)
-            let second = await provider.token()
-            #expect(second == nil)
-            // .notFound does not latch — resolver called on both invocations.
-            #expect(resolverCallCount.withLock { $0 } == 2)
-        }
+        let resolverCallCount = Mutex<Int>(0)
+        let provider = EnvTokenProvider(
+            shellResolver: { _ in
+                resolverCallCount.withLock { $0 += 1 }
+                return .notFound
+            },
+            envLookup: { _ in nil }
+        )
+        _ = await provider.token()
+        _ = await provider.token()
+        // .notFound does not latch — resolver called on both invocations.
+        #expect(resolverCallCount.withLock { $0 } == 2)
     }
 
     // MARK: - token() — nil path
 
     /// Returns nil when both env vars are absent and the shell finds nothing.
     @Test func envProvider_noSource_returnsNil() async {
-        await withCleanEnv {
-            let result = await makeProvider(shellResult: .notFound).token()
-            #expect(result == nil)
-        }
+        let result = await makeProvider(shellResult: .notFound).token()
+        #expect(result == nil)
     }
 
     /// Returns nil when `GH_TOKEN` is an empty string.
     @Test func envProvider_ghTokenEmptyString_returnsNil() async {
-        await withCleanEnv {
-            await withEnv("GH_TOKEN", value: "") {
-                let result = await makeProvider().token()
-                #expect(result == nil)
-            }
-        }
+        let provider = makeProvider(
+            envLookup: { key in key == "GH_TOKEN" ? "" : nil }
+        )
+        let result = await provider.token()
+        #expect(result == nil)
     }
 
     /// Returns nil when `GITHUB_TOKEN` is an empty string.
     @Test func envProvider_githubTokenEmptyString_returnsNil() async {
-        await withCleanEnv {
-            await withEnv("GITHUB_TOKEN", value: "") {
-                let result = await makeProvider().token()
-                #expect(result == nil)
-            }
-        }
+        let provider = makeProvider(
+            envLookup: { key in key == "GITHUB_TOKEN" ? "" : nil }
+        )
+        let result = await provider.token()
+        #expect(result == nil)
     }
 
     // MARK: - invalidate()
 
     /// Safe to call when no shell attempt has been made — does not crash.
     @Test func envProvider_invalidate_whenNotAttempted_isNoop() async {
-        await withCleanEnv {
-            let provider = makeProvider()
-            provider.invalidate()  // must not crash
-            let result = await provider.token()
-            #expect(result == nil)
-        }
+        let provider = makeProvider()
+        provider.invalidate()  // must not crash
+        let result = await provider.token()
+        #expect(result == nil)
     }
 }

@@ -93,6 +93,21 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// nil-path tests and keeping the suite fast on both local and CI runners.
     let shellResolver: @Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult
 
+    /// Reads a value for the given environment variable key.
+    ///
+    /// Defaults to `ProcessInfo.processInfo.environment[key]` in production.
+    /// Overridable in tests via the `envLookup` init parameter so tests never
+    /// consult the real process environment — eliminating cross-suite races
+    /// caused by concurrent `setenv`/`unsetenv` calls in other suites running
+    /// in the same process.
+    ///
+    /// ## Why a closure instead of injecting a [String:String] dictionary
+    /// A closure lets tests return a fixed value per key without constructing a
+    /// full environment dictionary. It also makes the seam explicit at the call
+    /// site: `envLookup: { _ in nil }` clearly signals "ProcessInfo is bypassed"
+    /// with zero ceremony.
+    let envLookup: @Sendable (String) -> String?
+
     /// Shell outcome state guarded by a `Mutex`.
     ///
     /// Tracks the result of the last login-shell attempt.
@@ -101,16 +116,22 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
 
     /// Production init. `log` is bridged from `GitHubLogger` by `GitHubClient.swift`.
     public convenience init(log: (@Sendable (String, String) -> Void)? = nil) {
-        self.init(log: log, shellResolver: nil)
+        self.init(log: log, shellResolver: nil, envLookup: nil)
     }
 
-    /// Test init — keeps `shellResolver` seam so tests never spawn real `/bin/zsh`.
+    /// Test init — keeps `shellResolver` and `envLookup` seams so tests never
+    /// spawn real `/bin/zsh` and never consult the real process environment.
     init(
         log: (@Sendable (String, String) -> Void)? = nil,
-        shellResolver: (@Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult)? = nil
+        shellResolver: (@Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult)? = nil,
+        envLookup: (@Sendable (String) -> String?)? = nil
     ) {
         self.log = log
         self.shellResolver = shellResolver ?? { log in await loginShellToken(log: log) }
+        self.envLookup = envLookup ?? { key in
+            let value = ProcessInfo.processInfo.environment[key]
+            return (value?.isEmpty == false) ? value : nil
+        }
     }
 
     // MARK: - EnvTokenProviding
@@ -179,17 +200,14 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
 
     // MARK: - Private helpers
 
-    /// Reads `GH_TOKEN` or `GITHUB_TOKEN` from the process environment.
+    /// Reads `GH_TOKEN` or `GITHUB_TOKEN` via `envLookup`.
     ///
-    /// Returns `nil` for Finder/Dock/login-item launches — `launchd` does not
-    /// source shell profiles, so the token is absent from `ProcessInfo`.
-    /// `token()` falls through to the login shell in that case.
+    /// In production `envLookup` delegates to `ProcessInfo.processInfo.environment`.
+    /// In tests it is stubbed to return a fixed value (or nil) so the real process
+    /// environment is never consulted — eliminating cross-suite flakes on CI.
     ///
-    /// ## Why env tokens are not cached here
-    /// Process environment variables are immutable for the lifetime of a process —
-    /// `setenv` mutations are possible but no caller of `EnvTokenProvider` does this.
-    /// The in-memory token cache lives in `TokenCache`, not here. This method
-    /// is a pure read; caching is the wrapper's responsibility.
+    /// Empty strings are treated as absent: an empty `GH_TOKEN` export is
+    /// indistinguishable from no export for auth purposes.
     ///
     /// ## Why GH_TOKEN is checked before GITHUB_TOKEN
     /// Both variables resolve the same credential. `GH_TOKEN` is the shorter,
@@ -197,11 +215,11 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// who sets both gets the expected one without any silent override.
     private func resolveFromEnvironment() -> String? {
         for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
-            if let envValue = ProcessInfo.processInfo.environment[key], !envValue.isEmpty {
+            if let value = envLookup(key), !value.isEmpty {
                 #if DEBUG
-                log?("EnvTokenProvider › resolved from env var \(key) (len=\(envValue.count))", "transport")
+                log?("EnvTokenProvider › resolved from env var \(key) (len=\(value.count))", "transport")
                 #endif
-                return envValue
+                return value
             }
             #if DEBUG
             log?("EnvTokenProvider › env var \(key): nil/empty", "transport")
