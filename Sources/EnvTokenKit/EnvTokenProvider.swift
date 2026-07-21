@@ -91,7 +91,7 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// tests via the `shellResolver` init parameter so test suites never spawn
     /// a real `/bin/zsh` subprocess — avoiding the 10-second timeout on
     /// nil-path tests and keeping the suite fast on both local and CI runners.
-    let shellResolver: @Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult
+    private let shellResolver: @Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult
 
     /// Reads a single environment variable by key.
     ///
