@@ -1,5 +1,17 @@
 // TokenCache.swift
 // GitHubClient
+
+// public import — not internal import — is required here because TokenCache is a
+// public type whose initialisers name EnvTokenProviding (from EnvTokenKit) and
+// TokenStore (from OAuthTokenKit) directly in their public parameter lists.
+// Swift's access-control rule: a public declaration cannot use a type that is
+// imported as internal. Changing either import to `internal import` produces:
+//   error: initializer cannot be declared public because its parameter uses an internal type
+// The alternative — making TokenCache internal — would remove it from the
+// GitHubClient public API, which breaks callers who construct TokenCache in tests.
+// `public import` re-exports EnvTokenKit and OAuthTokenKit as part of the
+// GitHubClient module surface; that is an intentional, unavoidable consequence
+// of keeping TokenCache public with protocol-typed parameters.
 public import EnvTokenKit
 import Foundation
 public import OAuthTokenKit
