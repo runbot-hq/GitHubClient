@@ -32,6 +32,14 @@ import Testing
 /// `EnvTokenProviderTests` — if `.serialized` is ever removed, concurrent
 /// tests that both call `withCleanEnv` will race on `GH_TOKEN`/`GITHUB_TOKEN`
 /// and produce intermittent flakes.
+///
+/// ⚠️ CROSS-SUITE RACE NOTE (issue #78)
+/// `withCleanEnv` only strips the env at entry. Because all test targets run
+/// in the same process, a concurrent suite (e.g. `GitHubTokenCache`) can
+/// re-set `GH_TOKEN` between `unsetenv` and the first suspension point inside
+/// `token()`. Tests that need to assert latch behaviour must therefore assert
+/// on **resolver call count**, not on the return value of `token()` — the
+/// return value is an unreliable proxy when cross-suite env leakage is possible.
 private func withCleanEnv(_ body: () async -> Void) async {
     let prevGH = getenv("GH_TOKEN").flatMap { String(cString: $0) }
     let prevGitHub = getenv("GITHUB_TOKEN").flatMap { String(cString: $0) }
@@ -134,12 +142,22 @@ struct EnvTokenProviderTests {
 
     // MARK: - token() — shell latch: .failed
 
-    /// After the shell returns `.failed`, subsequent `token()` calls must short-circuit
-    /// without re-entering the resolver.
+    /// After the shell returns `.failed`, subsequent `token()` calls must
+    /// short-circuit without re-entering the resolver.
     ///
-    /// `.failed` latches because retrying a broken or sandbox-blocked shell on every
-    /// poll cycle (~30 s) would be a persistent background thread burn with no benefit.
-    /// The latch is cleared only by an explicit `invalidate()` call (e.g. sign-out).
+    /// `.failed` latches because retrying a broken or sandbox-blocked shell on
+    /// every poll cycle (~30 s) would be a persistent background thread burn
+    /// with no benefit. The latch is cleared only by an explicit `invalidate()`
+    /// call (e.g. sign-out).
+    ///
+    /// ## Why this asserts call count, not return value (issue #78)
+    /// `second == nil` is an unreliable proxy: a concurrent suite running in
+    /// the same process can set `GH_TOKEN` between `withCleanEnv`'s `unsetenv`
+    /// and `token()`'s first suspension point, causing `resolveFromEnvironment()`
+    /// to return a non-nil value even when the latch is working correctly.
+    /// Asserting `resolverCallCount == 1` on both calls is immune to that race:
+    /// the stub resolver is the only thing that can increment the counter, and
+    /// no cross-suite activity touches it.
     @Test func envProvider_shellFailed_latches() async {
         await withCleanEnv {
             let resolverCallCount = Mutex<Int>(0)
@@ -150,13 +168,14 @@ struct EnvTokenProviderTests {
                 }
             )
             // First call — resolver fires, outcome set to .failed.
-            let first = await provider.token()
-            #expect(first == nil)
+            _ = await provider.token()
             #expect(resolverCallCount.withLock { $0 } == 1)
             // Second call — .failed latch short-circuits, resolver NOT called again.
-            let second = await provider.token()
-            #expect(second == nil)
-            #expect(resolverCallCount.withLock { $0 } == 1)
+            _ = await provider.token()
+            #expect(
+                resolverCallCount.withLock { $0 } == 1,
+                "resolver must not be called again after .failed latch"
+            )
         }
     }
 
