@@ -117,14 +117,6 @@ public final class TokenCache: Sendable {
     ///
     /// Returns `nil` if no token is available from any source.
     ///
-    /// ## Why `async` when steps 1–3 are synchronous
-    /// Steps 1–3 (cache, Keychain, env var) are all synchronous. The function is
-    /// `async` solely because step 4 — spawning a `/bin/zsh` subprocess via
-    /// `EnvTokenProviding.token()` — is inherently async. Making the whole function
-    /// `async` is the simplest way to suspend only when the shell path is actually
-    /// taken; sync callers can `await` it without a thread-blocking cost on the
-    /// warm-cache and Keychain paths.
-    ///
     /// - Warning: Concurrent callers that all miss the in-memory cache simultaneously
     ///   (e.g. on first call at app launch) will each independently walk steps 2–4.
     ///   Steps 1–2 are idempotent (double Keychain read is harmless). Step 4 is not:

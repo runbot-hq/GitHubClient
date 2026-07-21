@@ -99,6 +99,11 @@ public final class OAuthService: OAuthServiceProtocol {
     // MARK: - OAuthServiceProtocol — Auth state
 
     /// `true` when a valid OAuth token is present in the token store (e.g. Keychain).
+    ///
+    /// The Keychain is the source of truth — no in-memory cache is used here.
+    /// Caching would mask external token revocation (e.g. the user revoked the
+    /// token on GitHub.com or another device deleted it from the shared Keychain).
+    /// The synchronous Keychain read is fast enough for UI-state checks.
     public var isAuthenticated: Bool { tokenStore.load() != nil }
 
     /// `true` when any usable GitHub token is available — OAuth token,
@@ -181,6 +186,12 @@ public final class OAuthService: OAuthServiceProtocol {
     // MARK: - Sign Out
 
     /// Clears the pending state, deletes the stored token, and emits a sign-out event.
+    ///
+    /// The `tokenStore.delete()` call is best-effort: if it fails (e.g. Keychain
+    /// temporarily unavailable) the sign-out still proceeds. A stale Keychain
+    /// entry is recoverable — the user can sign in again — whereas blocking
+    /// sign-out on a Keychain error would permanently lock the UI in a signed-in
+    /// state with no escape.
     public func signOut() {
         log?("OAuthService › signOut — called", "transport")
         pendingState = nil
@@ -196,6 +207,10 @@ public final class OAuthService: OAuthServiceProtocol {
 
     /// Processes the OAuth redirect URL from GitHub.
     public func handleCallback(_ url: URL) {
+        // Log scheme+host only — the full URL contains the one-time code query
+        // parameter which is sensitive for a short window. Never log
+        // url.absoluteString or url.query here; doing so would leak the live
+        // credential into unified logs.
         let safeURL = "\(url.scheme ?? "")://\(url.host ?? "")"
         log?("OAuthService › handleCallback — url=\(safeURL)", "transport")
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
