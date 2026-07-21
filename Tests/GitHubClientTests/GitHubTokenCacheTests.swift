@@ -331,9 +331,9 @@ struct GitHubTokenCacheTests {
     }
   }
 
-  /// After the provider returns a value matching `.failed` semantics, `TokenCache`
-  /// must still delegate to the provider on subsequent calls — latch enforcement
-  /// is `EnvTokenProvider`'s responsibility, not `TokenCache`'s.
+  /// After the provider returns `.failed`, `TokenCache` still delegates to the
+  /// provider on every subsequent `token()` call — latch enforcement is
+  /// `EnvTokenProvider`'s responsibility, not `TokenCache`'s.
   ///
   /// ## What this test validates
   /// `StubEnvTokenProvider(result: .failed)` always returns `nil`. `TokenCache`
@@ -341,8 +341,13 @@ struct GitHubTokenCacheTests {
   /// The real latch lives in `EnvTokenProvider` (tested in `EnvTokenKitTests`).
   /// This test confirms `TokenCache`'s side of the contract: it delegates every
   /// time and trusts the provider to manage its own latch.
+  ///
+  /// ## Why this test is NOT named token_shellFailed_latches
+  /// The name was changed to reflect actual behaviour: there is no latch at the
+  /// `TokenCache` level. `callCount == 2` on the second call proves re-entry,
+  /// not short-circuit. The latch contract belongs to `EnvTokenProvider` alone.
   @Test
-  func token_shellFailed_latches() async {
+  func token_shellFailed_delegatesToProvider_noTokenCacheLatch() async {
     await withCleanEnv {
       let stub = StubEnvTokenProvider(result: .failed)
       let cache = makeCache(envProvider: stub)

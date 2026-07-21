@@ -24,9 +24,14 @@ import Testing
 /// ⚠️ SERIALIZED DEPENDENCY: `setenv`/`unsetenv` mutate the process-global
 /// environment. Correctness relies on the `@Suite(.serialized)` attribute on
 /// `OAuthServiceAuthStateTests`.
+///
+/// Uses `getenv()` (not `ProcessInfo.processInfo.environment`) for save/restore
+/// because `ProcessInfo` captures a snapshot at process start and does not
+/// reflect live `setenv`/`unsetenv` mutations. `getenv()` always reflects the
+/// current state of the process environment.
 private func withCleanEnv(_ body: () -> Void) {
-    let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
-    let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
+    let prevGH = getenv("GH_TOKEN").flatMap { String(cString: $0) }
+    let prevGitHub = getenv("GITHUB_TOKEN").flatMap { String(cString: $0) }
     unsetenv("GH_TOKEN")
     unsetenv("GITHUB_TOKEN")
     body()
