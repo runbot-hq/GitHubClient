@@ -1,6 +1,5 @@
 // URLSessionProtocol.swift
-// OAuthTokenKit
-// Migrated from: Sources/GitHubClient/Auth/URLSessionProtocol.swift
+// GitHubClient
 import Foundation
 
 // MARK: - URLSessionProtocol
@@ -17,9 +16,13 @@ public protocol URLSessionProtocol: Sendable {
 
 // MARK: - URLSession + URLSessionProtocol
 
-/// Conformance of `URLSession` to `URLSessionProtocol`.
+/// Retroactive conformance of `URLSession` to `URLSessionProtocol`.
 ///
 /// `URLSessionProtocol` is declared in this module (`OAuthTokenKit`), so
-/// `@retroactive` does not apply — the compiler rejects it. This is a
-/// standard same-module protocol conformance, not a retroactive one.
+/// `@retroactive` does not apply here — Swift only requires that annotation
+/// when *neither* the protocol nor the conforming type is defined in the
+/// current module. `URLSession` is from Foundation; the protocol is ours.
+/// The conformance is safe: `URLSession.data(for:)` already exists as a
+/// Foundation method; we are only declaring that `URLSession` satisfies a
+/// protocol we define.
 extension URLSession: URLSessionProtocol {}

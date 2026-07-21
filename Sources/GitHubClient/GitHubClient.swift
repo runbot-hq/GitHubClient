@@ -129,17 +129,10 @@ public final class GitHubClient {
         redirectURI: String = OAuthService.defaultRedirectURI,
         logger: (any GitHubLogger)? = nil
     ) {
-        // Bridge GitHubLogger → log closure for kit injection.
-        // GitHubLogger stays in GitHubClient/Transport — kits are closure-injected
-        // to avoid any shared logger dependency between targets.
         let log: (@Sendable (String, String) -> Void)? = logger.map { lg in
             { message, category in lg.log(message, category: category) }
         }
-        // KeychainTokenStore and OAuthService are OAuthTokenKit concrete types.
-        // internal import OAuthTokenKit ensures they never leak into GitHubClient's public API.
         let store = KeychainTokenStore(service: service, account: account, log: log)
-        // EnvTokenProvider is the only EnvTokenKit concrete type named in this file.
-        // TokenCache knows only `any EnvTokenProviding` — see TokenCache Boundary Rule in #74.
         let envProvider = EnvTokenProvider(log: log)
         let cache = TokenCache(tokenStore: store, logger: logger, envProvider: envProvider)
         let oauth = OAuthService(
@@ -150,13 +143,6 @@ public final class GitHubClient {
             redirectURI: redirectURI,
             logger: logger,
             session: URLSession.shared,
-            // Both callbacks call invalidate() so the next token() call re-resolves
-            // from the store after any credential change. invalidate() resets both
-            // the in-memory token cache AND EnvTokenProvider's shell outcome latch —
-            // see EnvTokenProvider.invalidate() for the full .failed vs .notFound
-            // reset policy. Side-effect: a user whose shell is broken (.failed latch)
-            // will re-spawn /bin/zsh on the next token() call after *both* sign-in
-            // and sign-out — not just sign-out. Low-frequency and intentional; tracked in #68.
             onTokenSaved: { cache.invalidate() },
             onTokenDeleted: { cache.invalidate() }
         )
@@ -164,18 +150,6 @@ public final class GitHubClient {
             tokenProvider: { await cache.token() },
             logger: logger
         )
-        // ⚠️ NOT a dead assignment — this is load-bearing module wiring.
-        // sharedTransportStorage is the backing var read by currentTransport
-        // (GitHubTransportShims.swift). Every free-function shim in the module
-        // (ghAPI, ghPost, cancelRun, deleteRunnerByID, etc.) resolves its
-        // transport via `currentTransport`, which falls back to
-        // sharedTransportStorage when no @TaskLocal override is in scope.
-        // Without this write, every shim call in a production app would use
-        // the default no-token GitHubTransport() constructed at module load —
-        // all API calls would return 401 until the user re-launches.
-        // Periphery / compiler "assigned but never read" warnings are false
-        // positives here: the value IS read, just indirectly through
-        // currentTransport in a different file.
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
