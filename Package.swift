@@ -46,9 +46,9 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "GitHubClientTests",
-            dependencies: ["GitHubClient", "EnvTokenKit"],
-            path: "Tests/GitHubClientTests",
+            name: "EnvTokenKitTests",
+            dependencies: ["EnvTokenKit"],
+            path: "Tests/EnvTokenKitTests",
             swiftSettings: [
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault")
             ]
@@ -57,6 +57,14 @@ let package = Package(
             name: "OAuthTokenKitTests",
             dependencies: ["OAuthTokenKit"],
             path: "Tests/OAuthTokenKitTests",
+            swiftSettings: [
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault")
+            ]
+        ),
+        .testTarget(
+            name: "GitHubClientTests",
+            dependencies: ["GitHubClient", "EnvTokenKit"],
+            path: "Tests/GitHubClientTests",
             swiftSettings: [
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault")
             ]
