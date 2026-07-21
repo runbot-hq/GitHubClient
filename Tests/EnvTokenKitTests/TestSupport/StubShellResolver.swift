@@ -13,7 +13,7 @@ import Synchronization
 ///     )
 func countingResolver(
     returning result: ShellTokenResult,
-    counter: Mutex<Int>
+    counter: consuming Mutex<Int>
 ) -> @Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult {
     { _ in
         counter.withLock { $0 += 1 }

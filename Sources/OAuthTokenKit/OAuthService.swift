@@ -303,7 +303,6 @@ public final class OAuthService: OAuthServiceProtocol {
 // MARK: - OAuthTokenResponse
 
 /// Response body from the GitHub OAuth token exchange.
-/// GitHub returns HTTP 200 even on failure, so both `accessToken` and `error` are optional.
 private struct OAuthTokenResponse: Decodable {
     /// The OAuth access token returned on success, or `nil` if GitHub returned an error.
     let accessToken: String?
@@ -311,16 +310,16 @@ private struct OAuthTokenResponse: Decodable {
     let error: String?
     /// Human-readable description of the OAuth error, if present.
     let errorDescription: String?
-    /// Maps Swift property names to the snake_case JSON keys used by the GitHub API.
+    /// Maps Swift property names to GitHub JSON keys.
     private enum CodingKeys: String, CodingKey {
-        /// JSON key `"access_token"`.
+        /// JSON key `access_token`.
         case accessToken = "access_token" // skipcq: SCT-A000
-        /// JSON key `"error"`.
+        /// JSON key `error`.
         case error
-        /// JSON key `"error_description"`.
+        /// JSON key `error_description`.
         case errorDescription = "error_description"
     }
-    /// Returns the JSON key names of fields present in this response, for diagnostic logging.
+    /// Returns the names of JSON keys present in this response — used for debug logging.
     var debugKeys: [String] {
         var keys: [String] = []
         if accessToken != nil { keys.append("access_token") } // skipcq: SCT-A000
@@ -341,13 +340,13 @@ private struct OAuthTokenRequest: Encodable {
     let clientSecret: String
     /// The one-time authorization code received in the OAuth redirect callback.
     let code: String
-    /// Maps Swift property names to the snake_case JSON keys expected by the GitHub API.
+    /// Maps Swift property names to GitHub JSON keys.
     private enum CodingKeys: String, CodingKey {
-        /// JSON key `"client_id"`.
+        /// JSON key `client_id`.
         case clientID = "client_id" // skipcq: SCT-A000
-        /// JSON key `"client_secret"`.
+        /// JSON key `client_secret`.
         case clientSecret = "client_secret" // skipcq: SCT-A000
-        /// JSON key `"code"`.
+        /// JSON key `code`.
         case code
     }
 }

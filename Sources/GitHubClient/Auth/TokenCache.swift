@@ -12,10 +12,10 @@ import Synchronization
 // Backed by Synchronization.Mutex for synchronous, lock-guarded access.
 //
 // token() is async. On every call it walks a linear resolution chain:
-//   1. in-memory cache (sync, no I/O)
-//   2. TokenStore (sync Keychain read)
-//   3. ProcessInfo env (sync, covers terminal / CI launches)
-//   4. loginShellToken (async subprocess — cold Finder launch only)
+//   1. in-memory cache  (sync, no I/O)
+//   2. TokenStore       (sync Keychain read)
+//   3. ProcessInfo env  (sync, covers terminal / CI launches)
+//   4. loginShellToken  (async subprocess — cold Finder launch only)
 //
 // Steps 3+4 are fully delegated to the injected `any EnvTokenProviding`.
 // TokenCache never names the concrete EnvTokenProvider type — it only
@@ -31,10 +31,12 @@ import Synchronization
 /// `EnvTokenProviding`, in that order, and caches the result in memory.
 /// All cache reads and writes are guarded by a `Mutex` for thread safety.
 public final class TokenCache: Sendable {
+
     /// An injected `TokenStore` used to persist the token to the keychain.
     private let tokenStore: any TokenStore
     /// An optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
+
     /// Injected env+shell token provider.
     ///
     /// `token()` delegates steps 3+4 of the resolution chain to this provider.
@@ -42,23 +44,12 @@ public final class TokenCache: Sendable {
     /// knows `any EnvTokenProviding`. The concrete type is constructed and
     /// injected exclusively by `GitHubClient.swift`.
     private let envProvider: any EnvTokenProviding
+
     /// In-memory token cache guarded by a `Mutex`.
     ///
     /// `nil` means "not yet resolved this cache lifetime".
     /// Written by `resolveFromStore()` and the `envProvider` delegation block
     /// in `token()`. Reset to `nil` by `invalidate()`.
-    ///
-    /// ## Why the shell outcome latch moved out of this Mutex
-    /// In the legacy inline path, `token` and `shellOutcome` were stored together
-    /// so they could be reset atomically in `invalidate()`. Now that the shell
-    /// latch lives inside `EnvTokenProvider` (behind its own `Mutex`), the two
-    /// fields are no longer co-located — but atomicity is preserved: `invalidate()`
-    /// calls `state.withLock { $0 = nil }` then `envProvider.invalidate()` in
-    /// sequence. A window exists between the two calls where `state.token` is
-    /// `nil` but `EnvTokenProvider`'s latch is not yet reset. This is safe:
-    /// the only caller of `invalidate()` is `GitHubClient`'s `onTokenSaved` /
-    /// `onTokenDeleted` callbacks, which run on the `@MainActor`; `token()` is
-    /// not called again until after both resets complete.
     private let state = Mutex<String?>(nil)
 
     // MARK: - Initialisers
@@ -80,13 +71,11 @@ public final class TokenCache: Sendable {
         self.logger = logger
     }
 
-    // MARK: - TokenCache test convenience init
-
-    /// Creates a `TokenCache` backed by `NullTokenStore` with no env provider.
+    /// Creates a `TokenCache` backed by the given store with a `NullEnvTokenProvider`.
     ///
-    /// Convenience for tests that only exercise the Keychain path and do not
-    /// need env-var or shell resolution. Pass a real `EnvTokenProviding` stub
-    /// to the primary init when env resolution behaviour is under test.
+    /// Convenience for tests that only exercise the Keychain / store path and
+    /// do not need env-var or shell resolution. Pass a real `EnvTokenProviding`
+    /// stub to the primary init when env resolution behaviour is under test.
     ///
     /// - Parameter tokenStore: The backing token store.
     public init(tokenStore: any TokenStore) {
@@ -103,9 +92,7 @@ public final class TokenCache: Sendable {
     /// 1. In-memory cache — zero I/O, returns immediately on warm cache
     /// 2. `TokenStore.load()` — synchronous Keychain read
     /// 3. `GH_TOKEN` / `GITHUB_TOKEN` process environment — covers terminal / CI launches
-    ///    (delegated to the injected `EnvTokenProviding`)
     /// 4. Login shell subprocess — cold Finder/Dock/login-item launch only
-    ///    (delegated to the injected `EnvTokenProviding`)
     ///
     /// Returns `nil` if no token is available from any source.
     public func token() async -> String? {
@@ -130,15 +117,17 @@ public final class TokenCache: Sendable {
 
     // MARK: - Synchronous cache peek
 
-    /// Returns the token that is currently held in the in-memory cache, or `nil`
-    /// if no token has been resolved yet during this process lifetime.
+    /// Returns the token currently held in the in-memory cache, or `nil` if not yet resolved.
     ///
-    /// This is a **non-async, zero-I/O** read of the Mutex-guarded state.
-    public var cachedToken: String? { state.withLock { $0 } }
+    /// Zero-I/O synchronous read — never spawns a shell, reads the Keychain,
+    /// or checks environment variables.
+    public var cachedToken: String? {
+        state.withLock { $0 }
+    }
 
     // MARK: - Private helpers
 
-    /// Returns the cached token without performing any I/O, or `nil` if the cache is cold.
+    /// Returns the cached token without any I/O, or `nil` if the cache is cold.
     private func resolveFromCache() -> String? {
         let cached = state.withLock { $0 }
         #if DEBUG
@@ -149,8 +138,9 @@ public final class TokenCache: Sendable {
         return cached
     }
 
-    /// Loads the token from `tokenStore`, populates the in-memory cache, and returns it.
-    /// Returns `nil` if the store is empty.
+    /// Loads the token from the `TokenStore`, populates the cache on success, and returns it.
+    ///
+    /// Empty strings are treated as absent (corrupted Keychain entry).
     private func resolveFromStore() -> String? {
         guard let token = tokenStore.load(), !token.isEmpty else {
             #if DEBUG
@@ -168,10 +158,14 @@ public final class TokenCache: Sendable {
 
 // MARK: - NullEnvTokenProvider
 
-/// A no-op `EnvTokenProviding` used when no env provider is needed (e.g. Keychain-only tests).
+/// A no-op `EnvTokenProviding` used when no env provider is needed.
+///
+/// Injected by `TokenCache.init(tokenStore:)` (the test convenience init)
+/// when the caller does not supply a real provider. Always returns `nil`
+/// from `token()` and ignores `invalidate()` calls.
 private struct NullEnvTokenProvider: EnvTokenProviding {
-    /// Always returns `nil` — no env token is available.
+    /// Always returns `nil` — no env var or shell resolution is performed.
     func token() async -> String? { nil }
-    /// No-op — nothing to reset.
+    /// No-op — there is no state to reset.
     func invalidate() {}
 }
