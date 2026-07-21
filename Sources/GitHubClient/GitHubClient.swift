@@ -1,7 +1,7 @@
 // GitHubClient.swift
 // GitHubClient
-import Foundation
 internal import EnvTokenKit
+import Foundation
 internal import OAuthTokenKit
 
 // MARK: - GitHubClient
