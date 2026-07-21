@@ -12,8 +12,8 @@ import Synchronization
 ///
 /// ## Why an enum instead of a Bool
 /// The previous `shellFailed: Bool` flag collapsed two semantically distinct
-/// outcomes — “shell ran but found no export” and “shell failed to launch or
-/// timed out” — into a single latch. Both set the flag to `true`, permanently
+/// outcomes — "shell ran but found no export" and "shell failed to launch or
+/// timed out" — into a single latch. Both set the flag to `true`, permanently
 /// blocking re-entry for the process lifetime. That is correct for `.failed`
 /// (retrying a broken shell every 30 s is wasteful) but wrong for `.notFound`
 /// (an OAuth-only user who later adds `GH_TOKEN` to their profile should not
@@ -30,8 +30,8 @@ enum ShellResolutionOutcome {
     /// ## Why not collapse this into `.notAttempted`
     /// Observable behaviour is identical today: both cases allow re-entry.
     /// The distinction is preserved for two reasons:
-    /// 1. Diagnostics — logging and future telemetry can distinguish “never
-    ///    tried” from “tried and found nothing”, which helps triage user
+    /// 1. Diagnostics — logging and future telemetry can distinguish "never
+    ///    tried" from "tried and found nothing", which helps triage user
     ///    reports without needing a separate flag.
     /// 2. Future policy — a `.notFound`-specific cooldown (e.g. re-enter at
     ///    most once per 60 s rather than on every poll cycle) could be added
@@ -52,7 +52,7 @@ enum ShellResolutionOutcome {
     /// included — reaches this path on every poll cycle. The decision not to
     /// latch is deliberate: latching `.notFound` like `.failed` would prevent
     /// a user who later adds an export from picking it up without a
-    /// sign-out/sign-in cycle, defeating the feature’s core promise.
+    /// sign-out/sign-in cycle, defeating the feature's core promise.
     /// OAuth users launched from a terminal do NOT reach step 4 (step 3
     /// resolves from `ProcessInfo`), but OAuth users launched from Finder
     /// with no export DO. The per-cycle shell cost is real and acknowledged;
@@ -91,7 +91,7 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// tests via the `shellResolver` init parameter so test suites never spawn
     /// a real `/bin/zsh` subprocess — avoiding the 10-second timeout on
     /// nil-path tests and keeping the suite fast on both local and CI runners.
-    let shellResolver: @Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult
+    private let shellResolver: @Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult
 
     /// Reads a single environment variable by key.
     ///
@@ -100,7 +100,7 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// exercise the shell-fallback path never touch the live process environment
     /// — eliminating the cross-suite `setenv`/`unsetenv` race on CI where
     /// `GITHUB_TOKEN` is always present in the runner environment.
-    let envLookup: @Sendable (String) -> String?
+    private let envLookup: @Sendable (String) -> String?
 
     /// Shell outcome state guarded by a `Mutex`.
     ///
