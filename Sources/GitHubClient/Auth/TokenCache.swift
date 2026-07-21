@@ -85,12 +85,13 @@ public final class TokenCache: Sendable {
 
     /// Creates a `TokenCache` backed by the given store with a `NullEnvTokenProvider`.
     ///
-    /// Convenience for tests that only exercise the Keychain / store path and
-    /// do not need env-var or shell resolution. Pass a real `EnvTokenProviding`
-    /// stub to the primary init when env resolution behaviour is under test.
+    /// Use this when env-var and login-shell resolution are not needed — for example,
+    /// in `GitHubClient`'s test init when no env token path is under test. Pass a
+    /// real `EnvTokenProviding` stub to the primary init when env resolution
+    /// behaviour is under test.
     ///
     /// - Parameter tokenStore: The backing token store.
-    public init(tokenStore: any TokenStore) {
+    internal init(tokenStore: any TokenStore) {
         self.tokenStore = tokenStore
         self.envProvider = NullEnvTokenProvider()
         self.logger = nil
@@ -107,6 +108,16 @@ public final class TokenCache: Sendable {
     /// 4. Login shell subprocess — cold Finder/Dock/login-item launch only
     ///
     /// Returns `nil` if no token is available from any source.
+    ///
+    /// - Warning: Concurrent callers that all miss the in-memory cache simultaneously
+    ///   (e.g. on first call at app launch) will each independently walk steps 2–4.
+    ///   Steps 1–2 are idempotent (double Keychain read is harmless). Step 4 is not:
+    ///   each concurrent miss spawns a separate `/bin/zsh` subprocess. The window is
+    ///   the full execution time of the shell (100–300 ms in practice), not merely a
+    ///   scheduling instant. In production this is rare because `GitHubClient` is a
+    ///   singleton and callers are typically serialised through a single call site.
+    ///   If your call pattern can produce high-concurrency first-calls, consider
+    ///   serialising the first `token()` call yourself.
     public func token() async -> String? {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }

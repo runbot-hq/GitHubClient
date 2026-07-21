@@ -70,13 +70,3 @@ final class StubEnvTokenProvider: EnvTokenProviding, Sendable {
     }
 }
 
-// MARK: - NullEnvTokenProvider
-
-/// A no-op `EnvTokenProviding` stub that always returns `nil` and ignores
-/// `invalidate()`. Injected by test helpers that only exercise steps 1–2
-/// of the resolution chain (cache and store) and have no interest in
-/// the env/shell path at all.
-final class NullEnvTokenProvider: EnvTokenProviding, Sendable {
-    func token() async -> String? { nil }
-    func invalidate() {}
-}

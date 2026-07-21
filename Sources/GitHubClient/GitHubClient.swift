@@ -161,6 +161,7 @@ public final class GitHubClient {
             tokenStore: store,
             scopes: scopes,
             redirectURI: redirectURI,
+            log: log,
             session: URLSession.shared,
             // Both callbacks call invalidate() so the next token() call re-resolves
             // from the store after any credential change. invalidate() resets both
