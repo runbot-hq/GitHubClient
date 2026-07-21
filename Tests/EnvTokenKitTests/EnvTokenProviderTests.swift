@@ -33,8 +33,8 @@ import Testing
 /// tests that both call `withCleanEnv` will race on `GH_TOKEN`/`GITHUB_TOKEN`
 /// and produce intermittent flakes.
 private func withCleanEnv(_ body: () async -> Void) async {
-    let prevGH = ProcessInfo.processInfo.environment["GH_TOKEN"]
-    let prevGitHub = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
+    let prevGH = getenv("GH_TOKEN").flatMap { String(cString: $0) }
+    let prevGitHub = getenv("GITHUB_TOKEN").flatMap { String(cString: $0) }
     unsetenv("GH_TOKEN")
     unsetenv("GITHUB_TOKEN")
     await body()
@@ -45,7 +45,7 @@ private func withCleanEnv(_ body: () async -> Void) async {
 /// Sets one env var for the duration of body, then restores the previous value.
 /// See `withCleanEnv` for the `.serialized` dependency note.
 private func withEnv(_ key: String, value: String, _ body: () async -> Void) async {
-    let previous = ProcessInfo.processInfo.environment[key]
+    let previous = getenv(key).flatMap { String(cString: $0) }
     setenv(key, value, 1)
     await body()
     if let previous { setenv(key, previous, 1) } else { unsetenv(key) }
@@ -124,12 +124,11 @@ struct EnvTokenProviderTests {
     /// override from `GITHUB_TOKEN`.
     @Test func envProvider_ghToken_preferredOver_githubToken() async {
         await withCleanEnv {
-            await withEnv("GH_TOKEN", value: "primary-token") {
-                await withEnv("GITHUB_TOKEN", value: "fallback-token") {
-                    let result = await makeProvider().token()
-                    #expect(result == "primary-token")
-                }
-            }
+            // Set both vars directly — no nesting to avoid async suspension-point races.
+            setenv("GH_TOKEN", "primary-token", 1)
+            setenv("GITHUB_TOKEN", "fallback-token", 1)
+            let result = await makeProvider().token()
+            #expect(result == "primary-token")
         }
     }
 

@@ -7,7 +7,7 @@
 // These tests write to the real macOS Keychain using a test-only service /
 // account pair. A `defer` block in every test cleans up the item so no test
 // leaves a ghost entry. The tests require access to the Data Protection
-// Keychain and will be skipped automatically in sandboxed CI environments
+// Keychain and will be skipped automatically in sandboxed environments
 // where `SecItemAdd` returns `errSecMissingEntitlement`.
 //
 // Running locally: `swift test` on macOS 15+ is sufficient.
@@ -20,6 +20,26 @@ import Security
 import Testing
 
 @testable import OAuthTokenKit
+
+// MARK: - Keychain availability probe
+
+/// Returns true when the test process has Keychain write access.
+/// Uses a throwaway item under the test service to avoid touching production items.
+private func keychainAvailable() -> Bool {
+    let query: [CFString: Any] = [
+        kSecClass: kSecClassGenericPassword,
+        kSecAttrService: "com.runbot.GitHubClientTests.probe",
+        kSecAttrAccount: "probe",
+        kSecUseDataProtectionKeychain: true,
+        kSecValueData: Data("x".utf8)
+    ]
+    let status = SecItemAdd(query as CFDictionary, nil)
+    if status == errSecSuccess || status == errSecDuplicateItem {
+        SecItemDelete(query as CFDictionary)
+        return true
+    }
+    return false
+}
 
 // MARK: - KeychainTokenStoreTests
 
@@ -41,58 +61,42 @@ struct KeychainTokenStoreTests {
     // MARK: - save / load / delete round-trip
 
     /// Saves a token, reads it back, then deletes it.
-    ///
-    /// This is the canonical round-trip test. `defer` guarantees cleanup even
-    /// if an assertion fails mid-test — no ghost Keychain entries.
-    ///
-    /// ## Why a fixed test token value
-    /// A deterministic token makes assertion failures easier to diagnose in CI
-    /// logs: the expected value is always the same string, not a UUID.
     @Test func keychainTokenStore_save_load_delete() {
-        let store = makeStore()
-        defer { store.delete() }  // cleanup — must run even if #expect fails
+        withKnownIssue("Keychain unavailable in sandboxed environment", isIntermittent: false) {
+            let store = makeStore()
+            defer { store.delete() }
 
-        // Initial state — nothing stored yet.
-        #expect(store.load() == nil)
-
-        // Save.
-        let saved = store.save("test-oauth-token-abc123")
-        #expect(saved == true)
-
-        // Load — must return the saved value exactly.
-        #expect(store.load() == "test-oauth-token-abc123")
-
-        // Delete.
-        let deleted = store.delete()
-        #expect(deleted == true)
-
-        // Post-delete load — must return nil.
-        #expect(store.load() == nil)
+            #expect(store.load() == nil)
+            #expect(store.save("test-oauth-token-abc123") == true)
+            #expect(store.load() == "test-oauth-token-abc123")
+            #expect(store.delete() == true)
+            #expect(store.load() == nil)
+        } when: {
+            !keychainAvailable()
+        }
     }
 
     /// Overwrites an existing token with a new value.
-    ///
-    /// `save()` uses an upsert pattern (`SecItemUpdate` first, `SecItemAdd` on
-    /// `errSecItemNotFound`). This test verifies the update branch is exercised
-    /// correctly: a second `save()` must overwrite, not duplicate.
     @Test func keychainTokenStore_save_overwrite() {
-        let store = makeStore()
-        defer { store.delete() }
+        withKnownIssue("Keychain unavailable in sandboxed environment", isIntermittent: false) {
+            let store = makeStore()
+            defer { store.delete() }
 
-        _ = store.save("first-token")
-        _ = store.save("second-token")
-
-        // load() must return the second (updated) value, not the first.
-        #expect(store.load() == "second-token")
+            #expect(store.save("first-token") == true)
+            #expect(store.save("second-token") == true)
+            #expect(store.load() == "second-token")
+        } when: {
+            !keychainAvailable()
+        }
     }
 
     /// `delete()` is idempotent — calling it when no item exists returns `true`.
-    ///
-    /// `KeychainTokenStore.delete()` treats `errSecItemNotFound` as success.
-    /// This test validates that contract directly.
     @Test func keychainTokenStore_delete_whenEmpty_returnsTrue() {
-        let store = makeStore()
-        // No save() call — item does not exist.
-        #expect(store.delete() == true)
+        withKnownIssue("Keychain unavailable in sandboxed environment", isIntermittent: false) {
+            let store = makeStore()
+            #expect(store.delete() == true)
+        } when: {
+            !keychainAvailable()
+        }
     }
 }
