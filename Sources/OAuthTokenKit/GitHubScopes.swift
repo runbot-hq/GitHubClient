@@ -1,6 +1,5 @@
 // GitHubScopes.swift
 // OAuthTokenKit
-import Foundation
 
 // MARK: - GitHubScopes
 

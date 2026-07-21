@@ -41,6 +41,16 @@ public protocol TokenStore: Sendable {
 /// test init. Always returns `nil` from `load()` and reports success for
 /// `save(_:)` and `delete()` without touching any persistent storage.
 ///
+/// ## Why `public` (Migrated: internal → public)
+/// The original `NullTokenStore` in `GitHubClient` was `internal` — the
+/// `GitHubClient` production init constructed it directly inside the module.
+/// Now that the type lives in `OAuthTokenKit`, `GitHubClient` is a separate
+/// module and needs `public` access to construct it. Test targets that depend
+/// on `OAuthTokenKit` also need to construct it directly. The type is
+/// intentionally part of `OAuthTokenKit`'s public API: it is a useful test
+/// double for any downstream consumer writing their own `TokenCache`-backed
+/// component. The promotion is deliberate, not accidental.
+///
 /// ## Why this is in Sources, not Tests
 /// `GitHubClient`'s test init resolves a `nil` `tokenCache` argument to
 /// `TokenCache(tokenStore: NullTokenStore())` inside the init body. Because
