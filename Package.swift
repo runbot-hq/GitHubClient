@@ -37,7 +37,7 @@ let package = Package(
         ),
         .testTarget(
             name: "GitHubClientTests",
-            dependencies: ["GitHubClient"],
+            dependencies: ["GitHubClient", "EnvTokenKit"],
             path: "Tests/GitHubClientTests",
             swiftSettings: [
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault")

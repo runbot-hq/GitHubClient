@@ -10,16 +10,22 @@
 // .serialized and every test wraps its body in withCleanEnv.
 //
 // Keychain is never touched: token resolution is exercised through a MockTokenStore
-// and environment variables only, keeping these tests sandboxing-free and safe to
+// and a StubEnvTokenProvider, keeping these tests sandboxing-free and safe to
 // run with `swift test`.
 //
 // CI note: GitHub Actions always injects GITHUB_TOKEN into the runner environment.
 // Every test wraps its body in withCleanEnv, which strips both vars and restores
 // them afterwards.
+//
+// Env-var tests (GH_TOKEN / GITHUB_TOKEN) exercise the StubEnvTokenProvider path
+// via a stub that reads ProcessInfo, not the real EnvTokenProvider, because
+// GitHubClientTests cannot depend on EnvTokenProvider's internal implementation.
+// The real end-to-end env path is covered by EnvTokenKitTests.
 
 import Foundation
 import Synchronization
 import Testing
+import EnvTokenKit
 
 @testable import GitHubClient
 
@@ -51,6 +57,23 @@ private func withEnv(_ key: String, value: String, _ body: () async -> Void) asy
   if let previous { setenv(key, previous, 1) } else { unsetenv(key) }
 }
 
+// MARK: - EnvReadingStubProvider
+
+/// A `StubEnvTokenProvider`-like stub that reads `ProcessInfo` directly, used
+/// only by the env-var tests. This mirrors what the real `EnvTokenProvider` does
+/// for steps 3+4, without depending on its concrete implementation.
+///
+/// Kept file-private: only `GitHubTokenCacheTests` needs this bridge.
+private final class EnvReadingStubProvider: EnvTokenProviding, @unchecked Sendable {
+  func token() async -> String? {
+    for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
+      if let v = ProcessInfo.processInfo.environment[key], !v.isEmpty { return v }
+    }
+    return nil
+  }
+  func invalidate() {}
+}
+
 // MARK: - GitHubTokenCacheTests
 
 @Suite("GitHubTokenCache", .serialized)
@@ -58,18 +81,18 @@ struct GitHubTokenCacheTests {
 
   /// Builds a fresh `TokenCache` backed by an (optionally seeded) `MockTokenStore`.
   ///
-  /// `shellResult` overrides the login-shell resolution step so tests never
-  /// spawn a real `/bin/zsh` subprocess. Defaults to `.notFound` (instant,
-  /// no I/O) which is correct for all nil-path and env-var tests. Pass
-  /// `.found("token")` or `.failed` for tests that exercise shell-specific
-  /// behaviour.
+  /// `envProvider` overrides the injected env+shell provider so tests never
+  /// spawn a real `/bin/zsh` subprocess. Defaults to `StubEnvTokenProvider(result: .notFound)`
+  /// (instant, no I/O) which is correct for all nil-path and env-var tests. Pass
+  /// a `StubEnvTokenProvider(result: .found(…))` or `.failed` for tests that
+  /// exercise shell-specific behaviour.
   private func makeCache(
     storeToken: String? = nil,
-    shellResult: ShellTokenResult = .notFound
+    envProvider: any EnvTokenProviding = StubEnvTokenProvider(result: .notFound)
   ) -> TokenCache {
     TokenCache(
       tokenStore: MockTokenStore(initial: storeToken),
-      shellResolver: { _ in shellResult }
+      envProvider: envProvider
     )
   }
 
@@ -89,7 +112,10 @@ struct GitHubTokenCacheTests {
   @Test func token_storeTakesPriorityOverEnv() async {
     await withCleanEnv {
       await withEnv("GH_TOKEN", value: "env-token") {
-        let result = await makeCache(storeToken: "store-token").token()
+        let result = await makeCache(
+          storeToken: "store-token",
+          envProvider: EnvReadingStubProvider()
+        ).token()
         #expect(result == "store-token")
       }
     }
@@ -109,7 +135,7 @@ struct GitHubTokenCacheTests {
   @Test func token_ghTokenEnvVar_returnsToken() async {
     await withCleanEnv {
       await withEnv("GH_TOKEN", value: "gh-test-token") {
-        let result = await makeCache().token()
+        let result = await makeCache(envProvider: EnvReadingStubProvider()).token()
         #expect(result == "gh-test-token")
       }
     }
@@ -119,7 +145,7 @@ struct GitHubTokenCacheTests {
   @Test func token_ghTokenEmptyString_returnsNil() async {
     await withCleanEnv {
       await withEnv("GH_TOKEN", value: "") {
-        let result = await makeCache().token()
+        let result = await makeCache(envProvider: EnvReadingStubProvider()).token()
         #expect(result == nil)
       }
     }
@@ -131,7 +157,7 @@ struct GitHubTokenCacheTests {
   @Test func token_githubTokenEnvVarFallback_returnsToken() async {
     await withCleanEnv {
       await withEnv("GITHUB_TOKEN", value: "github-test-token") {
-        let result = await makeCache().token()
+        let result = await makeCache(envProvider: EnvReadingStubProvider()).token()
         #expect(result == "github-test-token")
       }
     }
@@ -141,7 +167,7 @@ struct GitHubTokenCacheTests {
   @Test func token_githubTokenEmptyString_returnsNil() async {
     await withCleanEnv {
       await withEnv("GITHUB_TOKEN", value: "") {
-        let result = await makeCache().token()
+        let result = await makeCache(envProvider: EnvReadingStubProvider()).token()
         #expect(result == nil)
       }
     }
@@ -152,7 +178,7 @@ struct GitHubTokenCacheTests {
     await withCleanEnv {
       await withEnv("GH_TOKEN", value: "primary-token") {
         await withEnv("GITHUB_TOKEN", value: "fallback-token") {
-          let result = await makeCache().token()
+          let result = await makeCache(envProvider: EnvReadingStubProvider()).token()
           #expect(result == "primary-token")
         }
       }
@@ -164,7 +190,7 @@ struct GitHubTokenCacheTests {
   /// Returns the cached value on a second call without re-reading the environment.
   @Test func token_secondCall_returnsFromCache() async {
     await withCleanEnv {
-      let cache = makeCache()
+      let cache = makeCache(envProvider: EnvReadingStubProvider())
       await withEnv("GH_TOKEN", value: "cached-token") {
         _ = await cache.token()  // populate cache
       }
@@ -179,7 +205,7 @@ struct GitHubTokenCacheTests {
   /// Clears a populated cache so the next call re-resolves from source.
   @Test func invalidate_clearsCache() async {
     await withCleanEnv {
-      let cache = makeCache()
+      let cache = makeCache(envProvider: EnvReadingStubProvider())
       await withEnv("GH_TOKEN", value: "original-token") {
         _ = await cache.token()  // populate cache
       }
@@ -200,22 +226,31 @@ struct GitHubTokenCacheTests {
     }
   }
 
+  /// `TokenCache.invalidate()` must forward to `envProvider.invalidate()`.
+  @Test func invalidate_forwardsToEnvProvider() async {
+    await withCleanEnv {
+      let stub = StubEnvTokenProvider(result: .notFound)
+      let cache = makeCache(envProvider: stub)
+      cache.invalidate()
+      #expect(stub.invalidateCalled.withLock { $0 } == true)
+    }
+  }
+
   // MARK: - token() — shell outcome latch
 
   /// Verifies that `.notFound` does not latch: a second `token()` call after the
-  /// resolver reports no export must re-enter the shell path, not short-circuit.
+  /// provider reports no token must re-enter the provider, not short-circuit.
   ///
-  /// ## How this test reaches the shell path
-  /// A `.notFound` `shellResolver` stub is injected via `makeCache`, so no real
+  /// ## How this test exercises the shell path
+  /// A `StubEnvTokenProvider(result: .notFound)` is injected, so no real
   /// `/bin/zsh` subprocess is spawned. The store is empty and env vars are
-  /// stripped, so all fast paths miss and `token()` reaches the resolver twice.
+  /// stripped, so all fast paths miss and `token()` reaches the provider twice.
   ///
   /// ## What this test validates
   /// That `.notFound` does not permanently block re-entry. An OAuth-only user
   /// who later adds `GH_TOKEN` to their shell profile should have it picked up
   /// on the next `token()` call without relaunching. Both calls return `nil`
-  /// here, but the resolver is invoked on both calls — confirmed by the
-  /// call-count assertion below.
+  /// here, but the provider is invoked on both calls — confirmed by `callCount`.
   ///
   /// ## .notFound re-entry cost (TODO #68)
   /// Because `.notFound` does not latch, an OAuth-only user launched from Finder
@@ -226,21 +261,24 @@ struct GitHubTokenCacheTests {
   func token_shellNotFound_doesNotLatch() async {
     await withCleanEnv {
       // Inject .notFound stub so no real /bin/zsh subprocess is spawned.
-      let cache = makeCache(shellResult: .notFound)
-      // First call: resolver returns .notFound, shellOutcome set to .notFound — NOT a latch.
+      let stub = StubEnvTokenProvider(result: .notFound)
+      let cache = makeCache(envProvider: stub)
+      // First call: provider returns nil — NOT a latch.
       let first = await cache.token()
       #expect(first == nil)
-      // Second call: .notFound does not short-circuit — resolver is re-entered.
+      // Second call: .notFound does not short-circuit — provider is re-entered.
       let second = await cache.token()
       #expect(second == nil)
+      // Provider must have been called twice (no latch).
+      #expect(stub.callCount.withLock { $0 } == 2)
     }
   }
 
   /// After shell-path resolution, a fresh cache instance backed by a seeded
   /// store must resolve from the store correctly.
   ///
-  /// ## How this test reaches the shell path
-  /// A `.notFound` `shellResolver` stub is injected via `makeCache`, so no real
+  /// ## How this test exercises the shell path
+  /// A `StubEnvTokenProvider(result: .notFound)` is injected, so no real
   /// `/bin/zsh` subprocess is spawned.
   ///
   /// ## Why this test uses a second `TokenCache` instance (intentional)
@@ -252,7 +290,7 @@ struct GitHubTokenCacheTests {
   func token_freshCacheAfterShellPath_storeTokenResolves() async {
     await withCleanEnv {
       // Inject .notFound stub — exercises the shell path without spawning /bin/zsh.
-      let cache = makeCache(shellResult: .notFound)
+      let cache = makeCache(envProvider: StubEnvTokenProvider(result: .notFound))
       let first = await cache.token()
       #expect(first == nil)
       // A new cache seeded with a store token resolves from store, unaffected by
@@ -263,56 +301,55 @@ struct GitHubTokenCacheTests {
     }
   }
 
-  /// After `invalidate()`, `shellOutcome` resets to `.notAttempted` so the
-  /// next `token()` call re-enters the shell path for a fresh attempt.
+  /// After `invalidate()`, the provider is reset so the next `token()` call
+  /// re-enters the full resolution chain for a fresh attempt.
   ///
   /// ## What this test validates
-  /// That `invalidate()` resets `shellOutcome`, not just `state.token`. A
-  /// `.notFound` stub is injected so no real `/bin/zsh` subprocess is spawned.
-  /// The `.failed` latch reset is covered separately by
-  /// `token_shellFailed_latches` + `invalidate_resetsShellOutcome` exercised
-  /// with a `.failed` stub if needed — the seam makes it possible.
+  /// That `invalidate()` resets the provider (via `envProvider.invalidate()`),
+  /// not just `state.token`. A `.notFound` stub is injected so no real
+  /// `/bin/zsh` subprocess is spawned. The provider being called twice
+  /// (once before invalidate, once after) confirms re-entry.
   @Test
   func invalidate_resetsShellOutcome() async {
     await withCleanEnv {
       // Inject .notFound stub — no real /bin/zsh spawn needed.
-      let cache = makeCache(shellResult: .notFound)
+      let stub = StubEnvTokenProvider(result: .notFound)
+      let cache = makeCache(envProvider: stub)
       let first = await cache.token()
       #expect(first == nil)
       cache.invalidate()
-      // After invalidate(), outcome is .notAttempted. token() re-enters the
-      // full chain — resolver is called again, returns .notFound, still nil.
+      // After invalidate(), provider.invalidate() was called. token() re-enters
+      // the full chain — provider is called again, returns nil, still nil.
       let second = await cache.token()
       #expect(second == nil)
+      // Provider called once before and once after invalidate — re-entry confirmed.
+      #expect(stub.callCount.withLock { $0 } == 2)
     }
   }
 
-  /// After the shell resolver returns `.failed`, subsequent `token()` calls must
-  /// NOT re-enter the shell path — `.failed` IS a permanent latch.
+  /// After the provider returns a value matching `.failed` semantics, `TokenCache`
+  /// must still delegate to the provider on subsequent calls — latch enforcement
+  /// is `EnvTokenProvider`'s responsibility, not `TokenCache`'s.
   ///
   /// ## What this test validates
-  /// A `.failed` stub is injected for the first call. After `token()` records
-  /// `.failed`, it must short-circuit on the second call without invoking the
-  /// resolver again — confirmed by the call-count assertion.
+  /// `StubEnvTokenProvider(result: .failed)` always returns `nil`. `TokenCache`
+  /// calls it on every `token()` invocation — it does NOT latch internally.
+  /// The real latch lives in `EnvTokenProvider` (tested in `EnvTokenKitTests`).
+  /// This test confirms `TokenCache`'s side of the contract: it delegates every
+  /// time and trusts the provider to manage its own latch.
   @Test
   func token_shellFailed_latches() async {
     await withCleanEnv {
-      let counter = Mutex<Int>(0)
-      let cache = TokenCache(
-        tokenStore: MockTokenStore(initial: nil),
-        shellResolver: { _ in
-          counter.withLock { $0 += 1 }
-          return .failed
-        }
-      )
+      let stub = StubEnvTokenProvider(result: .failed)
+      let cache = makeCache(envProvider: stub)
       let first = await cache.token()
       #expect(first == nil)
-      #expect(counter.withLock { $0 } == 1)
+      #expect(stub.callCount.withLock { $0 } == 1)
 
       let second = await cache.token()
       #expect(second == nil)
-      // Resolver must NOT be called again — .failed is latched.
-      #expect(counter.withLock { $0 } == 1)
+      // TokenCache always delegates; the real latch is inside EnvTokenProvider.
+      #expect(stub.callCount.withLock { $0 } == 2)
     }
   }
 
