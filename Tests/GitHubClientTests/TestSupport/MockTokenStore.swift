@@ -3,6 +3,7 @@
 // In-memory `TokenStore` double for exercising `TokenCache` without touching the keychain.
 import Foundation
 import GitHubClient
+import OAuthTokenKit
 import Synchronization
 
 // MARK: - MockTokenStore

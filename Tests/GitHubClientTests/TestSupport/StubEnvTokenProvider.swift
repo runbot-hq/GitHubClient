@@ -4,7 +4,7 @@ import Foundation
 import Synchronization
 
 @testable import GitHubClient
-import EnvTokenKit
+@testable import EnvTokenKit
 
 // MARK: - StubEnvTokenProvider
 

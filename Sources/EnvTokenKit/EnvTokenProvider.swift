@@ -197,7 +197,7 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// who sets both gets the expected one without any silent override.
     private func resolveFromEnvironment() -> String? {
         for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
-            if let envValue = getenv(key).flatMap({ String(cString: $0) }), !envValue.isEmpty {
+            if let envValue = ProcessInfo.processInfo.environment[key], !envValue.isEmpty {
                 #if DEBUG
                 log?("EnvTokenProvider › resolved from env var \(key) (len=\(envValue.count))", "transport")
                 #endif

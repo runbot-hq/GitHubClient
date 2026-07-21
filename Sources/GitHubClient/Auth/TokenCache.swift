@@ -1,8 +1,8 @@
 // TokenCache.swift
 // GitHubClient
-import EnvTokenKit
+public import EnvTokenKit
 import Foundation
-import OAuthTokenKit
+public import OAuthTokenKit
 import Synchronization
 
 // MARK: - TokenCache
