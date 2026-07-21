@@ -68,11 +68,27 @@ public final class OAuthService: OAuthServiceProtocol {
     ///   - clientSecret: The GitHub OAuth app client secret.
     ///   - tokenStore: The backing store used to save/delete/load the OAuth token.
     ///   - scopes: The OAuth scopes to request during sign-in. Defaults to `GitHubScopes.default`.
-    ///   - redirectURI: The OAuth redirect URI. Defaults to `OAuthService.defaultRedirectURI`.
+    ///     Must not be empty — a `precondition` failure is raised at init time if an empty array
+    ///     is passed (fires in both debug and release builds — this is intentional; an empty
+    ///     scopes array is a programming error, not a runtime condition).
+    ///     Use `GitHubScopes` constants for type safety and discoverability.
+    ///   - redirectURI: The OAuth redirect URI sent to GitHub during authorisation. Defaults to
+    ///     `OAuthService.defaultRedirectURI`.
+    ///     Override for staging environments, white-label builds, or a second OAuth app.
+    ///     No `precondition` guards against an empty string — an empty URI is a runtime
+    ///     misconfiguration, not a programming error; GitHub will reject it at authorisation
+    ///     time with a descriptive error. This is intentionally asymmetric with the `scopes`
+    ///     guard (an empty scopes array has no recoverable fallback; an empty URI does).
+    ///     Existing call sites that omit this parameter are unaffected.
     ///   - log: Optional log closure `(message, category)` bridged from `GitHubLogger`.
     ///   - session: The `URLSessionProtocol` for token-exchange requests. Defaults to `URLSession.shared`.
-    ///   - onTokenSaved: Optional callback after a successful token save.
-    ///   - onTokenDeleted: Optional callback on every `signOut()`.
+    ///     Inject a `MockURLSession` in tests to avoid real network calls.
+    ///   - onTokenSaved: Optional callback invoked after a successful token save.
+    ///     Use this to invalidate an external cache (e.g. `TokenCache.invalidate()`).
+    ///     Defaults to `nil` — existing call sites are unaffected.
+    ///   - onTokenDeleted: Optional callback invoked on every `signOut()`, regardless of
+    ///     whether the Keychain delete succeeded. Use this to invalidate a `TokenCache`.
+    ///     Defaults to `nil` — existing call sites are unaffected.
     public init(
         clientID: String,
         clientSecret: String,
@@ -100,14 +116,20 @@ public final class OAuthService: OAuthServiceProtocol {
 
     /// `true` when a valid OAuth token is present in the token store (e.g. Keychain).
     ///
-    /// The Keychain is the source of truth — no in-memory cache is used here.
-    /// Caching would mask external token revocation (e.g. the user revoked the
-    /// token on GitHub.com or another device deleted it from the shared Keychain).
-    /// The synchronous Keychain read is fast enough for UI-state checks.
+/// Each call performs one synchronous `SecItemCopyMatching` read. This is
+/// intentional: the Keychain is the source of truth and caching here would
+/// mask external token revocation. The read is fast (≥10 µs on macOS) and
+/// safe on the main thread at current call sites (settings appear on user
+/// interaction, not in animation/layout loops). If this is ever used in a
+/// tight render loop, cache the result at the call site instead.
     public var isAuthenticated: Bool { tokenStore.load() != nil }
 
     /// `true` when any usable GitHub token is available — OAuth token,
     /// `GH_TOKEN`, or `GITHUB_TOKEN` environment variable.
+    ///
+    /// Delegates to `isAuthenticated` for the Keychain check to avoid a
+    /// duplicate `tokenStore.load()` call when both properties are evaluated
+    /// back-to-back (e.g. `SettingsView.onAppearAction`).
     public var hasAnyToken: Bool {
         if isAuthenticated { return true }
         let env = ProcessInfo.processInfo.environment
@@ -187,11 +209,14 @@ public final class OAuthService: OAuthServiceProtocol {
 
     /// Clears the pending state, deletes the stored token, and emits a sign-out event.
     ///
-    /// The `tokenStore.delete()` call is best-effort: if it fails (e.g. Keychain
-    /// temporarily unavailable) the sign-out still proceeds. A stale Keychain
-    /// entry is recoverable — the user can sign in again — whereas blocking
-    /// sign-out on a Keychain error would permanently lock the UI in a signed-in
-    /// state with no escape.
+/// Token deletion is best-effort: if `tokenStore.delete()` fails (e.g.
+/// `errSecInteractionNotAllowed` when the screen is locked), the cache is
+/// still invalidated and the sign-out stream is still emitted. The app UI
+/// reflects signed-out state immediately. A stale Keychain entry is benign
+/// on next launch because `isAuthenticated` checks for a *valid* token; an
+/// orphaned entry will simply be overwritten or ignored on next sign-in.
+/// Permanent UI lock-out is a worse failure mode than a recoverable ghost
+/// entry, so we always proceed.
     public func signOut() {
         log?("OAuthService › signOut — called", "transport")
         pendingState = nil
@@ -206,11 +231,13 @@ public final class OAuthService: OAuthServiceProtocol {
     // MARK: - Callback Handler
 
     /// Processes the OAuth redirect URL from GitHub.
+    ///
+    /// Extracts the `code` and `state` query parameters, validates the CSRF
+    /// state nonce, then kicks off the token-exchange flow.
     public func handleCallback(_ url: URL) {
-        // Log scheme+host only — the full URL contains the one-time code query
-        // parameter which is sensitive for a short window. Never log
-        // url.absoluteString or url.query here; doing so would leak the live
-        // credential into unified logs.
+// Log scheme+host only — the full URL contains the one-time `code` query
+// parameter which is sensitive for a short window. Never log url.absoluteString
+// or url.query here; doing so would leak the live credential into unified logs.
         let safeURL = "\(url.scheme ?? "")://\(url.host ?? "")"
         log?("OAuthService › handleCallback — url=\(safeURL)", "transport")
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -240,6 +267,15 @@ public final class OAuthService: OAuthServiceProtocol {
     // MARK: - Token Exchange
 
     /// Exchanges the one-time authorization code for an access token.
+    ///
+    /// Steps:
+    /// 1. Encode the token-exchange request body.
+    /// 2. POST to `accessTokenURL` via the injected `URLSessionProtocol`.
+    /// 3. Decode the `OAuthTokenResponse`.
+    /// 4. Validate the response — GitHub returns HTTP 200 even for errors;
+    ///    the error code is in the JSON body.
+    /// 5. Save the token via `tokenStore.save()`. On success call `onTokenSaved`
+    ///    and fire a `true` sign-in event; on failure fire `false`.
     private func exchangeCode(_ code: String) async {
         log?("OAuthService › exchangeCode — POST to GitHub", "transport")
         let req: URLRequest
