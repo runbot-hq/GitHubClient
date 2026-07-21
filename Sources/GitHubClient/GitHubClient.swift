@@ -1,8 +1,8 @@
 // GitHubClient.swift
 // GitHubClient
 import Foundation
+import OAuthTokenKit
 internal import EnvTokenKit
-internal import OAuthTokenKit
 
 // MARK: - GitHubClient
 //
@@ -115,7 +115,7 @@ public final class GitHubClient {
     ///     `GitHubScopes.default`. Must not be empty. Use `GitHubScopes`
     ///     constants for type safety and discoverability.
     ///   - redirectURI: The OAuth redirect URI sent to GitHub during authorisation.
-    ///     Defaults to `OAuthService.defaultRedirectURI` (`runbot://oauth/callback`).
+    ///     Defaults to `"runbot://oauth/callback"`.
     ///     Override for staging environments, white-label builds, or a second OAuth app.
     ///     Existing call sites are unaffected — omitting this parameter preserves current behaviour.
     ///   - logger: Optional logger for diagnostic messages.
@@ -126,9 +126,12 @@ public final class GitHubClient {
         service: String,
         account: String,
         scopes: [String] = GitHubScopes.default,
-        redirectURI: String = OAuthService.defaultRedirectURI,
+        redirectURI: String = "runbot://oauth/callback", // NOSONAR — mirrors OAuthService.defaultRedirectURI
         logger: (any GitHubLogger)? = nil
     ) {
+        // Bridge GitHubLogger → log closure for OAuthTokenKit / EnvTokenKit injection.
+        // GitHubLogger stays in GitHubClient/Transport — kits are closure-injected
+        // to avoid any shared logger dependency between targets.
         let log: (@Sendable (String, String) -> Void)? = logger.map { lg in
             { message, category in lg.log(message, category: category) }
         }
@@ -141,7 +144,7 @@ public final class GitHubClient {
             tokenStore: store,
             scopes: scopes,
             redirectURI: redirectURI,
-            logger: logger,
+            log: log,
             session: URLSession.shared,
             onTokenSaved: { cache.invalidate() },
             onTokenDeleted: { cache.invalidate() }
@@ -150,6 +153,11 @@ public final class GitHubClient {
             tokenProvider: { await cache.token() },
             logger: logger
         )
+        // ⚠️ NOT a dead assignment — this is load-bearing module wiring.
+        // sharedTransportStorage is the backing var read by currentTransport
+        // (GitHubTransportShims.swift). Every free-function shim in the module
+        // resolves its transport via `currentTransport`, which falls back to
+        // sharedTransportStorage when no @TaskLocal override is in scope.
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
