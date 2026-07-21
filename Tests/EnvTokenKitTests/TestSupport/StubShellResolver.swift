@@ -1,5 +1,5 @@
 // StubShellResolver.swift
-// GitHubClient
+// EnvTokenKitTests
 import Synchronization
 @testable import EnvTokenKit
 
