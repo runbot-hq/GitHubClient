@@ -15,6 +15,11 @@ import Synchronization
 //   3. ProcessInfo env  (sync, covers terminal / CI launches)
 //   4. loginShellToken  (async subprocess — cold Finder launch only)
 //
+// Steps 3+4 are delegated to an injected `any EnvTokenProviding` when
+// one is provided (production path after Step 4 of the extraction).
+// The legacy inline resolveFromEnvironment() / loginShellToken path
+// below remains live until Step 5 removes it.
+//
 // The shell is spawned at most once per cache lifetime for a .failed outcome
 // (timeout, launch error). A .notFound outcome (shell healthy, no export)
 // does NOT latch — the shell path is re-entered on the next token() call.
@@ -99,6 +104,18 @@ public final class TokenCache: Sendable {
     /// An optional logger for diagnostic messages.
     private let logger: (any GitHubLogger)?
 
+    /// Injected env+shell token provider.
+    ///
+    /// When non-nil, `token()` delegates steps 3+4 of the resolution chain
+    /// to this provider instead of the legacy inline `resolveFromEnvironment()`
+    /// / `loginShellToken` path. Set to non-nil by `GitHubClient.swift` after
+    /// Step 4 of the extraction; becomes non-optional after Step 5.
+    ///
+    /// `TokenCache` never names the concrete `EnvTokenProvider` type — it only
+    /// knows `any EnvTokenProviding`. The concrete type is constructed and
+    /// injected exclusively by `GitHubClient.swift`.
+    private let envProvider: (any EnvTokenProviding)?
+
     /// Resolves a token via the login shell.
     ///
     /// Defaults to the real `loginShellToken` free function. Overridable in
@@ -142,13 +159,21 @@ public final class TokenCache: Sendable {
     /// public API surface. Pass a `shellResolver` stub in tests to avoid
     /// spawning a real `/bin/zsh` subprocess. Production callers use the public
     /// `convenience init` which defaults `shellResolver` to `loginShellToken`.
+    ///
+    /// `envProvider` is optional here only as a transitional measure so existing
+    /// call sites compile unchanged while `EnvTokenProvider` is being extracted
+    /// into `EnvTokenKit` (Steps 3–4). After Step 5 cleans up the legacy inline
+    /// path, this becomes non-optional with no default value — the caller
+    /// (`GitHubClient.swift`) always supplies it explicitly.
     init(
         tokenStore: any TokenStore,
         logger: (any GitHubLogger)? = nil,
+        envProvider: (any EnvTokenProviding)? = nil,
         shellResolver: (@Sendable ((any GitHubLogger)?) async -> ShellTokenResult)? = nil
     ) {
         self.tokenStore = tokenStore
         self.logger = logger
+        self.envProvider = envProvider
         self.shellResolver = shellResolver ?? { logger in await loginShellToken(logger: logger) }
     }
 
@@ -161,6 +186,11 @@ public final class TokenCache: Sendable {
     /// 2. `TokenStore.load()` — synchronous Keychain read
     /// 3. `GH_TOKEN` / `GITHUB_TOKEN` process environment — covers terminal / CI launches
     /// 4. Login shell subprocess — cold Finder/Dock/login-item launch only
+    ///
+    /// Steps 3+4 are delegated to the injected `EnvTokenProviding` when one is
+    /// present (production path after Step 4 of the extraction). The legacy inline
+    /// `resolveFromEnvironment()` / `loginShellToken` path handles both steps when
+    /// no provider is injected and is removed in Step 5.
     ///
     /// ## Why `async` when steps 1–3 are synchronous
     /// Steps 1–3 are synchronous and return without ever suspending. The function
@@ -223,6 +253,19 @@ public final class TokenCache: Sendable {
     public func token() async -> String? {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }
+
+        // If an EnvTokenProviding was injected, delegate steps 3+4 to it.
+        // The legacy inline resolveFromEnvironment() / loginShellToken path
+        // below handles both steps when no provider is injected and is
+        // removed in Step 5 once EnvTokenProvider is fully extracted.
+        if let envProvider {
+            if let envToken = await envProvider.token() {
+                state.withLock { if $0.token == nil { $0.token = envToken } }
+                return envToken
+            }
+            return nil
+        }
+
         if let envToken = resolveFromEnvironment() { return envToken }
         // Short-circuit if the shell previously failed (timeout / launch error /
         // App Sandbox). .notFound does NOT short-circuit — re-entry is allowed so
