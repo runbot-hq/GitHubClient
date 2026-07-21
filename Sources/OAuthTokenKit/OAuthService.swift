@@ -31,15 +31,15 @@ public final class OAuthService: OAuthServiceProtocol {
     private let encoder = JSONEncoder()
     /// The default OAuth redirect URI, sourced from `GitHubConstants.oauthRedirectURI`.
     /// Override via the `redirectURI` parameter on `OAuthService.init`.
-    public static let defaultRedirectURI: String = GitHubConstants.oauthRedirectURI
+    public static let defaultRedirectURI: String = "runbot://oauth/callback"
     /// The OAuth redirect URI. Must match the value registered in the GitHub OAuth app settings.
     private let redirectURI: String
     /// OAuth scopes requested during sign-in. Set at init time via the `scopes` parameter.
     private let scopes: [String]
     /// GitHub OAuth authorisation URL.
-    private let authorizeURL = "\(GitHubConstants.base)/login/oauth/authorize"
+    private let authorizeURL = "https://github.com/login/oauth/authorize"
     /// GitHub OAuth token-exchange URL.
-    private let accessTokenURL = "\(GitHubConstants.base)/login/oauth/access_token"
+    private let accessTokenURL = "https://github.com/login/oauth/access_token"
     /// CSRF nonce generated in makeSignInURL(), verified in handleCallback(). Cleared after use.
     private var pendingState: String?
 

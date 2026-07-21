@@ -132,8 +132,8 @@ public final class GitHubClient {
         // Bridge GitHubLogger → log closure for kit injection.
         // GitHubLogger stays in GitHubClient/Transport — kits are closure-injected
         // to avoid any shared logger dependency between targets.
-        let log: (@Sendable (String, String) -> Void)? = logger.map { l in
-            { message, category in l.log(message, category: category) }
+        let log: (@Sendable (String, String) -> Void)? = logger.map { lg in
+            { message, category in lg.log(message, category: category) }
         }
         // KeychainTokenStore and OAuthService are OAuthTokenKit concrete types.
         // internal import OAuthTokenKit ensures they never leak into GitHubClient's public API.

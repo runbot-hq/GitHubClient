@@ -100,7 +100,7 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     private let state = Mutex<ShellResolutionOutcome>(.notAttempted)
 
     /// Production init. `log` is bridged from `GitHubLogger` by `GitHubClient.swift`.
-    public init(log: (@Sendable (String, String) -> Void)? = nil) {
+    public convenience init(log: (@Sendable (String, String) -> Void)? = nil) {
         self.init(log: log, shellResolver: nil)
     }
 
