@@ -1,5 +1,5 @@
 // EnvTokenProvider.swift
-// GitHubClient
+// EnvTokenKit
 import Foundation
 import Synchronization
 
@@ -12,8 +12,8 @@ import Synchronization
 ///
 /// ## Why an enum instead of a Bool
 /// The previous `shellFailed: Bool` flag collapsed two semantically distinct
-/// outcomes — "shell ran but found no export" and "shell failed to launch or
-/// timed out" — into a single latch. Both set the flag to `true`, permanently
+/// outcomes — “shell ran but found no export” and “shell failed to launch or
+/// timed out” — into a single latch. Both set the flag to `true`, permanently
 /// blocking re-entry for the process lifetime. That is correct for `.failed`
 /// (retrying a broken shell every 30 s is wasteful) but wrong for `.notFound`
 /// (an OAuth-only user who later adds `GH_TOKEN` to their profile should not
@@ -30,8 +30,8 @@ enum ShellResolutionOutcome {
     /// ## Why not collapse this into `.notAttempted`
     /// Observable behaviour is identical today: both cases allow re-entry.
     /// The distinction is preserved for two reasons:
-    /// 1. Diagnostics — logging and future telemetry can distinguish "never
-    ///    tried" from "tried and found nothing", which helps triage user
+    /// 1. Diagnostics — logging and future telemetry can distinguish “never
+    ///    tried” from “tried and found nothing”, which helps triage user
     ///    reports without needing a separate flag.
     /// 2. Future policy — a `.notFound`-specific cooldown (e.g. re-enter at
     ///    most once per 60 s rather than on every poll cycle) could be added
@@ -52,7 +52,7 @@ enum ShellResolutionOutcome {
     /// included — reaches this path on every poll cycle. The decision not to
     /// latch is deliberate: latching `.notFound` like `.failed` would prevent
     /// a user who later adds an export from picking it up without a
-    /// sign-out/sign-in cycle, defeating the feature's core promise.
+    /// sign-out/sign-in cycle, defeating the feature’s core promise.
     /// OAuth users launched from a terminal do NOT reach step 4 (step 3
     /// resolves from `ProcessInfo`), but OAuth users launched from Finder
     /// with no export DO. The per-cycle shell cost is real and acknowledged;
@@ -93,19 +93,13 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// nil-path tests and keeping the suite fast on both local and CI runners.
     let shellResolver: @Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult
 
-    /// Reads a value for the given environment variable key.
+    /// Reads a single environment variable by key.
     ///
     /// Defaults to `ProcessInfo.processInfo.environment[key]` in production.
-    /// Overridable in tests via the `envLookup` init parameter so tests never
-    /// consult the real process environment — eliminating cross-suite races
-    /// caused by concurrent `setenv`/`unsetenv` calls in other suites running
-    /// in the same process.
-    ///
-    /// ## Why a closure instead of injecting a [String:String] dictionary
-    /// A closure lets tests return a fixed value per key without constructing a
-    /// full environment dictionary. It also makes the seam explicit at the call
-    /// site: `envLookup: { _ in nil }` clearly signals "ProcessInfo is bypassed"
-    /// with zero ceremony.
+    /// Overridable in tests via the `envLookup` init parameter so tests that
+    /// exercise the shell-fallback path never touch the live process environment
+    /// — eliminating the cross-suite `setenv`/`unsetenv` race on CI where
+    /// `GITHUB_TOKEN` is always present in the runner environment.
     let envLookup: @Sendable (String) -> String?
 
     /// Shell outcome state guarded by a `Mutex`.
@@ -119,8 +113,17 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
         self.init(log: log, shellResolver: nil, envLookup: nil)
     }
 
-    /// Test init — keeps `shellResolver` and `envLookup` seams so tests never
-    /// spawn real `/bin/zsh` and never consult the real process environment.
+    /// Test init — exposes `shellResolver` and `envLookup` seams so tests never
+    /// spawn real `/bin/zsh` and never touch the live process environment.
+    ///
+    /// - Parameters:
+    ///   - log: Optional log closure.
+    ///   - shellResolver: Overrides login-shell resolution. Defaults to the real
+    ///     `loginShellToken` free function.
+    ///   - envLookup: Overrides environment variable lookup. Defaults to
+    ///     `ProcessInfo.processInfo.environment[key]`. Pass `{ _ in nil }` in
+    ///     tests that exercise the shell-fallback path to avoid any dependency
+    ///     on the live process environment.
     init(
         log: (@Sendable (String, String) -> Void)? = nil,
         shellResolver: (@Sendable ((@Sendable (String, String) -> Void)?) async -> ShellTokenResult)? = nil,
@@ -128,10 +131,7 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     ) {
         self.log = log
         self.shellResolver = shellResolver ?? { log in await loginShellToken(log: log) }
-        self.envLookup = envLookup ?? { key in
-            let value = ProcessInfo.processInfo.environment[key]
-            return (value?.isEmpty == false) ? value : nil
-        }
+        self.envLookup = envLookup ?? { key in ProcessInfo.processInfo.environment[key] }
     }
 
     // MARK: - EnvTokenProviding
@@ -200,14 +200,11 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
 
     // MARK: - Private helpers
 
-    /// Reads `GH_TOKEN` or `GITHUB_TOKEN` via `envLookup`.
+    /// Reads `GH_TOKEN` or `GITHUB_TOKEN` via the injected `envLookup` closure.
     ///
-    /// In production `envLookup` delegates to `ProcessInfo.processInfo.environment`.
-    /// In tests it is stubbed to return a fixed value (or nil) so the real process
-    /// environment is never consulted — eliminating cross-suite flakes on CI.
-    ///
-    /// Empty strings are treated as absent: an empty `GH_TOKEN` export is
-    /// indistinguishable from no export for auth purposes.
+    /// In production `envLookup` reads `ProcessInfo.processInfo.environment`.
+    /// In tests it can be stubbed to return a fixed value or nil, eliminating
+    /// any dependency on the live process environment.
     ///
     /// ## Why GH_TOKEN is checked before GITHUB_TOKEN
     /// Both variables resolve the same credential. `GH_TOKEN` is the shorter,

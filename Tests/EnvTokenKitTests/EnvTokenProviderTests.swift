@@ -4,25 +4,20 @@
 // Exercises `EnvTokenProvider` resolution order, shell latch policy, and
 // invalidation.
 //
-// ⚠️ ISOLATION STRATEGY
-// All test targets run in the same process. `setenv`/`unsetenv` mutate the
-// process-global environment, so concurrent suites can race on GH_TOKEN /
-// GITHUB_TOKEN. The strategy to prevent flakes is two-layered:
+// ⚠️ ISOLATION REQUIREMENT
+// Tests that exercise the ProcessInfo fast path (env-var resolution) use the
+// `envLookup` seam to stub out environment reads entirely, so they never touch
+// the live process environment and are immune to cross-suite setenv/unsetenv
+// races. `withCleanEnv` is kept as a belt-and-suspenders guard for the small
+// number of tests that do need to assert on real env-var pass-through behaviour,
+// but the primary isolation mechanism is the injected `envLookup` closure.
 //
-// 1. Tests that exercise the ProcessInfo fast path use `withEnv` / `withCleanEnv`
-//    AND stub `envLookup` so `EnvTokenProvider` never consults the real process
-//    environment. The env helpers exist only to verify that the production
-//    `envLookup` default (ProcessInfo) reads the right key — not as a general
-//    isolation mechanism.
+// No real `/bin/zsh` subprocess is ever spawned. All tests inject a
+// `shellResolver` closure that returns a fixed `ShellTokenResult` immediately.
 //
-// 2. Tests that exercise the shell path inject both `shellResolver` (stub, no
-//    real /bin/zsh) and `envLookup: { _ in nil }` (stub, no real ProcessInfo)
-//    so they are fully deterministic regardless of what other suites do to the
-//    process environment concurrently.
-//
-// `@Suite(.serialized)` is kept as a belt-and-suspenders guard for the small
-// number of tests that still use `withEnv` on the real environment, but it is
-// NOT relied upon for cross-suite isolation.
+// CI note: GitHub Actions always injects GITHUB_TOKEN into the runner environment.
+// Tests that exercise the shell-fallback path pass `envLookup: { _ in nil }` so
+// the live GITHUB_TOKEN never interferes with shell-path assertions.
 
 import Foundation
 import Synchronization
@@ -34,9 +29,16 @@ import Testing
 
 /// Strips both token env vars, runs body, then restores the previous values.
 ///
-/// ⚠️ Only safe within a single serialized suite. Cross-suite races are
-/// eliminated by stubbing `envLookup` instead — see the file-level isolation
-/// strategy note above.
+/// Used only for tests that must assert on real env-var pass-through behaviour
+/// (i.e. that `EnvTokenProvider` correctly reads a value set in the process
+/// environment). Tests that exercise the shell-fallback path should use the
+/// `envLookup` seam instead — see `makeProvider(envLookup:shellResult:)`.
+///
+/// ⚠️ SERIALIZED DEPENDENCY: `setenv`/`unsetenv` mutate the process-global
+/// environment. Correctness relies on the `@Suite(.serialized)` attribute on
+/// `EnvTokenProviderTests` — if `.serialized` is ever removed, concurrent
+/// tests that both call `withCleanEnv` will race on `GH_TOKEN`/`GITHUB_TOKEN`
+/// and produce intermittent flakes.
 private func withCleanEnv(_ body: () async -> Void) async {
     let prevGH = getenv("GH_TOKEN").flatMap { String(cString: $0) }
     let prevGitHub = getenv("GITHUB_TOKEN").flatMap { String(cString: $0) }
@@ -48,6 +50,7 @@ private func withCleanEnv(_ body: () async -> Void) async {
 }
 
 /// Sets one env var for the duration of body, then restores the previous value.
+/// See `withCleanEnv` for the `.serialized` dependency note.
 private func withEnv(_ key: String, value: String, _ body: () async -> Void) async {
     let previous = getenv(key).flatMap { String(cString: $0) }
     setenv(key, value, 1)
@@ -60,16 +63,19 @@ private func withEnv(_ key: String, value: String, _ body: () async -> Void) asy
 @Suite("EnvTokenProvider", .serialized)
 struct EnvTokenProviderTests {
 
-    /// Builds a provider with all I/O stubbed out.
+    /// Builds a fresh `EnvTokenProvider` with fully injected seams.
     ///
     /// - Parameters:
-    ///   - shellResult: What the shell resolver returns. Defaults to `.notFound`.
-    ///   - envLookup: What the env lookup returns for a given key.
-    ///     Defaults to `nil` (empty environment) so tests are immune to whatever
-    ///     `GH_TOKEN`/`GITHUB_TOKEN` the CI runner or concurrent suite has set.
+    ///   - envLookup: Overrides environment variable lookup. Defaults to
+    ///     `{ _ in nil }` so tests that exercise the shell-fallback path are
+    ///     never affected by the live process environment (e.g. CI-injected
+    ///     `GITHUB_TOKEN`). Pass a real lookup or a specific stub when the test
+    ///     needs to assert on env-var resolution behaviour.
+    ///   - shellResult: The `ShellTokenResult` the resolver will return.
+    ///     Defaults to `.notFound` (instant, no I/O).
     private func makeProvider(
-        shellResult: ShellTokenResult = .notFound,
-        envLookup: (@Sendable (String) -> String?)? = nil
+        envLookup: (@Sendable (String) -> String?)? = nil,
+        shellResult: ShellTokenResult = .notFound
     ) -> EnvTokenProvider {
         EnvTokenProvider(
             shellResolver: { _ in shellResult },
@@ -79,32 +85,47 @@ struct EnvTokenProviderTests {
 
     // MARK: - token() — ProcessInfo hit (terminal / install launch path)
 
-    /// Resolves the token from the `GH_TOKEN` env var without entering the shell path.
+    /// Resolves a token from the environment without entering the shell path.
     ///
-    /// Uses a stubbed `envLookup` so this test is immune to cross-suite env races.
-    /// The injected `shellResolver` counter must remain 0 — the env fast path must
-    /// short-circuit before the shell resolver is reached.
+    /// Uses `withCleanEnv` + `withEnv` to set a real process env var, then
+    /// constructs the provider with the default `envLookup` (reads ProcessInfo)
+    /// to confirm the end-to-end env-var path works.
+    ///
+    /// ## How this test validates the shell is not spawned
+    /// The injected `shellResolver` increments a counter. If `token()` returns
+    /// the env-var value before reaching the shell path, the counter stays 0.
     @Test func envProvider_processInfo_hit() async {
-        let shellCallCount = Mutex<Int>(0)
-        let provider = EnvTokenProvider(
-            shellResolver: { _ in
-                shellCallCount.withLock { $0 += 1 }
-                return .notFound
-            },
-            envLookup: { key in key == "GH_TOKEN" ? "terminal-token" : nil }
-        )
-        let result = await provider.token()
-        #expect(result == "terminal-token")
-        #expect(shellCallCount.withLock { $0 } == 0)
+        await withCleanEnv {
+            let shellCallCount = Mutex<Int>(0)
+            // Use the real envLookup (ProcessInfo) for this test — we are
+            // validating that the env-var fast path works end-to-end.
+            let provider = EnvTokenProvider(
+                shellResolver: { _ in
+                    shellCallCount.withLock { $0 += 1 }
+                    return .notFound
+                }
+                // envLookup defaults to ProcessInfo in the internal init
+            )
+            await withEnv("GH_TOKEN", value: "terminal-token") {
+                let result = await provider.token()
+                #expect(result == "terminal-token")
+            }
+            // ProcessInfo fast path must short-circuit before the shell resolver.
+            #expect(shellCallCount.withLock { $0 } == 0)
+        }
     }
 
-    /// Falls back to the shell resolver when the env lookup returns nil for both keys.
+    /// Shell resolver fires when the env lookup returns nil for both vars.
     ///
-    /// `envLookup: { _ in nil }` simulates a Finder/Dock launch where `launchd`
-    /// provides no shell exports. The injected resolver returns `.found("shell-token")`
-    /// so no real subprocess is spawned and no real process env is consulted.
+    /// Uses the `envLookup` seam (`{ _ in nil }`) so this test never touches
+    /// the live process environment — immune to CI-injected `GITHUB_TOKEN`
+    /// and cross-suite `setenv` races.
     @Test func envProvider_processInfo_miss_shellHit() async {
-        let provider = makeProvider(shellResult: .found("shell-token"))
+        // envLookup always returns nil — no dependency on the live process env.
+        let provider = makeProvider(
+            envLookup: { _ in nil },
+            shellResult: .found("shell-token")
+        )
         let result = await provider.token()
         #expect(result == "shell-token")
     }
@@ -112,13 +133,16 @@ struct EnvTokenProviderTests {
     // MARK: - token() — priority order
 
     /// `GH_TOKEN` is preferred over `GITHUB_TOKEN` when both are set.
+    ///
+    /// Uses the `envLookup` seam to inject both values without touching the
+    /// live process environment.
     @Test func envProvider_ghToken_preferredOver_githubToken() async {
         let provider = makeProvider(
             envLookup: { key in
                 switch key {
-                case "GH_TOKEN":     return "primary-token"
+                case "GH_TOKEN": return "primary-token"
                 case "GITHUB_TOKEN": return "fallback-token"
-                default:             return nil
+                default: return nil
                 }
             }
         )
@@ -128,23 +152,19 @@ struct EnvTokenProviderTests {
 
     // MARK: - token() — shell latch: .failed
 
-    /// After the shell returns `.failed`, subsequent `token()` calls must
-    /// short-circuit without re-entering the resolver.
+    /// After the shell returns `.failed`, subsequent `token()` calls must short-circuit
+    /// without re-entering the resolver.
     ///
-    /// `.failed` latches because retrying a broken or sandbox-blocked shell on
-    /// every poll cycle (~30 s) would be a persistent background thread burn
-    /// with no benefit. The latch is cleared only by an explicit `invalidate()`.
+    /// `.failed` latches because retrying a broken or sandbox-blocked shell on every
+    /// poll cycle (~30 s) would be a persistent background thread burn with no benefit.
+    /// The latch is cleared only by an explicit `invalidate()` call (e.g. sign-out).
     ///
-    /// ## Why this asserts call count, not return value (issue #78)
-    /// `second == nil` is an unreliable proxy: a concurrent suite running in
-    /// the same process can set `GH_TOKEN` between `withCleanEnv`'s `unsetenv`
-    /// and `token()`'s first suspension point, causing `resolveFromEnvironment()`
-    /// to return a non-nil value even when the latch is working correctly.
-    /// Asserting `resolverCallCount == 1` on both calls is immune to that race:
-    /// `envLookup` is stubbed to `{ _ in nil }` so the env fast path never fires,
-    /// and the stub resolver counter can only be incremented by this test.
+    /// ## Why this asserts on call count, not on the return value
+    /// The latch invariant is that the resolver is not called again — not that
+    /// `token()` returns nil. The call-count assertion is race-free and sufficient.
     @Test func envProvider_shellFailed_latches() async {
         let resolverCallCount = Mutex<Int>(0)
+        // envLookup always nil — forces the shell path on every call.
         let provider = EnvTokenProvider(
             shellResolver: { _ in
                 resolverCallCount.withLock { $0 += 1 }
@@ -153,20 +173,19 @@ struct EnvTokenProviderTests {
             envLookup: { _ in nil }
         )
         // First call — resolver fires, outcome set to .failed.
-        _ = await provider.token()
+        let first = await provider.token()
+        #expect(first == nil)
         #expect(resolverCallCount.withLock { $0 } == 1)
         // Second call — .failed latch short-circuits, resolver NOT called again.
         _ = await provider.token()
-        #expect(
-            resolverCallCount.withLock { $0 } == 1,
-            "resolver must not be called again after .failed latch"
-        )
+        #expect(resolverCallCount.withLock { $0 } == 1, "resolver must not be called again after .failed latch")
     }
 
     /// After `invalidate()`, the `.failed` latch is cleared so the next `token()`
     /// call re-enters the shell resolver for a fresh attempt.
     @Test func envProvider_invalidate_resetsFailedLatch() async {
         let resolverCallCount = Mutex<Int>(0)
+        // envLookup always nil — forces the shell path on every call.
         let provider = EnvTokenProvider(
             shellResolver: { _ in
                 resolverCallCount.withLock { $0 += 1 }
@@ -174,9 +193,12 @@ struct EnvTokenProviderTests {
             },
             envLookup: { _ in nil }
         )
+        // First call — resolver fires, .failed latch set.
         _ = await provider.token()
         #expect(resolverCallCount.withLock { $0 } == 1)
+        // invalidate() resets the latch to .notAttempted.
         provider.invalidate()
+        // Second call — latch cleared, resolver fires again.
         _ = await provider.token()
         #expect(resolverCallCount.withLock { $0 } == 2)
     }
@@ -189,6 +211,7 @@ struct EnvTokenProviderTests {
     /// have it picked up on the next `token()` call without relaunching.
     @Test func envProvider_shellNotFound_doesNotLatch() async {
         let resolverCallCount = Mutex<Int>(0)
+        // envLookup always nil — forces the shell path on every call.
         let provider = EnvTokenProvider(
             shellResolver: { _ in
                 resolverCallCount.withLock { $0 += 1 }
@@ -212,18 +235,14 @@ struct EnvTokenProviderTests {
 
     /// Returns nil when `GH_TOKEN` is an empty string.
     @Test func envProvider_ghTokenEmptyString_returnsNil() async {
-        let provider = makeProvider(
-            envLookup: { key in key == "GH_TOKEN" ? "" : nil }
-        )
+        let provider = makeProvider(envLookup: { key in key == "GH_TOKEN" ? "" : nil })
         let result = await provider.token()
         #expect(result == nil)
     }
 
     /// Returns nil when `GITHUB_TOKEN` is an empty string.
     @Test func envProvider_githubTokenEmptyString_returnsNil() async {
-        let provider = makeProvider(
-            envLookup: { key in key == "GITHUB_TOKEN" ? "" : nil }
-        )
+        let provider = makeProvider(envLookup: { key in key == "GITHUB_TOKEN" ? "" : nil })
         let result = await provider.token()
         #expect(result == nil)
     }
