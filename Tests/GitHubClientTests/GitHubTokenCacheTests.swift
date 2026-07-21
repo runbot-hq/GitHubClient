@@ -64,7 +64,12 @@ private func withEnv(_ key: String, value: String, _ body: () async -> Void) asy
 /// for steps 3+4, without depending on its concrete implementation.
 ///
 /// Kept file-private: only `GitHubTokenCacheTests` needs this bridge.
-private final class EnvReadingStubProvider: EnvTokenProviding, @unchecked Sendable {
+///
+/// `@unchecked Sendable` is NOT used here — the class has no stored mutable
+/// state (both methods are pure `ProcessInfo` reads), so it satisfies `Sendable`
+/// without any escape hatch. Consistent with the codebase's no-`@unchecked`
+/// invariant (P4, see `KeychainTokenStore` class comment).
+private final class EnvReadingStubProvider: EnvTokenProviding, Sendable {
   func token() async -> String? {
     for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
       if let v = ProcessInfo.processInfo.environment[key], !v.isEmpty { return v }

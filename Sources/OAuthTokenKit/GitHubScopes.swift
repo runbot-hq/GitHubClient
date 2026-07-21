@@ -4,48 +4,65 @@ import Foundation
 
 // MARK: - GitHubScopes
 
-/// Namespace for GitHub OAuth scope constants.
+/// Typed constants for GitHub OAuth scope strings.
 ///
-/// Use these constants when constructing `OAuthService` or `GitHubClient` to
-/// get compile-time safety and discoverability for scope strings.
+/// Use these when constructing an `OAuthService` or `GitHubClient` with custom
+/// scopes to avoid typos and improve call-site discoverability:
 ///
-/// ## Background
-/// GitHub OAuth scopes control which resources a token can access. Passing
-/// an unrecognised scope string silently results in a token with reduced
-/// permissions — GitHub ignores unknown scopes rather than rejecting them.
-/// Using typed constants here prevents silent typo-induced permission gaps.
+/// ```swift
+/// let client = GitHubClient(
+///     clientID: "...",
+///     clientSecret: "...",
+///     service: "com.example.app",
+///     account: "github-oauth-token",
+///     scopes: [GitHubScopes.repo, GitHubScopes.readOrg]
+/// )
+/// ```
 ///
-/// See https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps
-/// for the full scope list.
+/// You can also extend the default set:
+///
+/// ```swift
+/// GitHubClient(scopes: GitHubScopes.default + [GitHubScopes.readUser])
+/// ```
+///
+/// - SeeAlso: [GitHub OAuth scopes documentation](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps)
 public enum GitHubScopes {
-    // MARK: - Default scope set
 
-    /// The default scope set used by `OAuthService` and `GitHubClient`.
+    // MARK: - Default set
+
+    /// The default set of OAuth scopes requested during sign-in.
     ///
-    /// Contains the minimum scopes required for `GitHubClient`'s current feature set:
-    /// - `repo` — full repository access (read + write), required for Actions API calls
-    /// - `read:user` — read the authenticated user's profile (username, avatar, etc.)
+    /// Used as the default parameter value in both `OAuthService.init` and
+    /// `GitHubClient.init`. Defined here — rather than on `OAuthService` — so
+    /// that consumers interacting only with `GitHubClient` never need to
+    /// reference the service layer directly.
     ///
-    /// Consumers that need a narrower scope set should pass their own array to the
-    /// `scopes:` parameter on `OAuthService.init` or `GitHubClient.init` rather than
-    /// mutating this constant.
-    public static let `default`: [String] = [repo, readUser]
+    /// Extend it at the call site when you need extra scopes:
+    ///
+    /// ```swift
+    /// GitHubClient(scopes: GitHubScopes.default + [GitHubScopes.readUser])
+    /// ```
+    public static let `default`: [String] = [
+        GitHubScopes.repo,
+        GitHubScopes.readOrg,
+        GitHubScopes.adminOrg,
+        GitHubScopes.manageRunnersOrg,
+        GitHubScopes.workflow
+    ]
 
-    // MARK: - Individual scopes
+    // MARK: - Scope constants
 
-    /// Full read + write access to public and private repositories, including Actions.
-    /// Required for any API call that reads or mutates repository resources.
+    /// Grants full read/write access to code, commits, and pull requests.
     public static let repo = "repo"
-
-    /// Read the authenticated user's profile information (login, name, avatar URL, etc.).
-    /// Sufficient for display purposes; does not grant write access to the user's account.
-    public static let readUser = "read:user"
-
-    /// Read and write access to organisation members and teams.
-    /// Required for API calls that list or manage organisation membership.
+    /// Grants read-only access to organisation membership and teams.
     public static let readOrg = "read:org"
-
-    /// Full admin access to the authenticated user's gists.
-    /// Required for API calls that create, update, or delete gists.
-    public static let gist = "gist"
+    /// Grants full admin access to organisation membership and teams.
+    public static let adminOrg = "admin:org"
+    /// Grants access to manage self-hosted runners in an organisation.
+    public static let manageRunnersOrg = "manage_runners:org"
+    /// Grants the ability to manage and run GitHub Actions workflows.
+    public static let workflow = "workflow"
+    /// Grants read-only access to a user's profile data.
+    /// Not included in `GitHubScopes.default` — add explicitly when needed.
+    public static let readUser = "read:user"
 }
