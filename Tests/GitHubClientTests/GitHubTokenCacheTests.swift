@@ -59,14 +59,27 @@ private func withEnv(_ key: String, value: String, _ body: () async -> Void) asy
 
 // MARK: - EnvReadingStubProvider
 
-/// A `StubEnvTokenProvider`-like stub that reads `ProcessInfo` directly, used
-/// only by the env-var tests. This mirrors what the real `EnvTokenProvider` does
-/// for steps 3+4, without depending on its concrete implementation.
+/// A minimal `EnvTokenProviding` stub that reads environment variables via
+/// `getenv()` — not `ProcessInfo.environment` — used only by the env-var tests.
+///
+/// Why not `StubEnvTokenProvider`?
+/// `StubEnvTokenProvider` returns a fixed, injected value regardless of the
+/// actual process environment, so it cannot exercise GH_TOKEN / GITHUB_TOKEN
+/// precedence or the empty-string-as-absent behaviour these tests assert on.
+/// `EnvReadingStubProvider` reads real env vars via `getenv()` so tests can
+/// mutate the environment with `setenv`/`unsetenv` inside `withEnv`/
+/// `withCleanEnv` and see the change reflected immediately — `getenv()` is
+/// not snapshot-cached the way `ProcessInfo.environment` is.
+///
+/// Why `getenv()` and not `ProcessInfo.environment`?
+/// `ProcessInfo.environment` is snapshot-cached at process launch; mutations
+/// via `setenv` are invisible to it within the same process. `getenv()` reads
+/// the live POSIX env, so `withEnv` mutations are visible synchronously.
 ///
 /// Kept file-private: only `GitHubTokenCacheTests` needs this bridge.
 ///
 /// `@unchecked Sendable` is NOT used here — the class has no stored mutable
-/// state (both methods are pure `ProcessInfo` reads), so it satisfies `Sendable`
+/// state (both methods are pure `getenv()` reads), so it satisfies `Sendable`
 /// without any escape hatch. Consistent with the codebase's no-`@unchecked`
 /// invariant (P4, see `KeychainTokenStore` class comment).
 private final class EnvReadingStubProvider: EnvTokenProviding, Sendable {

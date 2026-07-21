@@ -31,7 +31,11 @@ let package = Package(
         .target(
             name: "OAuthTokenKit",
             path: "Sources/OAuthTokenKit",
-            // No dependency on EnvTokenKit — completely independent peer target
+            // No dependency on EnvTokenKit — OAuthTokenKit and EnvTokenKit are peer targets,
+            // not a stack. Each owns one resolution mechanism (Keychain/OAuth vs.
+            // env-var/login-shell) and neither needs the other's types. GitHubClient is the
+            // only target that depends on both, wiring them together via TokenCache.
+            // See TokenCache Boundary Rule in #74.
             swiftSettings: [
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault")
             ]

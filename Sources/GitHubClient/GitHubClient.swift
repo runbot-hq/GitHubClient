@@ -138,11 +138,21 @@ public final class GitHubClient {
         } else {
             log = nil
         }
-        // KeychainTokenStore and OAuthService are OAuthTokenKit concrete types.
-        // internal import OAuthTokenKit ensures they never leak into GitHubClient's public API.
+        // public import OAuthTokenKit — not internal — for the same reason as TokenCache.swift:
+        // TokenCache's public initialisers name TokenStore (an OAuthTokenKit protocol) directly
+        // in their public parameter lists, and TokenCache itself is constructed here and
+        // re-exposed through the test-only init's `tokenCache:` parameter. Swift forbids a
+        // public declaration from using an internally-imported type, so OAuthTokenKit must stay
+        // public as long as TokenCache is public. KeychainTokenStore and OAuthService are
+        // concrete OAuthTokenKit types that never appear in GitHubClient's own public API
+        // surface — the public import is forced by TokenCache's signature, not by anything
+        // declared here.
         let store = KeychainTokenStore(service: service, account: account, log: log)
-        // EnvTokenProvider is the only EnvTokenKit concrete type named in this file.
-        // TokenCache knows only `any EnvTokenProviding` — see TokenCache Boundary Rule in #74.
+        // internal import EnvTokenKit — unlike OAuthTokenKit above, this stays internal because
+        // no public API of GitHubClient names any EnvTokenKit type. EnvTokenProvider is
+        // constructed locally and immediately erased to `any EnvTokenProviding` before being
+        // passed into TokenCache, which only ever knows the protocol — see TokenCache Boundary
+        // Rule in #74. EnvTokenProvider is the only EnvTokenKit concrete type named in this file.
         let envProvider = EnvTokenProvider(log: log)
         let cache = TokenCache(tokenStore: store, envProvider: envProvider, logger: logger)
         let oauth = OAuthService(
