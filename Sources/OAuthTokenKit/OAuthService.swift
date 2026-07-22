@@ -69,22 +69,22 @@ public final class OAuthService: OAuthServiceProtocol {
     private var pendingState: String?
     /// The GitHub OAuth app client ID.
     private let clientID: String
+    // Migrated: standalone swift-github-client release (step 14) — secret rotation
+    // at that point should move to a dynamic injection site rather than this field.
     /// The GitHub OAuth app client secret.
     ///
     /// Held in process memory for the app lifetime — intentional for compile-time
     /// baked constants (e.g. `OAuthSecrets.clientSecret`). Dynamic secret managers
     /// are not supported at this call site.
-    // Migrated: standalone swift-github-client release (step 14) — secret rotation
-    // at that point should move to a dynamic injection site rather than this field.
     private let clientSecret: String
     /// The backing store used to save/delete/load the OAuth token.
     private let tokenStore: any TokenStore
     /// Optional log closure for diagnostic messages. Bridged from `GitHubLogger`
     /// by `GitHubClient.swift` at wiring time. `OAuthTokenKit` never imports `GitHubLogger`.
     private let log: (@Sendable (String, String) -> Void)?
+    // Migrated: session injection seam carried over verbatim from GitHubClient/Auth/OAuthService.swift.
     /// The `URLSessionProtocol` used for token-exchange network calls. Defaults to `URLSession.shared`.
     /// Injected at init time so tests can supply a mock session without swizzling `URLSession`.
-    // Migrated: session injection seam carried over verbatim from GitHubClient/Auth/OAuthService.swift.
     private let session: any URLSessionProtocol
     /// Called after a successful `tokenStore.save()` — e.g. to invalidate a `TokenCache`.
     private let onTokenSaved: (() -> Void)?
