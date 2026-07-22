@@ -71,6 +71,8 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Held in process memory for the app lifetime — intentional for compile-time
     /// baked constants (e.g. `OAuthSecrets.clientSecret`). Dynamic secret managers
     /// are not supported at this call site.
+    /// // Migrated: standalone swift-github-client release (step 14) — secret rotation
+    /// // at that point should move to a dynamic injection site rather than this field.
     private let clientSecret: String
     /// The backing store used to save/delete/load the OAuth token.
     private let tokenStore: any TokenStore
@@ -78,6 +80,8 @@ public final class OAuthService: OAuthServiceProtocol {
     /// by `GitHubClient.swift` at wiring time. `OAuthTokenKit` never imports `GitHubLogger`.
     private let log: (@Sendable (String, String) -> Void)?
     /// The `URLSessionProtocol` used for token-exchange network calls. Defaults to `URLSession.shared`.
+    /// Injected at init time so tests can supply a mock session without swizzling `URLSession`.
+    /// // Migrated: session injection seam carried over verbatim from GitHubClient/Auth/OAuthService.swift.
     private let session: any URLSessionProtocol
     /// Called after a successful `tokenStore.save()` — e.g. to invalidate a `TokenCache`.
     private let onTokenSaved: (() -> Void)?
@@ -334,13 +338,15 @@ public final class OAuthService: OAuthServiceProtocol {
         // production app (low real risk), but [weak self] is the correct form
         // for any non-awaited Task spawned from an instance method.
         //
-        // Note: if self IS deallocated before exchangeCode runs, exchangeCode never
-        // executes and fireSignIn is never called. Any active makeSignInStream()
-        // consumer will hang waiting for a yield that never arrives. This is an
-        // acceptable trade-off for a production singleton. In tests, ensure
-        // OAuthService outlives the Task (i.e. do not deinit OAuthService while
-        // a handleCallback flow is in flight).
-        Task { [weak self] in await self?.exchangeCode(code) }
+        // guard let self: if self is deallocated before the Task body runs,
+        // the early return means stream consumers are not silently hung —
+        // signInContinuations is already gone with self, so no yield is possible
+        // regardless. The guard makes the intent explicit and avoids optional-chaining
+        // the entire async call chain.
+        Task { [weak self] in
+            guard let self else { return }
+            await exchangeCode(code)
+        }
     }
 
     // MARK: - Token Exchange
@@ -464,8 +470,11 @@ private struct OAuthTokenResponse: Decodable {
     let errorDescription: String?
     /// Maps Swift property names to the snake_case JSON keys used by the GitHub API.
     private enum CodingKeys: String, CodingKey {
+        /// // Migrated: JSON key "access_token" — maps accessToken to the snake_case GitHub API field.
         case accessToken = "access_token" // skipcq: SCT-A000
+        /// // Migrated: JSON key "error" — GitHub error code on failure (e.g. "bad_verification_code").
         case error
+        /// // Migrated: JSON key "error_description" — human-readable OAuth error detail.
         case errorDescription = "error_description"
     }
     /// Returns the JSON key names of fields present in this response, for diagnostic logging.
@@ -483,8 +492,11 @@ private struct OAuthTokenResponse: Decodable {
 // periphery:ignore
 /// OAuth token-exchange request body for the GitHub API.
 private struct OAuthTokenRequest: Encodable {
+    /// // Migrated: The GitHub OAuth app client ID. Sent as "client_id" in the token-exchange POST body.
     let clientID: String
+    /// // Migrated: The GitHub OAuth app client secret. Sent as "client_secret" in the POST body.
     let clientSecret: String
+    /// // Migrated: The one-time authorization code received from GitHub via the redirect callback.
     let code: String
     private enum CodingKeys: String, CodingKey {
         case clientID = "client_id" // skipcq: SCT-A000
