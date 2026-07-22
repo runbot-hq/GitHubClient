@@ -86,6 +86,14 @@ let package = Package(
             // This is an acceptable, conscious trade-off: GitHubClientTests is a test
             // target, not a shipped library, so the extra dependency does not widen the
             // public API surface or create a production coupling.
+            //
+            // Coupling boundary: StubEnvTokenProvider uses only public EnvTokenKit types
+            // (EnvTokenProviding protocol + ShellTokenResult enum values). It does NOT
+            // reference any internal EnvTokenKit types (e.g. ShellResolutionOutcome).
+            // If StubEnvTokenProvider ever needs to cross into internal EnvTokenKit types,
+            // it must move into EnvTokenKit itself (as a test-support type) rather than
+            // silently growing this cross-target coupling. The compiler will not catch
+            // this drift — it must be enforced by code review.
             dependencies: ["GitHubClient", "EnvTokenKit"],
             path: "Tests/GitHubClientTests",
             swiftSettings: [

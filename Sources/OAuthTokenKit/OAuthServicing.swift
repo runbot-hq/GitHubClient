@@ -50,6 +50,11 @@ public protocol OAuthServiceProtocol: AnyObject {
     ///   return `false`. This fixes the mismatch where `isAuthenticated == true` while
     ///   `token()` returns `nil` for a corrupted Keychain entry. Conformers and test mocks
     ///   that previously relied on `!= nil` semantics must be updated to match.
+    ///   See also: `MockOAuthService` in `Tests/GitHubClientTests/TestSupport/MockOAuthService.swift`
+    ///   — verified to implement `isAuthenticated` using `.map { !$0.isEmpty } ?? false`,
+    ///   consistent with this contract. If you add a new conformer or test double, ensure
+    ///   its `isAuthenticated` rejects empty strings to avoid false-green tests against
+    ///   a corrupted-keychain scenario.
     var isAuthenticated: Bool { get }
 
     /// `true` when any usable GitHub token is available — OAuth token, `GH_TOKEN`,
