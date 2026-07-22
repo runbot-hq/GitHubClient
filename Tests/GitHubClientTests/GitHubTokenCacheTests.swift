@@ -9,6 +9,16 @@
 // environment (setenv/unsetenv), which IS process-global — so the suite stays
 // .serialized and every test wraps its body in withCleanEnv.
 //
+// WHY .serialized IS ON THE OUTER SUITE (not a nested sub-suite)
+// Every test in this suite calls withCleanEnv, which mutates the process-global
+// environment via setenv/unsetenv. That mutation is the serialisation requirement
+// — not a subset of tests. A nested .serialized sub-suite (as used in
+// EnvTokenProviderTests for its env-touching tests) only makes sense when some
+// tests are genuinely safe to run concurrently. Here every test touches the
+// environment, so splitting into a nested sub-suite would serialise 100% of the
+// tests anyway — with more structural complexity for zero parallelism gain.
+// The outer .serialized is the correct and intentionally broader scope.
+//
 // Keychain is never touched: token resolution is exercised through a MockTokenStore
 // and a StubEnvTokenProvider, keeping these tests sandboxing-free and safe to
 // run with `swift test`.
