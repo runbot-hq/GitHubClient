@@ -355,12 +355,15 @@ struct GitHubTokenCacheTests {
   /// This test confirms `TokenCache`'s side of the contract: it delegates every
   /// time and trusts the provider to manage its own latch.
   ///
-  /// ## Why this test is NOT named token_shellFailed_latches
-  /// The name was changed to reflect actual behaviour: there is no latch at the
-  /// `TokenCache` level. `callCount == 2` on the second call proves re-entry,
-  /// not short-circuit. The latch contract belongs to `EnvTokenProvider` alone.
+  /// ## Why this test name is kept stable (issue #74 Step 6)
+  /// Test function names are stable identifiers referenced in CI logs and issue
+  /// comments. The post-refactor semantics could be described more precisely
+  /// (TokenCache no longer latches — the latch lives in EnvTokenProvider), but
+  /// renaming is a non-negotiable violation of the spec. The doc comment above
+  /// explains the current behaviour; the name `token_shellFailed_latches`
+  /// is preserved as the stable CI identifier.
   @Test
-  func token_shellFailed_delegatesToProvider_noTokenCacheLatch() async {
+  func token_shellFailed_latches() async {
     await withCleanEnv {
       let stub = StubEnvTokenProvider(result: .failed)
       let cache = makeCache(envProvider: stub)
