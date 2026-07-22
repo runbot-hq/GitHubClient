@@ -209,14 +209,14 @@ public final class OAuthService: OAuthServiceProtocol {
 
     /// Clears the pending state, deletes the stored token, and emits a sign-out event.
     ///
-/// Token deletion is best-effort: if `tokenStore.delete()` fails (e.g.
-/// `errSecInteractionNotAllowed` when the screen is locked), the cache is
-/// still invalidated and the sign-out stream is still emitted. The app UI
-/// reflects signed-out state immediately. A stale Keychain entry is benign
-/// on next launch because `isAuthenticated` checks for a *valid* token; an
-/// orphaned entry will simply be overwritten or ignored on next sign-in.
-/// Permanent UI lock-out is a worse failure mode than a recoverable ghost
-/// entry, so we always proceed.
+    /// Token deletion is best-effort: if `tokenStore.delete()` fails (e.g.
+    /// `errSecInteractionNotAllowed` when the screen is locked), the cache is
+    /// still invalidated and the sign-out stream is still emitted. The app UI
+    /// reflects signed-out state immediately. A stale Keychain entry is benign
+    /// on next launch because `isAuthenticated` checks for a *valid* token; an
+    /// orphaned entry will simply be overwritten or ignored on next sign-in.
+    /// Permanent UI lock-out is a worse failure mode than a recoverable ghost
+    /// entry, so we always proceed.
     public func signOut() {
         log?("OAuthService › signOut — called", "transport")
         pendingState = nil
@@ -235,9 +235,9 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Extracts the `code` and `state` query parameters, validates the CSRF
     /// state nonce, then kicks off the token-exchange flow.
     public func handleCallback(_ url: URL) {
-// Log scheme+host only — the full URL contains the one-time `code` query
-// parameter which is sensitive for a short window. Never log url.absoluteString
-// or url.query here; doing so would leak the live credential into unified logs.
+        // Log scheme+host only — the full URL contains the one-time `code` query
+        // parameter which is sensitive for a short window. Never log url.absoluteString
+        // or url.query here; doing so would leak the live credential into unified logs.
         let safeURL = "\(url.scheme ?? "")://\(url.host ?? "")"
         log?("OAuthService › handleCallback — url=\(safeURL)", "transport")
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -318,6 +318,16 @@ public final class OAuthService: OAuthServiceProtocol {
     }
 
     /// Builds the token-exchange `URLRequest`.
+    ///
+    /// ## Why `redirect_uri` is omitted from the token-exchange POST body
+    /// GitHub requires `redirect_uri` in the token-exchange request only when
+    /// the OAuth app has multiple redirect URIs registered. `OAuthService` is
+    /// purpose-built for RunBot, which registers exactly one redirect URI
+    /// (`runbot://oauth/callback`). Omitting it is correct per the GitHub docs
+    /// for single-URI apps and avoids sending the URI a second time over the
+    /// wire. If this service is ever extended to support multiple redirect URIs,
+    /// `OAuthTokenRequest` will need a `redirectURI` field and this function
+    /// will need to pass `self.redirectURI` through.
     private func makeTokenRequest(code: String) throws -> URLRequest {
         guard let url = URL(string: accessTokenURL) else { throw URLError(.badURL) }
         var req = URLRequest(url: url)

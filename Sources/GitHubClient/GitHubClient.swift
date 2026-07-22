@@ -138,15 +138,17 @@ public final class GitHubClient {
         } else {
             log = nil
         }
-        // public import OAuthTokenKit — not internal — for the same reason as TokenCache.swift:
-        // TokenCache's public initialisers name TokenStore (an OAuthTokenKit protocol) directly
-        // in their public parameter lists, and TokenCache itself is constructed here and
-        // re-exposed through the test-only init's `tokenCache:` parameter. Swift forbids a
-        // public declaration from using an internally-imported type, so OAuthTokenKit must stay
-        // public as long as TokenCache is public. KeychainTokenStore and OAuthService are
-        // concrete OAuthTokenKit types that never appear in GitHubClient's own public API
-        // surface — the public import is forced by TokenCache's signature, not by anything
-        // declared here.
+        // public import OAuthTokenKit — not internal — for two reasons, both compiler-enforced:
+        // 1. TokenCache's public initialisers name TokenStore (an OAuthTokenKit protocol) directly
+        //    in their public parameter lists. TokenCache itself is constructed here and re-exposed
+        //    through the test-only init's `tokenCache:` parameter. Swift forbids a public
+        //    declaration from using an internally-imported type.
+        // 2. `public let oauthService: any OAuthServiceProtocol` on GitHubClient names
+        //    OAuthServiceProtocol (an OAuthTokenKit protocol) in a public property declaration.
+        //    This independently requires public import even if reason 1 were resolved.
+        // KeychainTokenStore and OAuthService are concrete OAuthTokenKit types that never appear
+        // in GitHubClient's own public API surface. The public import is forced by TokenCache's
+        // signature and the oauthService property, not by the concrete wiring done here.
         let store = KeychainTokenStore(service: service, account: account, log: log)
         // internal import EnvTokenKit — unlike OAuthTokenKit above, this stays internal because
         // no public API of GitHubClient names any EnvTokenKit type. EnvTokenProvider is
