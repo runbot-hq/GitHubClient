@@ -104,7 +104,7 @@ public final class OAuthService: OAuthServiceProtocol {
         onTokenSaved: (() -> Void)? = nil,
         onTokenDeleted: (() -> Void)? = nil
     ) {
-        precondition(!scopes.isEmpty, "OAuthService: scopes must not be empty")
+        precondition(!scopes.isEmpty, "OAuthService: scopes must not be empty — pass at least one GitHubScopes constant")
         self.scopes = scopes
         self.redirectURI = redirectURI
         self.clientID = clientID
@@ -428,14 +428,6 @@ private struct OAuthTokenResponse: Decodable {
         case error
         /// JSON key `error_description`.
         case errorDescription = "error_description"
-    }
-    /// Returns the names of JSON keys present in this response — used for debug logging.
-    var debugKeys: [String] {
-        var keys: [String] = []
-        if accessToken != nil { keys.append("access_token") } // skipcq: SCT-A000
-        if error != nil { keys.append("error") }
-        if errorDescription != nil { keys.append("error_description") }
-        return keys
     }
 }
 

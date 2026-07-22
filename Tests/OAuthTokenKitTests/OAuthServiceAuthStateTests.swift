@@ -4,9 +4,18 @@
 // Exercises `OAuthService.isAuthenticated` and `OAuthService.hasAnyToken`.
 //
 // ⚠️ ISOLATION REQUIREMENT
-// `hasAnyToken` reads `ProcessInfo.processInfo.environment` directly.
-// `setenv`/`unsetenv` mutate the process-global environment, so this suite
-// is `.serialized` and every env-var test wraps its body in `withCleanEnv`.
+// `hasAnyToken` reads the live process environment via `getenv()` (through the
+// private `envVarIsSet(_:)` helper in `OAuthService`), NOT via
+// `ProcessInfo.processInfo.environment`. `setenv`/`unsetenv` mutate the
+// process-global environment, so this suite is `.serialized` and every env-var
+// test wraps its body in `withCleanEnv`.
+//
+// Why getenv() and not ProcessInfo?
+// `ProcessInfo.processInfo.environment` is a snapshot captured at process launch;
+// `setenv`/`unsetenv` mutations are invisible to it within the same process.
+// `getenv()` always reflects the current state of the POSIX environment, which
+// is why `OAuthService.envVarIsSet(_:)` uses it and why the test helpers here
+// also use `getenv()` for save/restore.
 //
 // Keychain is never touched: token store operations are exercised through a
 // `MockTokenStore`, keeping these tests sandboxing-free and safe to run with
