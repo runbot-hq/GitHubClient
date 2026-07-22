@@ -3,26 +3,26 @@
 import Foundation
 
 // MARK: - OAuthService
-//
-// Implements the GitHub OAuth Authorization Code flow.
-//
-// @MainActor ensures all access to `pendingState` and continuation registries
-// is serialised on the main thread. This matches how AppKit delivers
-// application(_:open:) callbacks and how SwiftUI reads `isSignedIn`.
-//
-// Flow:
-// 1. makeSignInURL() generates a random state nonce, stores it, and returns
-//    the GitHub authorization URL. The caller is responsible for opening it
-//    (e.g. NSWorkspace.shared.open(url) in SettingsView / AppDelegate).
-// 2. The user clicks "Authorize" on GitHub's consent screen.
-// 3. GitHub redirects to runbot://oauth/callback?code=...&state=...
-// 4. AppDelegate.application(_:open:) catches the URL and calls handleCallback(_:).
-// 5. handleCallback verifies the state param matches pendingState (CSRF guard),
-//    then exchanges the code for an access token via POST to GitHub.
-// 6. Token is saved to tokenStore. fireSignIn(_:) yields the result to all
-//    registered makeSignInStream() consumers.
 
 /// Manages OAuth state and behaviour. No AppKit dependency.
+///
+/// Implements the GitHub OAuth Authorization Code flow.
+///
+/// @MainActor ensures all access to `pendingState` and continuation registries
+/// is serialised on the main thread. This matches how AppKit delivers
+/// application(_:open:) callbacks and how SwiftUI reads `isSignedIn`.
+///
+/// Flow:
+/// 1. makeSignInURL() generates a random state nonce, stores it, and returns
+///    the GitHub authorization URL. The caller is responsible for opening it
+///    (e.g. NSWorkspace.shared.open(url) in SettingsView / AppDelegate).
+/// 2. The user clicks "Authorize" on GitHub's consent screen.
+/// 3. GitHub redirects to runbot://oauth/callback?code=...&state=...
+/// 4. AppDelegate.application(_:open:) catches the URL and calls handleCallback(_:).
+/// 5. handleCallback verifies the state param matches pendingState (CSRF guard),
+///    then exchanges the code for an access token via POST to GitHub.
+/// 6. Token is saved to tokenStore. fireSignIn(_:) yields the result to all
+///    registered makeSignInStream() consumers.
 ///
 /// ## @MainActor isolation — class level vs. protocol level
 /// `OAuthService` does not declare `@MainActor` at the class level. Its isolation
@@ -501,9 +501,13 @@ private struct OAuthTokenRequest: Encodable {
     let clientSecret: String
     /// The one-time authorization code received from GitHub via the redirect callback.
     let code: String
+    /// Maps Swift property names to the snake_case JSON keys used by the GitHub API.
     private enum CodingKeys: String, CodingKey {
+        /// JSON key `"client_id"` — maps `clientID` to the snake_case GitHub API field.
         case clientID = "client_id" // skipcq: SCT-A000
+        /// JSON key `"client_secret"` — maps `clientSecret` to the snake_case GitHub API field.
         case clientSecret = "client_secret" // skipcq: SCT-A000
+        /// The one-time authorization code passed to the token-exchange endpoint.
         case code
     }
 }
