@@ -47,6 +47,13 @@ public protocol EnvTokenProviding: Sendable {
     /// login-shell path has latched to `.failed` after a prior timeout or
     /// launch error. See `ShellResolutionOutcome` in `EnvTokenProvider` for
     /// the full latch policy.
+    ///
+    /// - Warning: Concurrent callers each spawn a separate `/bin/zsh` subprocess
+    ///   because the `.failed` latch is not set until `loginShellToken` returns
+    ///   (up to 10 s). The concrete `EnvTokenProvider` is safe today because
+    ///   `RunnerPoller` calls it serially, but any conformer or caller that
+    ///   invokes `token()` concurrently from multiple tasks should be aware of
+    ///   this window. See `EnvTokenProvider.token()` for the full rationale.
     func token() async -> String?
 
     /// Resets all internal state so the next `token()` call re-runs the full
@@ -58,5 +65,8 @@ public protocol EnvTokenProviding: Sendable {
     ///
     /// `nonisolated` is intentional: `TokenCache.invalidate()` is itself
     /// `nonisolated` and must call this synchronously without an `await`.
-    func invalidate()
+    /// Conforming types on a `@MainActor` class must explicitly add
+    /// `nonisolated` to their implementation; omitting it produces a silent
+    /// actor hop and breaks the synchronous call chain at runtime.
+    nonisolated func invalidate()
 }
