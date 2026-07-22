@@ -1,7 +1,14 @@
 // GitHubClient.swift
 // GitHubClient
-internal import EnvTokenKit
+internal import EnvTokenKit  // internal: no EnvTokenKit type appears in GitHubClient's public API
 import Foundation
+// public import OAuthTokenKit: two independent compiler requirements force this above internal:
+// 1. `public let oauthService: any OAuthServiceProtocol` — OAuthServiceProtocol is an OAuthTokenKit
+//    type in a public property declaration; Swift forbids naming it via an internally-imported module.
+// 2. TokenCache's public initialisers name `TokenStore` (an OAuthTokenKit protocol) directly in
+//    their public parameter lists; re-exposing TokenCache through the test init's `tokenCache:`
+//    parameter inherits the same constraint.
+// Do NOT downgrade to internal without resolving both of the above.
 public import OAuthTokenKit
 
 // MARK: - GitHubClient

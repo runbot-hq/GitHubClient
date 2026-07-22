@@ -42,6 +42,10 @@ private func withCleanEnv(_ body: () -> Void) {
 // MARK: - OAuthServiceAuthStateTests
 
 @Suite("OAuthServiceAuthState", .serialized)
+// @MainActor is load-bearing: OAuthService is @MainActor-isolated, so its
+// properties (isAuthenticated, hasAnyToken) can only be accessed synchronously
+// from a @MainActor context. Removing this attribute causes actor-isolation
+// compiler errors at every property access in the test bodies below.
 @MainActor
 struct OAuthServiceAuthStateTests {
 

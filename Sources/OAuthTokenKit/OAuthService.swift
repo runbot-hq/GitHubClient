@@ -130,6 +130,19 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Delegates to `isAuthenticated` for the Keychain check to avoid a
     /// duplicate `tokenStore.load()` call when both properties are evaluated
     /// back-to-back (e.g. `SettingsView.onAppearAction`).
+    ///
+    /// ## Why `ProcessInfo.processInfo.environment` and not `getenv()`
+    /// `ProcessInfo.processInfo.environment` is a snapshot captured at process
+    /// start. This is intentional for the production app: env vars that control
+    /// token availability (`GH_TOKEN`, `GITHUB_TOKEN`) are set before launch
+    /// and do not change at runtime. Using a snapshot is safe and avoids the
+    /// TOCTOU race that a live `getenv()` call would introduce in a concurrent
+    /// context. In tests, `OAuthServiceAuthStateTests` uses `setenv`/`unsetenv`
+    /// which mutate the live process environment — this is why those tests use
+    /// `getenv()` in `withCleanEnv` for save/restore, and why the suite is
+    /// `.serialized`. The tests exercise the env-var branch correctly because
+    /// the `GH_TOKEN`/`GITHUB_TOKEN` vars are set before `ProcessInfo` is first
+    /// accessed in that test process.
     public var hasAnyToken: Bool {
         if isAuthenticated { return true }
         let env = ProcessInfo.processInfo.environment
@@ -221,6 +234,10 @@ public final class OAuthService: OAuthServiceProtocol {
         log?("OAuthService › signOut — called", "transport")
         pendingState = nil
         let deleted = tokenStore.delete()
+        // Intentionally no log on delete success — the failure branch below is the
+        // actionable signal. A success log would double-fire on every sign-out with
+        // no diagnostic value. If you need confirmation, check for absence of the
+        // failure line in the log stream.
         if !deleted {
             log?("OAuthService › signOut — tokenStore.delete failed (best-effort); proceeding", "transport")
         }

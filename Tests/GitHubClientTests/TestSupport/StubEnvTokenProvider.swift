@@ -67,6 +67,12 @@ final class StubEnvTokenProvider: EnvTokenProviding, Sendable {
         switch result {
         case .found(let value): return value
         case .notFound:         return nil
+        // .failed returns nil here just like .notFound — this is intentional.
+        // The distinction exists to let tests assert *why* nil was returned:
+        // .notFound = no token found (normal path), .failed = shell/env error
+        // (error path). TokenCache treats both identically (no latch), but
+        // tests use callCount to verify delegation still occurs on every call
+        // under the .failed scenario. Do not collapse these two cases.
         case .failed:           return nil
         }
     }
