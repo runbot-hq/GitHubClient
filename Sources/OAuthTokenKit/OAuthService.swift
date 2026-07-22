@@ -333,6 +333,13 @@ public final class OAuthService: OAuthServiceProtocol {
         // a dangling continuation registry. OAuthService is a singleton in the
         // production app (low real risk), but [weak self] is the correct form
         // for any non-awaited Task spawned from an instance method.
+        //
+        // Note: if self IS deallocated before exchangeCode runs, exchangeCode never
+        // executes and fireSignIn is never called. Any active makeSignInStream()
+        // consumer will hang waiting for a yield that never arrives. This is an
+        // acceptable trade-off for a production singleton. In tests, ensure
+        // OAuthService outlives the Task (i.e. do not deinit OAuthService while
+        // a handleCallback flow is in flight).
         Task { [weak self] in await self?.exchangeCode(code) }
     }
 
