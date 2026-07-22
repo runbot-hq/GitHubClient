@@ -67,6 +67,25 @@ let package = Package(
         ),
         .testTarget(
             name: "GitHubClientTests",
+            // EnvTokenKit is listed here in addition to GitHubClient.
+            // This deviates from the spec (#73) which shows ["GitHubClient"] only.
+            //
+            // ## Why the deviation is intentional
+            // GitHubClientTests constructs StubEnvTokenProvider directly — an EnvTokenKit
+            // concrete type — to inject it into TokenCache via the public
+            // `init(tokenStore:envProvider:logger:)` seam. This lets the tests exercise
+            // TokenCache's env-provider path without going through GitHubClient's
+            // production init or touching the live process environment.
+            //
+            // The alternative — defining a parallel stub inside GitHubClientTests itself
+            // (conforming to `any EnvTokenProviding`) — would duplicate the stub for no
+            // gain and would prevent tests from using the real ShellTokenResult values
+            // that StubEnvTokenProvider already encodes.
+            //
+            // Consequence: GitHubClientTests has a compile-time dependency on EnvTokenKit.
+            // This is an acceptable, conscious trade-off: GitHubClientTests is a test
+            // target, not a shipped library, so the extra dependency does not widen the
+            // public API surface or create a production coupling.
             dependencies: ["GitHubClient", "EnvTokenKit"],
             path: "Tests/GitHubClientTests",
             swiftSettings: [

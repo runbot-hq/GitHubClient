@@ -63,10 +63,16 @@ public final class TokenCache: Sendable {
     /// Written by `resolveFromStore()` and the `envProvider` delegation block
     /// in `token()`. Reset to `nil` by `invalidate()`.
     ///
-    /// Single `String?` field — no lock-ordering argument required. The original
-    /// two-field `(token: String?, outcome: ShellResolutionOutcome)` lock-ordering
-    /// rationale is obsolete: outcome tracking was moved to `EnvTokenProvider`
-    /// when the shell path was extracted in PR #75.
+    /// ## Why one Mutex for one field
+    /// // Migrated: the original two-field struct `(token: String?, outcome: ShellResolutionOutcome)`
+    /// // required a lock-ordering rationale because both fields were written in different call
+    /// // paths (resolveFromStore wrote `token`, EnvTokenProvider wrote `outcome`), creating a
+    /// // window where a reader could observe a partial update — a deadlock-adjacent ordering
+    /// // issue documented in the original ## Why one Mutex for both fields block.
+    /// // That rationale is obsolete: outcome tracking was moved to `EnvTokenProvider` in PR #75
+    /// // when the shell path was extracted into EnvTokenKit. `state` is now a single `String?`
+    /// // field with one write path per operation (resolve or invalidate). A single-field Mutex
+    /// // has no lock-ordering concern; the original deadlock-window argument no longer applies.
     private let state = Mutex<String?>(nil)
 
     // MARK: - Initialisers
