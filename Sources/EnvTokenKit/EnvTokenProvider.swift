@@ -60,12 +60,27 @@ private enum ShellResolutionOutcome {
     /// session latch that silently breaks the UX for the users this feature
     /// is designed to help.
     case notFound  // TODO: #68 — add a timestamp-based cooldown so .notFound does not re-spawn /bin/zsh on every poll cycle (~30 s) for Finder-launch users with no token export
+    /// The shell ran and returned a token. The resolved value is cached here
+    /// so subsequent `token()` calls short-circuit without re-spawning
+    /// `/bin/zsh` — critical for standalone callers that do not wrap this
+    /// provider in a `TokenCache`.
+    ///
+    /// This is NOT a permanent latch in the `.failed` sense: `invalidate()`
+    /// resets the outcome to `.notAttempted`, so a sign-out/sign-in cycle
+    /// always gets a fresh shell attempt regardless of a prior `.found`.
+    ///
+    /// `TokenCache`-wired consumers are unaffected — `TokenCache` short-circuits
+    /// at its own in-memory cache (step 1) after the first successful resolution
+    /// and never calls `envProvider.token()` again until `invalidate()` fires.
+    /// The `.found` write here is the correct fix for the standalone-use path
+    /// documented in the `EnvTokenKit` README.
+    case found(String)
     /// The shell timed out, failed to launch, or was blocked by the App Sandbox.
     /// The shell path IS latched — `token()` short-circuits before the shell
     /// on every subsequent call until `invalidate()` resets the outcome.
     /// Retrying a broken or sandbox-blocked shell every poll cycle (~30 s)
     /// would be a persistent background thread burn with no benefit; the user
-    /// must take explicit action (fix `~/.zprofile`, remove the sandbox
+    /// must take explicit action (fix `~/.zshrc`, remove the sandbox
     /// entitlement, or sign in via OAuth) before a retry is useful.
     case failed
 }
@@ -153,12 +168,17 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// 1. `GH_TOKEN` in the process environment (defaults to
     ///    `ProcessInfo.processInfo.environment`; injectable via `envLookup` in tests)
     /// 2. `GITHUB_TOKEN` in the process environment (same lookup path as above)
-    /// 3. Login-shell subprocess (`/bin/zsh -i -l`) — Finder/Dock launches only
+    /// 3. Cached shell result — returns immediately if a prior shell call already
+    ///    resolved a value (`.found`), without re-spawning `/bin/zsh`.
+    /// 4. Login-shell subprocess (`/bin/zsh -i -l`) — Finder/Dock launches only,
+    ///    and only when no prior resolution is cached.
     ///
     /// ## Shell latch policy
     /// - `.notAttempted`: shell is spawned normally.
     /// - `.notFound`: shell ran but found no export — NOT latched. Re-entry
     ///   allowed so the user can add an export without relaunching.
+    /// - `.found(value)`: shell previously returned a value — short-circuits
+    ///   immediately without re-spawning `/bin/zsh`. Reset by `invalidate()`.
     /// - `.failed`: shell timed out or failed to launch — IS latched until
     ///   `invalidate()` resets the outcome.
     ///
@@ -170,7 +190,19 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     ///   double-write. Safe in practice: `RunnerPoller` is a single serial actor.
     public func token() async -> String? {
         if let envToken = resolveFromEnvironment() { return envToken }
-        if case .failed = state.withLock({ $0 }) { return nil }
+        // Check the cached shell outcome before spawning a new subprocess.
+        switch state.withLock({ $0 }) {
+        case .found(let cached):
+            // A prior shell call already resolved a value — return it immediately
+            // without re-spawning /bin/zsh. This is the critical short-circuit for
+            // standalone callers that do not wrap this provider in a TokenCache.
+            // Reset by invalidate() so sign-out cycles get a fresh shell attempt.
+            return cached
+        case .failed:
+            return nil
+        case .notAttempted, .notFound:
+            break
+        }
         // All fast paths missed — cold Finder/Dock/login-item launch.
         // Spawn the login shell to source ~/.zprofile and ~/.zshrc.
         // ⚠️ No atomic entry claim: concurrent callers each spawn a separate
@@ -179,16 +211,10 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
         let shellResult = await shellResolver(log)
         switch shellResult {
         case .found(let value):
-            // Do NOT write ShellResolutionOutcome here.
-            // TokenCache.token() is the authoritative write-back site: it writes
-            // the resolved token into its own Mutex-guarded state immediately after
-            // this call returns, preventing a double-write before an invalidate().
-            // Writing a .found case into EnvTokenProvider.state would be redundant
-            // with that guard and misleading — .found is not a latch, it signals
-            // success. Only .notFound and .failed need to be remembered across calls.
-            // Note: the double-write guard (if $0 == nil) in TokenCache.token() does
-            // not prevent concurrent callers from each reaching this point while the
-            // first is still suspended in the shell — see the -Warning: block above.
+            // Cache the successful outcome so subsequent calls short-circuit
+            // without re-spawning /bin/zsh. Not a permanent latch — invalidate()
+            // resets to .notAttempted so sign-out cycles get a fresh attempt.
+            state.withLock { $0 = .found(value) }
             return value
         case .notFound:
             // Shell ran fine but no token was exported.
