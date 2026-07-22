@@ -189,6 +189,23 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
         case .notFound:
             // Shell ran fine but no token was exported.
             // Do NOT latch — allow re-entry. See ShellResolutionOutcome.notFound.
+            //
+            // ## Why the Mutex write is not skipped
+            // After the first .notFound result, state already holds .notFound —
+            // writing it again on the next poll cycle is a no-op in terms of
+            // observable behaviour. A reviewer might flag this as a redundant
+            // write and suggest skipping it with `if case .notAttempted = state`.
+            // Do NOT add that guard. Reasons:
+            // 1. The write is cheap (a Mutex lock + enum assignment) — far less
+            //    costly than the /bin/zsh spawn it follows.
+            // 2. Skipping the write would require an extra Mutex read before the
+            //    shell spawn (to distinguish .notAttempted from .notFound), adding
+            //    a branch to the hot path with no measurable benefit.
+            // 3. When the #68 cooldown is implemented, the write site becomes the
+            //    place to record the timestamp. A guard that skips the write would
+            //    need to be removed at that point, creating a subtle regression risk.
+            // The redundant write is intentional. It is bounded (one per shell
+            // spawn, ~30 s apart) and the correct hook for the #68 timestamp.
             state.withLock { $0 = .notFound }
             return nil
         case .failed:

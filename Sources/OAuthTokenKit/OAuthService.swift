@@ -176,9 +176,17 @@ public final class OAuthService: OAuthServiceProtocol {
     /// ## Why `getenv()` and not `ProcessInfo.processInfo.environment`
     /// `ProcessInfo.processInfo.environment` is a snapshot captured at process
     /// launch. `setenv`/`unsetenv` mutations after launch are invisible to it.
-    /// `getenv()` always reflects the live process environment and is consistent
-    /// with `EnvTokenProvider.resolveFromEnvironment()`. Empty strings are rejected
-    /// to match that behaviour. See `envVarIsSet(_:)` below.
+    /// `getenv()` always reflects the live process environment, which is the
+    /// correct semantic for a UI auth-state predicate: if the user sets
+    /// `GH_TOKEN` via `launchctl setenv` after the app is running, `hasAnyToken`
+    /// should reflect that immediately. `EnvTokenProvider.resolveFromEnvironment()`
+    /// makes the opposite choice — it reads `ProcessInfo` (launch-time snapshot)
+    /// because token resolution is not expected to observe post-launch mutations.
+    /// Both choices are intentional and cross-documented. See `envVarIsSet(_:)`
+    /// below and `envLookup` in `EnvTokenProvider.swift` for the full rationale
+    /// on each side. The divergence is a known, accepted trade-off:
+    /// `hasAnyToken` (UI predicate) favours liveness; `resolveFromEnvironment`
+    /// (token resolution) favours snapshot consistency and test isolation.
     ///
     /// ## Why `hasAnyToken` lives in `OAuthTokenKit` and not `EnvTokenKit`
     /// `hasAnyToken` pairs the Keychain check (`isAuthenticated`) with the env-var
@@ -446,11 +454,22 @@ public final class OAuthService: OAuthServiceProtocol {
 
     /// Returns `true` when the named environment variable is set to a non-empty string.
     ///
+    /// ## Why `getenv()` and not `ProcessInfo`
     /// Uses `getenv()` rather than `ProcessInfo.processInfo.environment` because
     /// `ProcessInfo` is a launch-time snapshot and does not reflect `setenv`/`unsetenv`
     /// mutations made after the process starts. `getenv()` always reflects the live
     /// process environment. This is load-bearing for `hasAnyToken` in UI contexts
     /// and for test isolation in `OAuthServiceAuthStateTests`.
+    ///
+    /// ## Divergence from `EnvTokenProvider.resolveFromEnvironment()`
+    /// `EnvTokenProvider.resolveFromEnvironment()` deliberately reads `ProcessInfo`
+    /// (launch-time snapshot) for token resolution — not `getenv()`. The two
+    /// functions serve different masters: this one is a UI auth-state predicate
+    /// (liveness matters), the other is a token resolver (snapshot consistency
+    /// and test isolation matter). The divergence is intentional, accepted, and
+    /// documented on both sides. See `envLookup` in `EnvTokenProvider.swift`
+    /// for the mirror rationale. Do not "unify" them — the semantic difference
+    /// is the point.
     private func envVarIsSet(_ name: String) -> Bool {
         guard let val = getenv(name) else { return false }
         return String(cString: val).isEmpty == false
