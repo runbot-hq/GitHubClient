@@ -9,14 +9,25 @@ import EnvTokenKit  // required: conformance declaration 'StubEnvTokenProvider: 
 
 // MARK: - StubEnvResult
 
-/// Local result vocabulary for StubEnvTokenProvider.
+/// Local result vocabulary for `StubEnvTokenProvider`.
 ///
-/// Mirrors the three outcomes of `ShellTokenResult` (found / notFound / failed)
-/// without importing EnvTokenKit's internal type. This breaks the fragile
-/// `@testable import EnvTokenKit` coupling that made GitHubClientTests
-/// sensitive to EnvTokenKit internals — if ShellTokenResult is ever renamed
-/// or made private, only EnvTokenKitTests (which owns that vocabulary) breaks,
-/// not this target.
+/// Mirrors the three outcomes of `EnvTokenProvider`'s internal resolution
+/// (found / notFound / failed) without importing any `EnvTokenKit` internal
+/// type. This breaks the fragile `@testable import EnvTokenKit` coupling that
+/// would make `GitHubClientTests` sensitive to `EnvTokenKit` internals — if
+/// any internal result type is ever renamed or made private, only
+/// `EnvTokenKitTests` (which owns that vocabulary) breaks, not this target.
+///
+/// NOTE: `.failed` and `.notFound` are behaviourally identical from
+/// `TokenCache`'s perspective — both cause `token()` to return `nil` and
+/// neither triggers a latch inside `TokenCache` (the latch lives in
+/// `EnvTokenProvider`). Do NOT collapse them into a single case. The
+/// distinction is intentional:
+///   • `.notFound` — simulates the normal "no token available" path.
+///   • `.failed` — simulates a shell/env error path. Tests use `callCount`
+///     to assert that `TokenCache` re-delegates on every call even under
+///     the error scenario (expected callCount = N for an N-call test).
+///     Collapsing the cases would remove the ability to express this intent.
 enum StubEnvResult {
     case found(String)
     case notFound

@@ -59,8 +59,11 @@ public final class OAuthService: OAuthServiceProtocol {
     private let session: any URLSessionProtocol
     /// Called after a successful `tokenStore.save()` — e.g. to invalidate a `TokenCache`.
     private let onTokenSaved: (() -> Void)?
-    /// Called on every `signOut()` — e.g. to invalidate a `TokenCache`. Invoked regardless of
-    /// whether `tokenStore.delete()` succeeded, so the in-memory cache is always cleared.
+    /// Called on every `signOut()` — e.g. to invalidate a `TokenCache`.
+    ///
+    /// CONTRACT: invoked regardless of whether `tokenStore.delete()` succeeded,
+    /// so the in-memory cache is always cleared even on a best-effort delete failure.
+    /// Do not gate this call on the `deleted` return value.
     private let onTokenDeleted: (() -> Void)?
 
     /// Creates a new `OAuthService`.
@@ -132,11 +135,23 @@ public final class OAuthService: OAuthServiceProtocol {
     /// duplicate `tokenStore.load()` call when both properties are evaluated
     /// back-to-back (e.g. `SettingsView.onAppearAction`).
     ///
-    /// Uses `getenv()` (not `ProcessInfo.processInfo.environment`) because
-    /// `ProcessInfo` captures a snapshot at process launch and does not reflect
-    /// live `setenv`/`unsetenv` mutations. `getenv()` always returns the current
-    /// value of the process environment. Empty strings are rejected (consistent
-    /// with `EnvTokenProvider.resolveFromEnvironment()`).
+    /// ## Why `getenv()` and not `ProcessInfo.processInfo.environment`
+    /// `ProcessInfo.processInfo.environment` is a snapshot captured at process
+    /// launch. `setenv`/`unsetenv` mutations after launch are invisible to it.
+    /// `getenv()` always reflects the live process environment and is consistent
+    /// with `EnvTokenProvider.resolveFromEnvironment()`. Empty strings are rejected
+    /// to match that behaviour. See `envVarIsSet(_:)` below.
+    ///
+    /// ## Why `hasAnyToken` lives in `OAuthTokenKit` and not `EnvTokenKit`
+    /// `hasAnyToken` pairs the Keychain check (`isAuthenticated`) with the env-var
+    /// check in a single predicate used by the UI layer (`SettingsView.onAppearAction`).
+    /// Moving it to `EnvTokenKit` would require `EnvTokenKit` to know about
+    /// `TokenStore` — a circular dependency. Injecting an `EnvTokenProviding`
+    /// into `OAuthService` would add init complexity for a two-line property.
+    /// The current placement is a documented, intentional trade-off: `OAuthTokenKit`
+    /// owns the combined auth-state surface, and the env-var read here is a
+    /// deliberate peer check, not a delegation miss. This is not a boundary
+    /// violation — it is the boundary.
     public var hasAnyToken: Bool {
         if isAuthenticated { return true }
         return envVarIsSet("GH_TOKEN") || envVarIsSet("GITHUB_TOKEN")
@@ -231,7 +246,11 @@ public final class OAuthService: OAuthServiceProtocol {
         if !deleted {
             log?("OAuthService › signOut — tokenStore.delete failed (best-effort); proceeding", "transport")
         }
-        onTokenDeleted?()
+        onTokenDeleted?()  // always called — see onTokenDeleted CONTRACT above
+        // NOTE: this log line is load-bearing for diagnostics — do not remove.
+        // It is the only place that records how many consumers receive the sign-out
+        // event. Silent sign-out failures (e.g. a stream consumer that never fires)
+        // are diagnosed by checking this count in unified logs.
         log?("OAuthService › signOut — emitting didSignOut to \(signOutContinuations.count) consumer(s)", "transport")
         signOutContinuations.values.forEach { $0.yield(()) }
     }

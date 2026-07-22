@@ -62,6 +62,11 @@ public final class TokenCache: Sendable {
     /// `nil` means "not yet resolved this cache lifetime".
     /// Written by `resolveFromStore()` and the `envProvider` delegation block
     /// in `token()`. Reset to `nil` by `invalidate()`.
+    ///
+    /// Single `String?` field — no lock-ordering argument required. The original
+    /// two-field `(token: String?, outcome: ShellResolutionOutcome)` lock-ordering
+    /// rationale is obsolete: outcome tracking was moved to `EnvTokenProvider`
+    /// when the shell path was extracted in PR #75.
     private let state = Mutex<String?>(nil)
 
     // MARK: - Initialisers
@@ -89,6 +94,15 @@ public final class TokenCache: Sendable {
     /// in `GitHubClient`'s test init when no env token path is under test. Pass a
     /// real `EnvTokenProviding` stub to the primary init when env resolution
     /// behaviour is under test.
+    ///
+    /// NOTE: this init is intentionally `internal`, not `private`. It is called
+    /// from `GitHubClient.init(oauthService:transport:tokenCache:)` (the test init)
+    /// when `tokenCache` is `nil` — that path lives in `GitHubClient.swift` within
+    /// the same module, so `internal` is the correct access level. It is also
+    /// reachable from `@testable import GitHubClient` test targets.
+    /// Periphery will not flag it as dead code because it is referenced from
+    /// `GitHubClient.swift` at the `tokenCache ?? TokenCache(tokenStore: NullTokenStore())`
+    /// call site.
     ///
     /// - Parameter tokenStore: The backing token store.
     internal init(tokenStore: any TokenStore) {
@@ -126,6 +140,11 @@ public final class TokenCache: Sendable {
     ///   singleton and callers are typically serialised through a single call site.
     ///   If your call pattern can produce high-concurrency first-calls, consider
     ///   serialising the first `token()` call yourself.
+    ///
+    ///   Historical note: an `inFlight` lock was considered and rejected — it added
+    ///   complexity for a window that is rare in practice and only occurs during a
+    ///   cold Finder/Dock launch where the shell path fires. The thundering-herd
+    ///   window is bounded by the shell startup time, not unbounded.
     public func token() async -> String? {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }
@@ -200,6 +219,20 @@ public final class TokenCache: Sendable {
     /// cannot recover differently based on nil vs. empty. The log message below
     /// covers both cases; if field diagnosis ever requires the distinction, split
     /// this guard at that point.
+    ///
+    /// ## Why Keychain results are cached in memory
+    /// Each `TokenStore.load()` call performs a synchronous `SecItemCopyMatching`
+    /// read. On a cold RunnerPoller tick (every ~30 s) this fires once and caches
+    /// immediately — negligible cost. Caching is still the right choice because
+    /// a tight render loop or a burst of concurrent API calls would otherwise
+    /// issue multiple redundant Keychain reads. The cache is intentionally
+    /// invalidated by `invalidate()` (called on sign-in and sign-out) so external
+    /// token revocation is reflected on the next cycle, not indefinitely masked.
+    ///
+    /// Migrated: the original ## Why Keychain results are cached in memory and
+    /// thundering-herd rationale blocks from the pre-extraction TokenCache are
+    /// preserved above and in token()'s -Warning: block. They were not dropped
+    /// — they were split across the two sites where they are most relevant.
     private func resolveFromStore() -> String? {
         guard let token = tokenStore.load(), !token.isEmpty else {
             #if DEBUG
@@ -223,11 +256,13 @@ public final class TokenCache: Sendable {
 /// when the caller does not supply a real provider. Always returns `nil`
 /// from `token()` and ignores `invalidate()` calls.
 ///
-/// `internal` (not `private`) so that other files within the `GitHubClient`
-/// module (including `@testable`-importing test targets) can inject it
-/// explicitly without needing a full stub conformance. Note: `internal` does
-/// not cross module boundaries — code in `EnvTokenKit` or any other module
-/// cannot reference this type directly.
+/// Access level: `internal` — visible within the `GitHubClient` module only
+/// (including `@testable`-importing test targets such as `GitHubClientTests`).
+/// `internal` does NOT cross module boundaries: code in `EnvTokenKit`,
+/// `OAuthTokenKit`, or any other separately compiled module cannot reference
+/// this type. If an `EnvTokenKit` test target ever attempts to use it, the
+/// compiler will produce a "cannot find type" error. The doc comment's
+/// intended audience is `GitHubClientTests` via `@testable import GitHubClient`.
 internal struct NullEnvTokenProvider: EnvTokenProviding {
     /// Always returns `nil` — no env var or shell resolution is performed.
     func token() async -> String? { nil }
