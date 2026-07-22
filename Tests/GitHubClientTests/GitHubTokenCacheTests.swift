@@ -26,7 +26,7 @@ import Foundation
 import Synchronization
 import Testing
 
-@testable import EnvTokenKit
+import EnvTokenKit       // plain import sufficient — GitHubClientTests only needs public EnvTokenProviding
 @testable import GitHubClient
 
 // MARK: - Helpers

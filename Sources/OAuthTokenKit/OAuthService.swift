@@ -116,12 +116,12 @@ public final class OAuthService: OAuthServiceProtocol {
 
     /// `true` when a valid OAuth token is present in the token store (e.g. Keychain).
     ///
-/// Each call performs one synchronous `SecItemCopyMatching` read. This is
-/// intentional: the Keychain is the source of truth and caching here would
-/// mask external token revocation. The read is fast (≥10 µs on macOS) and
-/// safe on the main thread at current call sites (settings appear on user
-/// interaction, not in animation/layout loops). If this is ever used in a
-/// tight render loop, cache the result at the call site instead.
+    /// Each call performs one synchronous `SecItemCopyMatching` read. This is
+    /// intentional: the Keychain is the source of truth and caching here would
+    /// mask external token revocation. The read is fast (≥10 µs on macOS) and
+    /// safe on the main thread at current call sites (settings appear on user
+    /// interaction, not in animation/layout loops). If this is ever used in a
+    /// tight render loop, cache the result at the call site instead.
     public var isAuthenticated: Bool { tokenStore.load() != nil }
 
     /// `true` when any usable GitHub token is available — OAuth token,

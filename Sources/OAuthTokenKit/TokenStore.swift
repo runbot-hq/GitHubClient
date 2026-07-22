@@ -22,6 +22,10 @@ public protocol TokenStore: Sendable {
     ///   pass an `onTokenSaved` closure to `GitHubClient.init` — it is called automatically
     ///   after every successful `save()`. Without it the cache will continue serving the
     ///   pre-sign-in `nil` until the process restarts.
+    ///
+    /// - Note: `@discardableResult` is intentional — most call sites log the result but
+    ///   do not need to branch on it. Callers that do care about persistence failures
+    ///   should inspect the return value explicitly.
     @discardableResult nonisolated func save(_ token: String) -> Bool
 
     /// Deletes the token from storage. Returns `true` on success or if not found.
