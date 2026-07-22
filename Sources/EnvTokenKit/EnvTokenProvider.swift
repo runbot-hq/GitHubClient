@@ -147,11 +147,12 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
 
     // MARK: - EnvTokenProviding
 
-    /// Resolves a token from `ProcessInfo` or a login-shell subprocess.
+    /// Resolves a token from the process environment or a login-shell subprocess.
     ///
     /// Resolution order:
-    /// 1. `GH_TOKEN` in `ProcessInfo.processInfo.environment`
-    /// 2. `GITHUB_TOKEN` in `ProcessInfo.processInfo.environment`
+    /// 1. `GH_TOKEN` in the process environment (defaults to
+    ///    `ProcessInfo.processInfo.environment`; injectable via `envLookup` in tests)
+    /// 2. `GITHUB_TOKEN` in the process environment (same lookup path as above)
     /// 3. Login-shell subprocess (`/bin/zsh -i -l`) — Finder/Dock launches only
     ///
     /// ## Shell latch policy
@@ -181,10 +182,13 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
             // Do NOT write ShellResolutionOutcome here.
             // TokenCache.token() is the authoritative write-back site: it writes
             // the resolved token into its own Mutex-guarded state immediately after
-            // this call returns, preventing any re-entry before an invalidate().
+            // this call returns, preventing a double-write before an invalidate().
             // Writing a .found case into EnvTokenProvider.state would be redundant
             // with that guard and misleading — .found is not a latch, it signals
             // success. Only .notFound and .failed need to be remembered across calls.
+            // Note: the double-write guard (if $0 == nil) in TokenCache.token() does
+            // not prevent concurrent callers from each reaching this point while the
+            // first is still suspended in the shell — see the -Warning: block above.
             return value
         case .notFound:
             // Shell ran fine but no token was exported.
