@@ -131,10 +131,15 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Delegates to `isAuthenticated` for the Keychain check to avoid a
     /// duplicate `tokenStore.load()` call when both properties are evaluated
     /// back-to-back (e.g. `SettingsView.onAppearAction`).
+    ///
+    /// Uses `getenv()` (not `ProcessInfo.processInfo.environment`) because
+    /// `ProcessInfo` captures a snapshot at process launch and does not reflect
+    /// live `setenv`/`unsetenv` mutations. `getenv()` always returns the current
+    /// value of the process environment. Empty strings are rejected (consistent
+    /// with `EnvTokenProvider.resolveFromEnvironment()`).
     public var hasAnyToken: Bool {
         if isAuthenticated { return true }
-        let env = ProcessInfo.processInfo.environment
-        return env["GH_TOKEN"] != nil || env["GITHUB_TOKEN"] != nil
+        return envVarIsSet("GH_TOKEN") || envVarIsSet("GITHUB_TOKEN")
     }
 
     // MARK: - Sign-out multicast
@@ -367,6 +372,23 @@ public final class OAuthService: OAuthServiceProtocol {
         }
         return token
     }
+}
+
+// MARK: - Private helpers
+
+/// Returns `true` if the named environment variable is set and non-empty.
+///
+/// Uses `getenv()` rather than `ProcessInfo.processInfo.environment` because
+/// `ProcessInfo` captures a snapshot at process launch and does not reflect live
+/// `setenv`/`unsetenv` mutations within the same process. `getenv()` always
+/// returns the current state of the POSIX environment.
+///
+/// Empty strings are rejected to match the behaviour of
+/// `EnvTokenProvider.resolveFromEnvironment()`, which skips nil/empty values
+/// with the same guard.
+private func envVarIsSet(_ name: String) -> Bool {
+    guard let value = getenv(name) else { return false }
+    return strlen(value) > 0
 }
 
 // MARK: - OAuthTokenResponse
