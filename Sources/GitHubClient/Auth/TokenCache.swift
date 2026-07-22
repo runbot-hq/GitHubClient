@@ -64,15 +64,19 @@ public final class TokenCache: Sendable {
     /// in `token()`. Reset to `nil` by `invalidate()`.
     ///
     /// ## Why one Mutex for one field
-    /// // Migrated: the original two-field struct `(token: String?, outcome: ShellResolutionOutcome)`
-    /// // required a lock-ordering rationale because both fields were written in different call
-    /// // paths (resolveFromStore wrote `token`, EnvTokenProvider wrote `outcome`), creating a
-    /// // window where a reader could observe a partial update — a deadlock-adjacent ordering
-    /// // issue documented in the original ## Why one Mutex for both fields block.
-    /// // That rationale is obsolete: outcome tracking was moved to `EnvTokenProvider` in PR #75
-    /// // when the shell path was extracted into EnvTokenKit. `state` is now a single `String?`
-    /// // field with one write path per operation (resolve or invalidate). A single-field Mutex
-    /// // has no lock-ordering concern; the original deadlock-window argument no longer applies.
+    ///
+    /// > Note: Migrated from PR #75 (EnvTokenKit/OAuthTokenKit extraction).
+    /// > The original two-field struct `(token: String?, outcome: ShellResolutionOutcome)`
+    /// > required a lock-ordering rationale because both fields were written in different
+    /// > call paths (resolveFromStore wrote `token`, EnvTokenProvider wrote `outcome`),
+    /// > creating a window where a reader could observe a partial update — a
+    /// > deadlock-adjacent ordering issue documented in the original
+    /// > `## Why one Mutex for both fields` block.
+    /// > That rationale is obsolete: outcome tracking was moved to `EnvTokenProvider`
+    /// > in PR #75 when the shell path was extracted into EnvTokenKit. `state` is now
+    /// > a single `String?` field with one write path per operation (resolve or
+    /// > invalidate). A single-field Mutex has no lock-ordering concern; the original
+    /// > deadlock-window argument no longer applies.
     private let state = Mutex<String?>(nil)
 
     // MARK: - Initialisers
@@ -235,7 +239,8 @@ public final class TokenCache: Sendable {
     /// invalidated by `invalidate()` (called on sign-in and sign-out) so external
     /// token revocation is reflected on the next cycle, not indefinitely masked.
     ///
-    /// // Migrated: thundering-herd rationale → token() -Warning: block above.
+    /// > Note: Migrated from PR #75 — thundering-herd rationale moved to
+    /// > the `token()` `-Warning:` block above.
     private func resolveFromStore() -> String? {
         guard let token = tokenStore.load(), !token.isEmpty else {
             #if DEBUG
