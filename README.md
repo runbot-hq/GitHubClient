@@ -38,7 +38,7 @@ A lightweight, modern Swift GitHub API client for macOS apps. Direct REST calls 
 - 🧪 **Testable by design** — every concrete type hidden behind a protocol; inject a fake transport or token store in tests with no Keychain involvement
 - 🤖 **Self-hosted runner queries** — fetch all runners for an org or repo scope via `fetchRunners(scope:)` / `fetchRunners(scopeString:)`; returns `[GitHubRunner]` with name, status, busy flag, and labels. Pagination handled automatically
 - ⚙️ **Workflow run & job inspection** — `fetchActiveRuns(scope:)` returns a typed `GitHubRunsFetchResult` distinguishing `.success`, `.rateLimited(partial)`, and `.noToken`; `fetchJobs(runID:scope:)` returns full `[GitHubJob]` trees with steps, runner name, and timestamps; `fetchStepLog(jobID:stepNumber:scope:)` fetches and parses raw CI logs per step, stripping ANSI codes automatically
-- 👤 **User context helpers** — `fetchUserOrgs()` and `fetchUserRepos()` return the authenticated user’s org login names and `owner/repo` full names; useful for building scope-picker UIs
+- 👤 **User context helpers** — `fetchUserOrgs()` and `fetchUserRepos()` return the authenticated user's org login names and `owner/repo` full names; useful for building scope-picker UIs
 
 ## Requirements
 
@@ -68,7 +68,7 @@ The package is split into three independently-testable library targets and three
 ### Dependency and boundary rules
 
 - `EnvTokenKit` and `OAuthTokenKit` are **peer targets** — neither depends on the other.
-- `GitHubClient` uses `internal import EnvTokenKit` (no `EnvTokenKit` type appears in `GitHubClient`’s public API) and `public import OAuthTokenKit` (required because `TokenCache`’s public initialisers name `TokenStore`, and `GitHubClient.oauthService` names `OAuthServiceProtocol`).
+- `GitHubClient` uses `internal import EnvTokenKit` (no `EnvTokenKit` type appears in `GitHubClient`'s public API) and `public import OAuthTokenKit` (required because `TokenCache`'s public initialisers name `TokenStore`, and `GitHubClient.oauthService` names `OAuthServiceProtocol`).
 - `GitHubLogger` stays in `GitHubClient/Transport/`. The kits receive a `(@Sendable (String, String) -> Void)?` log closure bridged at wiring time in `GitHubClient.init` — they never import `GitHubLogger` directly.
 - Consuming apps depend **only on `GitHubClient`**. `EnvTokenKit` and `OAuthTokenKit` are transitive; you do not add them as explicit dependencies unless you need to use their types directly.
 
@@ -89,7 +89,7 @@ Add to your `Package.swift`:
 )
 ```
 
-`EnvTokenKit` and `OAuthTokenKit` are re-exported through `GitHubClient` via `public import`. You do not need to add them as separate dependencies unless you are using their types in your own `public` API surface, in which case add them explicitly to satisfy Swift’s access-control rules.
+`OAuthTokenKit` is re-exported through `GitHubClient` via `public import` — you get `OAuthServiceProtocol`, `TokenStore`, `GitHubScopes`, and related types without a separate dependency. `EnvTokenKit` is `internal import` in `GitHubClient`: the `EnvTokenProviding` protocol is transitively available (it appears in `TokenCache`'s public API), but the concrete `EnvTokenProvider` type is not part of `GitHubClient`'s public surface. If you need to name `EnvTokenProvider` directly in your own code, add `EnvTokenKit` as an explicit dependency.
 
 ## Usage
 
@@ -97,7 +97,7 @@ The recommended entry point is the `GitHubClient` facade. It constructs and wire
 `KeychainTokenStore`, `EnvTokenProvider`, `TokenCache`, `OAuthService`, and `GitHubTransport` in one call.
 
 ```swift
-// AppDelegate or your app’s composition root (@MainActor)
+// AppDelegate or your app's composition root (@MainActor)
 let github = GitHubClient(
     clientID: "your-client-id",
     clientSecret: "your-client-secret",

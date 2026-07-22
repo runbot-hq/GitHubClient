@@ -10,6 +10,13 @@
 // process-global environment, so this suite is `.serialized` and every env-var
 // test wraps its body in `withCleanEnv`.
 //
+// Note: `@MainActor` already serialises this suite on the main actor (the main
+// actor is a serial executor), so `.serialized` is belt-and-suspenders here
+// rather than a strict correctness requirement. It is retained because the
+// suite's env-var mutation pattern is fragile enough that the redundancy is
+// worthwhile — and because removing `.serialized` would be invisible to future
+// authors who don't know this suite is @MainActor-isolated.
+//
 // Why getenv() and not ProcessInfo?
 // `ProcessInfo.processInfo.environment` is a snapshot captured at process launch;
 // `setenv`/`unsetenv` mutations are invisible to it within the same process.
@@ -30,14 +37,16 @@ import Testing
 
 /// Strips both token env vars, runs body, then restores the previous values.
 ///
-/// ⚠️ SERIALIZED DEPENDENCY: `setenv`/`unsetenv` mutate the process-global
-/// environment. Correctness relies on the `@Suite(.serialized)` attribute on
-/// `OAuthServiceAuthStateTests`.
-///
 /// Uses `getenv()` (not `ProcessInfo.processInfo.environment`) for save/restore
 /// because `ProcessInfo` captures a snapshot at process start and does not
 /// reflect live `setenv`/`unsetenv` mutations. `getenv()` always reflects the
 /// current state of the process environment.
+///
+/// Note: the `.serialized` attribute on `OAuthServiceAuthStateTests` and the
+/// `@MainActor` isolation together ensure no two tests in this suite run
+/// concurrently. `withCleanEnv` relies on that guarantee — do not call it
+/// from a non-serialized or non-`@MainActor` context without adding your own
+/// synchronisation.
 private func withCleanEnv(_ body: () -> Void) {
     let prevGH = getenv("GH_TOKEN").flatMap { String(cString: $0) }
     let prevGitHub = getenv("GITHUB_TOKEN").flatMap { String(cString: $0) }
@@ -55,6 +64,10 @@ private func withCleanEnv(_ body: () -> Void) {
 // properties (isAuthenticated, hasAnyToken) can only be accessed synchronously
 // from a @MainActor context. Removing this attribute causes actor-isolation
 // compiler errors at every property access in the test bodies below.
+//
+// Serialisation note: @MainActor already serialises all tests in this suite on
+// the main actor (a serial executor). The .serialized trait above is
+// belt-and-suspenders — see the file-level comment for the full rationale.
 @MainActor
 struct OAuthServiceAuthStateTests {
 

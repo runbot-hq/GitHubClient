@@ -96,6 +96,17 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// Reads a single environment variable by key.
     ///
     /// Defaults to `ProcessInfo.processInfo.environment[key]` in production.
+    ///
+    /// ## ProcessInfo vs getenv() — intentional divergence
+    /// `ProcessInfo.processInfo.environment` is a snapshot captured at process
+    /// launch; `setenv`/`unsetenv` mutations after launch are invisible to it.
+    /// This is the correct default here: `EnvTokenProvider` is not expected to
+    /// observe environment mutations within a running process.
+    /// `OAuthService.hasAnyToken` makes the opposite choice — it uses `getenv()`
+    /// so the UI auth-state check always reflects the live environment. See
+    /// `envVarIsSet(_:)` in `OAuthService.swift` for the full rationale. Both
+    /// choices are intentional and documented at their respective call sites.
+    ///
     /// Overridable in tests via the `envLookup` init parameter so tests that
     /// exercise the shell-fallback path never touch the live process environment
     /// — eliminating the cross-suite `setenv`/`unsetenv` race on CI where
@@ -167,6 +178,13 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
         let shellResult = await shellResolver(log)
         switch shellResult {
         case .found(let value):
+            // Do NOT write ShellResolutionOutcome here.
+            // TokenCache.token() is the authoritative write-back site: it writes
+            // the resolved token into its own Mutex-guarded state immediately after
+            // this call returns, preventing any re-entry before an invalidate().
+            // Writing a .found case into EnvTokenProvider.state would be redundant
+            // with that guard and misleading — .found is not a latch, it signals
+            // success. Only .notFound and .failed need to be remembered across calls.
             return value
         case .notFound:
             // Shell ran fine but no token was exported.
