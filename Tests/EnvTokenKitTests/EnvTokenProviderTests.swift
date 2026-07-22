@@ -88,8 +88,16 @@ struct EnvTokenProviderTests {
     /// Resolves a token from the environment without entering the shell path.
     ///
     /// Uses `withCleanEnv` + `withEnv` to set a real process env var, then
-    /// constructs the provider with the default `envLookup` (reads ProcessInfo)
-    /// to confirm the end-to-end env-var path works.
+    /// constructs the provider with `envLookup: { key in getenv(key).flatMap { String(cString: $0) } }`
+    /// to confirm the end-to-end env-var pass-through path works.
+    ///
+    /// ## Why getenv() and not ProcessInfo here
+    /// `withEnv` sets the env var via `setenv`, which is invisible to
+    /// `ProcessInfo.processInfo.environment` (a launch-time snapshot). Using
+    /// `getenv()` in the envLookup closure reflects the live process environment
+    /// set by `withEnv`, making the test correct on CI where `GITHUB_TOKEN` is
+    /// always present at launch and `withCleanEnv`'s `unsetenv` has no effect
+    /// on the ProcessInfo snapshot.
     ///
     /// ## How this test validates the shell is not spawned
     /// The injected `shellResolver` increments a counter. If `token()` returns
@@ -97,20 +105,21 @@ struct EnvTokenProviderTests {
     @Test func envProvider_processInfo_hit() async {
         await withCleanEnv {
             let shellCallCount = Mutex<Int>(0)
-            // Use the real envLookup (ProcessInfo) for this test — we are
-            // validating that the env-var fast path works end-to-end.
+            // Use getenv()-based envLookup so setenv mutations from withEnv
+            // are visible to the provider. ProcessInfo is a launch-time snapshot
+            // and would not see them — see the test doc comment above.
             let provider = EnvTokenProvider(
                 shellResolver: { _ in
                     shellCallCount.withLock { $0 += 1 }
                     return .notFound
-                }
-                // envLookup defaults to ProcessInfo in the internal init
+                },
+                envLookup: { key in getenv(key).flatMap { String(cString: $0) } }
             )
             await withEnv("GH_TOKEN", value: "terminal-token") {
                 let result = await provider.token()
                 #expect(result == "terminal-token")
             }
-            // ProcessInfo fast path must short-circuit before the shell resolver.
+            // getenv() fast path must short-circuit before the shell resolver.
             #expect(shellCallCount.withLock { $0 } == 0)
         }
     }

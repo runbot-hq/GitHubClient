@@ -140,7 +140,7 @@ public final class OAuthService: OAuthServiceProtocol {
 
     // MARK: - OAuthServiceProtocol — Auth state
 
-    /// `true` when a valid OAuth token is present in the token store (e.g. Keychain).
+    /// `true` when a non-empty OAuth token is present in the token store (e.g. Keychain).
     ///
     /// Each call performs one synchronous `SecItemCopyMatching` read. This is
     /// intentional: the Keychain is the source of truth and caching here would
@@ -148,7 +148,11 @@ public final class OAuthService: OAuthServiceProtocol {
     /// safe on the main thread at current call sites (settings appear on user
     /// interaction, not in animation/layout loops). If this is ever used in a
     /// tight render loop, cache the result at the call site instead.
-    public var isAuthenticated: Bool { tokenStore.load() != nil }
+    ///
+    /// Empty strings are rejected: a corrupted Keychain entry ("") must not
+    /// return `true` here while `token()` returns `nil` — that mismatch would
+    /// show the UI as signed-in while every API call silently gets no token.
+    public var isAuthenticated: Bool { tokenStore.load().map { !$0.isEmpty } ?? false }
 
     /// `true` when any usable GitHub token is available — OAuth token,
     /// `GH_TOKEN`, or `GITHUB_TOKEN` environment variable.
@@ -336,4 +340,140 @@ public final class OAuthService: OAuthServiceProtocol {
     ///    the error code is in the JSON body.
     /// 5. Save the token via `tokenStore.save()`. On success call `onTokenSaved`
     ///    and fire a `true` sign-in event; on failure fire `false`.
-    private func exchangeCode(_ code: String) 
+    private func exchangeCode(_ code: String) async {
+        log?("OAuthService › exchangeCode — POST to GitHub", "transport")
+        let req: URLRequest
+        do {
+            req = try makeTokenRequest(code: code)
+        } catch {
+            log?("OAuthService › exchangeCode: failed to encode request body — aborting", "transport")
+            fireSignIn(false)
+            return
+        }
+        let data: Data
+        do {
+            data = try await fetchTokenData(request: req)
+        } catch {
+            log?("OAuthService › exchangeCode: network error — \(error.localizedDescription), calling fireSignIn(false)", "transport")
+            fireSignIn(false)
+            return
+        }
+        let response: OAuthTokenResponse
+        do {
+            response = try decoder.decode(OAuthTokenResponse.self, from: data)
+        } catch {
+            log?("OAuthService › exchangeCode: decode error — \(error.localizedDescription), calling fireSignIn(false)", "transport")
+            fireSignIn(false)
+            return
+        }
+        guard let token = handleTokenResponse(response) else {
+            fireSignIn(false)
+            return
+        }
+        log?("OAuthService › exchangeCode — got access_token (len=\(token.count)), saving to store", "transport")
+        let saved = tokenStore.save(token)
+        log?("OAuthService › exchangeCode — tokenStore.save result=\(saved), calling fireSignIn(\(saved))", "transport")
+        if saved {
+            onTokenSaved?()
+        } else {
+            log?("OAuthService › exchangeCode: tokenStore.save failed", "transport")
+        }
+        fireSignIn(saved)
+    }
+
+    /// Builds the token-exchange `URLRequest`.
+    ///
+    /// `redirect_uri` is intentionally omitted from the POST body. GitHub only
+    /// requires it in the token exchange if multiple redirect URIs are registered
+    /// for the OAuth app — in that case it must match the value used in the
+    /// authorisation step. Omitting it is correct for the single-URI case this
+    /// library targets. If multi-URI support is ever needed, forward `self.redirectURI`
+    /// as an additional body field here.
+    private func makeTokenRequest(code: String) throws -> URLRequest {
+        guard let url = URL(string: accessTokenURL) else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body = OAuthTokenRequest(clientID: clientID, clientSecret: clientSecret, code: code)
+        req.httpBody = try encoder.encode(body)
+        return req
+    }
+
+    /// Performs the network call for the token exchange.
+    @concurrent
+    private func fetchTokenData(request: URLRequest) async throws -> Data {
+        let (data, _) = try await session.data(for: request)
+        return data
+    }
+
+    /// Validates the GitHub-level token response and extracts the access token.
+    private func handleTokenResponse(_ response: OAuthTokenResponse) -> String? {
+        if let errorCode = response.error {
+            let desc = response.errorDescription ?? ""
+            log?("OAuthService › exchangeCode: GitHub error=\(errorCode) \(desc)", "transport")
+            return nil
+        }
+        guard let token = response.accessToken, !token.isEmpty else {
+            log?("OAuthService › exchangeCode: no access_token in response — keys=\(response.debugKeys)", "transport")
+            return nil
+        }
+        return token
+    }
+
+    // MARK: - Private helpers
+
+    /// Returns `true` when the named environment variable is set to a non-empty string.
+    ///
+    /// Uses `getenv()` rather than `ProcessInfo.processInfo.environment` because
+    /// `ProcessInfo` is a launch-time snapshot and does not reflect `setenv`/`unsetenv`
+    /// mutations made after the process starts. `getenv()` always reflects the live
+    /// process environment. This is load-bearing for `hasAnyToken` in UI contexts
+    /// and for test isolation in `OAuthServiceAuthStateTests`.
+    private func envVarIsSet(_ name: String) -> Bool {
+        guard let val = getenv(name) else { return false }
+        return String(cString: val).isEmpty == false
+    }
+}
+
+// MARK: - OAuthTokenResponse
+
+/// Response body from the GitHub OAuth token exchange.
+/// GitHub returns HTTP 200 even on failure, so both `accessToken` and `error` are optional.
+private struct OAuthTokenResponse: Decodable {
+    /// The OAuth access token returned on success, or `nil` if GitHub returned an error.
+    let accessToken: String?
+    /// The OAuth error code returned by GitHub on failure (e.g. `"bad_verification_code"`).
+    let error: String?
+    /// Human-readable description of the OAuth error, if present.
+    let errorDescription: String?
+    /// Maps Swift property names to the snake_case JSON keys used by the GitHub API.
+    private enum CodingKeys: String, CodingKey {
+        case accessToken = "access_token" // skipcq: SCT-A000
+        case error
+        case errorDescription = "error_description"
+    }
+    /// Returns the JSON key names of fields present in this response, for diagnostic logging.
+    var debugKeys: [String] {
+        var keys: [String] = []
+        if accessToken != nil { keys.append("access_token") } // skipcq: SCT-A000
+        if error != nil { keys.append("error") }
+        if errorDescription != nil { keys.append("error_description") }
+        return keys
+    }
+}
+
+// MARK: - OAuthTokenRequest
+
+// periphery:ignore
+/// OAuth token-exchange request body for the GitHub API.
+private struct OAuthTokenRequest: Encodable {
+    let clientID: String
+    let clientSecret: String
+    let code: String
+    private enum CodingKeys: String, CodingKey {
+        case clientID = "client_id" // skipcq: SCT-A000
+        case clientSecret = "client_secret" // skipcq: SCT-A000
+        case code
+    }
+}
