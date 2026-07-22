@@ -12,6 +12,12 @@
 // `public import` re-exports EnvTokenKit and OAuthTokenKit as part of the
 // GitHubClient module surface; that is an intentional, unavoidable consequence
 // of keeping TokenCache public with protocol-typed parameters.
+//
+// See also: GitHubClient.swift — also requires public import OAuthTokenKit
+// independently, for its `public let oauthService: any OAuthServiceProtocol`
+// property declaration. Both files have genuinely independent compiler reasons;
+// neither import is redundant. Removing the import here does not satisfy the
+// requirement in GitHubClient.swift, and vice versa.
 public import EnvTokenKit
 import Foundation
 public import OAuthTokenKit

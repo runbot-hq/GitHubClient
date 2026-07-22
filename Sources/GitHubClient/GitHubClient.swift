@@ -9,6 +9,10 @@ import Foundation
 //    their public parameter lists; re-exposing TokenCache through the test init's `tokenCache:`
 //    parameter inherits the same constraint.
 // Do NOT downgrade to internal without resolving both of the above.
+// See also: TokenCache.swift — also requires public import OAuthTokenKit and public import
+// EnvTokenKit for its own independent compiler reasons (public initialisers with protocol-typed
+// parameters). Both imports are load-bearing in both files; removing the import here does not
+// satisfy or remove the requirement in TokenCache.swift, and vice versa.
 public import OAuthTokenKit
 
 // MARK: - GitHubClient
