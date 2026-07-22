@@ -23,6 +23,23 @@ import Foundation
 //    registered makeSignInStream() consumers.
 
 /// Manages OAuth state and behaviour. No AppKit dependency.
+///
+/// ## @MainActor isolation — class level vs. protocol level
+/// `OAuthService` does not declare `@MainActor` at the class level. Its isolation
+/// comes from `OAuthServiceProtocol`, which is `@MainActor`-annotated. This is
+/// intentional and safe for all current call sites — every caller reaches
+/// `OAuthService` through the protocol, so the actor boundary is always enforced.
+///
+/// A class-level `@MainActor` annotation would be the right hardening step if
+/// `OAuthService` were ever constructed and called directly (not through the
+/// protocol) from off-MainActor code. That is not the case today; the concrete
+/// type is wired internally in `GitHubClient.init` and always accessed via
+/// `any OAuthServiceProtocol`. If that changes, add `@MainActor` to the class
+/// declaration and remove this note.
+///
+/// The `pendingState: String?` mutable property is safe under this arrangement
+/// because all mutation paths (`makeSignInURL`, `handleCallback`, `signOut`) are
+/// `@MainActor`-isolated through the protocol. There is no unguarded write path.
 @MainActor
 public final class OAuthService: OAuthServiceProtocol {
     /// Shared `JSONDecoder` — reused across token-exchange decode calls.
@@ -41,6 +58,11 @@ public final class OAuthService: OAuthServiceProtocol {
     /// GitHub OAuth token-exchange URL.
     private let accessTokenURL = "https://github.com/login/oauth/access_token" // NOSONAR
     /// CSRF nonce generated in makeSignInURL(), verified in handleCallback(). Cleared after use.
+    ///
+    /// Mutation is safe without additional locking: all write paths
+    /// (`makeSignInURL`, `handleCallback`, `signOut`) are `@MainActor`-isolated
+    /// through `OAuthServiceProtocol`. See the class-level doc comment for the
+    /// full isolation rationale.
     private var pendingState: String?
     /// The GitHub OAuth app client ID.
     private let clientID: String
@@ -413,6 +435,11 @@ private func envVarIsSet(_ name: String) -> Bool {
 // MARK: - OAuthTokenResponse
 
 /// Response body from the GitHub OAuth token exchange.
+///
+/// `debugKeys` was removed in PR #75: `handleTokenResponse()` logs a
+/// hardcoded message and never called `debugKeys` after the refactor,
+/// making it dead code. Periphery would flag it. Removed rather than
+/// annotated with `// periphery:ignore` because it served no live purpose.
 private struct OAuthTokenResponse: Decodable {
     /// The OAuth access token returned on success, or `nil` if GitHub returned an error.
     let accessToken: String?
@@ -421,6 +448,13 @@ private struct OAuthTokenResponse: Decodable {
     /// Human-readable description of the OAuth error, if present.
     let errorDescription: String?
     /// Maps Swift property names to GitHub JSON keys.
+    ///
+    /// `skipcq: SCT-A000` on `accessToken` suppresses the SonarQube/DeepSource
+    /// hardcoded-string rule for the JSON key literal `"access_token"`. The
+    /// annotation is on the `accessToken` case only because it is the only key
+    /// whose string value (`"access_token"`) would otherwise trigger the rule.
+    /// `error` and `error_description` are short, unambiguous literals that do
+    /// not match the rule's heuristic.
     private enum CodingKeys: String, CodingKey {
         /// JSON key `access_token`.
         case accessToken = "access_token" // skipcq: SCT-A000

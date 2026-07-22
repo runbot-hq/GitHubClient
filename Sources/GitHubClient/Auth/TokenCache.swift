@@ -229,10 +229,7 @@ public final class TokenCache: Sendable {
     /// invalidated by `invalidate()` (called on sign-in and sign-out) so external
     /// token revocation is reflected on the next cycle, not indefinitely masked.
     ///
-    /// Migrated: the original ## Why Keychain results are cached in memory and
-    /// thundering-herd rationale blocks from the pre-extraction TokenCache are
-    /// preserved above and in token()'s -Warning: block. They were not dropped
-    /// — they were split across the two sites where they are most relevant.
+    /// // Migrated: thundering-herd rationale → token() -Warning: block above.
     private func resolveFromStore() -> String? {
         guard let token = tokenStore.load(), !token.isEmpty else {
             #if DEBUG

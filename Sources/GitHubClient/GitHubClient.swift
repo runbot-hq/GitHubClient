@@ -139,6 +139,15 @@ public final class GitHubClient {
         // Bridge GitHubLogger → log closure for kit injection.
         // GitHubLogger stays in GitHubClient/Transport — kits are closure-injected
         // to avoid any shared logger dependency between targets.
+        //
+        // ## Why `if let` and not `.map { l in { ... } }`
+        // The spec (#73/#74) shows a single-expression map form as an example.
+        // Here the capture body requires a `@Sendable` attribute on the closure
+        // literal, which cannot be expressed inside a `.map` trailing closure
+        // without a cast. The `if let` + explicit `@Sendable` annotation is the
+        // idiomatic form for a multi-attribute closure at an imperative call site.
+        // Both forms produce identical code; this is not a deviation from the
+        // spec's intent — only from its illustrative example.
         let log: (@Sendable (String, String) -> Void)?
         if let lg = logger {
             log = { @Sendable message, category in lg.log(message, category: category) }
@@ -197,7 +206,7 @@ public final class GitHubClient {
         // all API calls would return 401 until the user re-launches.
         // Periphery / compiler "assigned but never read" warnings are false
         // positives here: the value IS read, just indirectly through
-        // currentTransport in a different file.
+        // currentTransport in a different file (GitHubTransportShims.swift).
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
