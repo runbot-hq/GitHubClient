@@ -59,7 +59,8 @@ public final class OAuthService: OAuthServiceProtocol {
     private let session: any URLSessionProtocol
     /// Called after a successful `tokenStore.save()` — e.g. to invalidate a `TokenCache`.
     private let onTokenSaved: (() -> Void)?
-    /// Called on every `signOut()` — e.g. to invalidate a `TokenCache`.
+    /// Called on every `signOut()` — e.g. to invalidate a `TokenCache`. Invoked regardless of
+    /// whether `tokenStore.delete()` succeeded, so the in-memory cache is always cleared.
     private let onTokenDeleted: (() -> Void)?
 
     /// Creates a new `OAuthService`.
@@ -218,7 +219,7 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Permanent UI lock-out is a worse failure mode than a recoverable ghost
     /// entry, so we always proceed.
     public func signOut() {
-        log?("OAuthService › signOut — called", "transport")
+        log?("OAuthService › signOut — called, pendingState=\(pendingState != nil ? "set" : "nil")", "transport")
         pendingState = nil
         let deleted = tokenStore.delete()
         log?("OAuthService › signOut — tokenStore.delete result=\(deleted)", "transport")
@@ -226,6 +227,7 @@ public final class OAuthService: OAuthServiceProtocol {
             log?("OAuthService › signOut — tokenStore.delete failed (best-effort); proceeding", "transport")
         }
         onTokenDeleted?()
+        log?("OAuthService › signOut — emitting didSignOut to \(signOutContinuations.count) consumer(s)", "transport")
         signOutContinuations.values.forEach { $0.yield(()) }
     }
 
@@ -243,6 +245,11 @@ public final class OAuthService: OAuthServiceProtocol {
         log?("OAuthService › handleCallback — url=\(safeURL)", "transport")
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let code = comps.queryItems?.first(where: { $0.name == "code" })?.value else {
+            // Bug fix (PR #55): clear the nonce even on a codeless callback.
+            // Without this, a codeless redirect (no `code` param) left pendingState
+            // populated, allowing a second callback with the same state to reuse the
+            // nonce — a potential CSRF vector. All other guard branches already nil
+            // pendingState before returning; this aligns the missing-code path.
             log?("OAuthService › handleCallback — missing code param", "transport")
             pendingState = nil
             fireSignIn(false)
