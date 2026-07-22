@@ -19,7 +19,7 @@ import Synchronization
 /// (an OAuth-only user who later adds `GH_TOKEN` to their profile should not
 /// need a relaunch to pick it up). The enum makes the policy explicit:
 /// only `.failed` latches; `.notFound` allows re-entry on the next call.
-enum ShellResolutionOutcome {
+private enum ShellResolutionOutcome {
     /// No shell attempt has been made yet this provider lifetime.
     case notAttempted
     /// The shell launched and ran successfully but found no `GH_TOKEN` or

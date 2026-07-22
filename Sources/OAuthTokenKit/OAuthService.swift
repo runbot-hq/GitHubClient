@@ -152,6 +152,14 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Empty strings are rejected: a corrupted Keychain entry ("") must not
     /// return `true` here while `token()` returns `nil` — that mismatch would
     /// show the UI as signed-in while every API call silently gets no token.
+    ///
+    /// > Note: Behaviour change introduced in PR #75 (EnvTokenKit/OAuthTokenKit extraction).
+    /// > Previously: `tokenStore.load() != nil` — an empty string "" returned `true`.
+    /// > Now: `.map { !$0.isEmpty } ?? false` — empty strings are rejected.
+    /// > This fixes the mismatch where `isAuthenticated == true` while `token()`
+    /// > returns `nil` for an empty Keychain entry. Any caller relying on the old
+    /// > `!= nil` semantics (e.g. treating "" as a valid token) will see a behaviour
+    /// > change here. See also: `OAuthServiceAuthStateTests.oauthService_isAuthenticated_emptyString`.
     public var isAuthenticated: Bool { tokenStore.load().map { !$0.isEmpty } ?? false }
 
     /// `true` when any usable GitHub token is available — OAuth token,
