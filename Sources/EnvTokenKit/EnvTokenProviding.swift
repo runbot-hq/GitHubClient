@@ -48,6 +48,21 @@ public protocol EnvTokenProviding: Sendable {
     /// launch error. See `ShellResolutionOutcome` in `EnvTokenProvider` for
     /// the full latch policy.
     ///
+    /// ## Caching responsibility
+    /// This protocol does **not** cache a successfully resolved token internally.
+    /// When `EnvTokenProvider.token()` returns a `.found` result from the login
+    /// shell, it does not write that result to any internal state — the next
+    /// call will re-enter the full resolution chain. Caching is the **caller's
+    /// responsibility**. In the production wiring, `TokenCache` provides this
+    /// layer: it stores the resolved value in a `Mutex`-guarded `String?` and
+    /// short-circuits on every subsequent call. Calling `EnvTokenProvider.token()`
+    /// directly — without a wrapping cache — will re-spawn `/bin/zsh` on every
+    /// call that misses the `ProcessInfo` fast path. This is intentional: the
+    /// protocol is designed for injection into `TokenCache`, not for direct use.
+    /// If you are consuming `EnvTokenKit` independently (it is a standalone
+    /// library product in `Package.swift`), you must provide your own caching
+    /// layer or use `TokenCache` from `GitHubClient`.
+    ///
     /// - Warning: Concurrent callers each spawn a separate `/bin/zsh` subprocess
     ///   because the `.failed` latch is not set until `loginShellToken` returns
     ///   (up to 10 s). The concrete `EnvTokenProvider` is safe today because

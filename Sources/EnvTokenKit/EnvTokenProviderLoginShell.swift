@@ -9,6 +9,19 @@ import Synchronization
 ///
 /// Returned by `loginShellToken` and consumed by `token()` to set
 /// `ShellResolutionOutcome` in the provider state.
+///
+/// ## Access level: internal
+/// `ShellTokenResult` is `internal` because it is part of the `shellResolver`
+/// closure seam on `EnvTokenProvider`'s internal test init. It is reachable
+/// from `EnvTokenKitTests` via `@testable import EnvTokenKit`.
+///
+/// If you are consuming `EnvTokenKit` from an external test target that cannot
+/// use `@testable` (e.g. a separate package that lists `EnvTokenKit` as a
+/// dependency), you cannot construct a `shellResolver` stub — use the public
+/// `EnvTokenProvider.init(log:)` convenience init instead, which defaults to
+/// the real login-shell path. For full shell-seam control from an external
+/// target, copy `StubShellResolver` from `EnvTokenKitTests/TestSupport/` or
+/// file a request to promote `ShellTokenResult` to `public`.
 enum ShellTokenResult {
     /// The shell ran and found an exported token.
     case found(String)
