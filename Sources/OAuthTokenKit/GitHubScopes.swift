@@ -1,5 +1,5 @@
 // GitHubScopes.swift
-// GitHubClient
+// OAuthTokenKit
 
 // MARK: - GitHubScopes
 
