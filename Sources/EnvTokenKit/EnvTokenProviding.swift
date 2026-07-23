@@ -1,5 +1,5 @@
 // EnvTokenProviding.swift
-// EnvTokenKit
+// GitHubClient
 
 // MARK: - EnvTokenProviding
 //

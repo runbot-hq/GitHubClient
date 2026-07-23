@@ -1,5 +1,5 @@
 // TokenStore.swift
-// OAuthTokenKit
+// GitHubClient
 import Foundation
 
 // MARK: - TokenStore

@@ -1,5 +1,5 @@
 // OAuthService.swift
-// OAuthTokenKit
+// GitHubClient
 import Foundation
 
 // MARK: - OAuthService
@@ -334,20 +334,6 @@ public final class OAuthService: OAuthServiceProtocol {
         }
         log?("OAuthService › handleCallback — state OK, exchanging code", "transport")
         pendingState = nil
-        // [weak self] is load-bearing here: this Task is not awaited, so if
-        // OAuthService is deallocated before exchangeCode completes (e.g. during
-        // test teardown), the [weak self] guard prevents a call to fireSignIn on
-        // a dangling continuation registry. OAuthService is a singleton in the
-        // production app (low real risk), but [weak self] is the correct form
-        // for any non-awaited Task spawned from an instance method.
-        //
-        // guard let self else { return }: if self is deallocated before the Task
-        // body runs, signInContinuations is gone with it — there is nothing to
-        // yield into. Calling fireSignIn here would be a use-after-free on the
-        // continuation registry. The correct action is to return silently.
-        // In production this path is unreachable (OAuthService is a singleton);
-        // in tests, teardown races are prevented by awaiting the sign-in stream
-        // before releasing the service.
         Task { [weak self] in
             guard let self else { return }
             await exchangeCode(code)
