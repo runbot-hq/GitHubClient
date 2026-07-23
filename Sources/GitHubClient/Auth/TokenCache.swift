@@ -195,6 +195,21 @@ public final class TokenCache: Sendable {
     /// resets the outcome), not just once per process lifetime. It is cached
     /// immediately on success, so only the first `token()` call after each
     /// `invalidate()` pays the penalty.
+    ///
+    /// ## Two-step atomicity window (known, acceptable)
+    /// `state.withLock { $0 = nil }` and `envProvider.invalidate()` are two
+    /// separate operations — they cannot share a single lock because
+    /// `envProvider.invalidate()` is a protocol call whose implementation is
+    /// unknown to `TokenCache`. A concurrent `token()` call that wins the window
+    /// between these two lines will miss the cache (state is nil), call
+    /// `envProvider.token()`, and may get a still-un-invalidated shell result
+    /// written back into state — undoing the clear for one extra cycle.
+    /// This is acceptable in production: `RunnerPoller` is a serial actor and
+    /// is the only caller of `token()` in the app, so no concurrent `token()`
+    /// call can race `invalidate()` in practice. The window is a theoretical
+    /// exposure for future multi-caller configurations, not a live production risk.
+    /// If a future caller introduces genuine concurrency here, consider wrapping
+    /// both steps in a higher-level serialisation point at the call site.
     public func invalidate() {
         state.withLock { $0 = nil }
         envProvider.invalidate()

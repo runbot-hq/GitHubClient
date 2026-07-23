@@ -341,6 +341,14 @@ public final class OAuthService: OAuthServiceProtocol {
         // leaving every makeSignInStream() consumer hanging. OAuthService is
         // long-lived (held by the GitHubClient singleton); the task holds no
         // back-reference on OAuthService, so this does not create a retain cycle.
+        //
+        // Actor inheritance: the unqualified Task {} inherits @MainActor from
+        // handleCallback, so exchangeCode runs on @MainActor throughout. This is
+        // intentional — fireSignIn must be @MainActor-isolated because it mutates
+        // signInContinuations, and tokenStore.save (a synchronous Keychain write)
+        // is fast (≤10 µs, documented in isAuthenticated). The network work in
+        // fetchTokenData is marked @concurrent and hops off the main actor for its
+        // own duration. No structural change is needed here.
         Task {
             await exchangeCode(code)
         }
@@ -451,10 +459,20 @@ public final class OAuthService: OAuthServiceProtocol {
     ///
     /// ## Thread safety
     /// `getenv()` is not thread-safe under concurrent `setenv`/`unsetenv` calls (POSIX).
-    /// This is safe at all current call sites because `hasAnyToken` is `@MainActor`-isolated
-    /// via `OAuthServiceProtocol` — no concurrent env mutation runs on the main thread.
-    /// If this method is ever called from off-actor code, or if a test issues concurrent
-    /// `setenv` calls alongside `hasAnyToken` evaluation, this assumption must be revisited.
+    /// This is safe at all current production call sites because `hasAnyToken` is
+    /// `@MainActor`-isolated via `OAuthServiceProtocol` — no concurrent env mutation
+    /// runs on the main thread.
+    ///
+    /// **Swift Testing live risk**: Swift Testing runs test cases in parallel by default.
+    /// `OAuthServiceAuthStateTests` uses `setenv`/`unsetenv` to set up fixture state.
+    /// If that suite does not carry `@Suite(.serialized)` (or wrap every env-touching
+    /// test body in a `withCleanEnv` helper), concurrent test cases will race on the
+    /// process-global environment — a live data race today, not a hypothetical.
+    /// Verify that `OAuthServiceAuthStateTests` is serialised before adding new
+    /// env-touching test cases to that suite.
+    ///
+    /// If this method is ever called from off-actor production code, the `@MainActor`
+    /// isolation guarantee is gone and the thread-safety assumption must be revisited.
     private func envVarIsSet(_ name: String) -> Bool {
         guard let val = getenv(name) else { return false }
         return String(cString: val).isEmpty == false
