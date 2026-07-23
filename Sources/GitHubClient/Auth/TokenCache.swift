@@ -199,8 +199,23 @@ public final class TokenCache: Sendable {
 
     /// Returns the token currently held in the in-memory cache, or `nil` if not yet resolved.
     ///
-    /// Zero-I/O synchronous read — never spawns a shell, reads the Keychain,
-    /// or checks environment variables.
+    /// This is a non-async, zero-I/O read of the Mutex-guarded state — it will never
+    /// spawn a login shell, read the Keychain, or check environment variables. It reflects
+    /// only what `token()` has already resolved and cached in this `TokenCache` instance.
+    ///
+    /// ## Why this exists
+    /// UI code (e.g. `SettingsView`) needs a synchronous answer to "do we have a token
+    /// right now?" to decide which status indicator to show. Calling the async `token()`
+    /// from a synchronous SwiftUI view body is not possible without a detached Task, which
+    /// would introduce a frame of latency and a potential flicker. `cachedToken` provides
+    /// an instant, non-suspending read of whatever the last `token()` resolution produced.
+    /// If the cache is cold (e.g. first launch before the first `token()` call completes),
+    /// it returns `nil` and the UI shows a neutral / loading state until the async resolution
+    /// fires and triggers a state update.
+    ///
+    /// // Migrated: original ## Why this exists block was present in the pre-extraction
+    /// // TokenCache. Restored in PR #75 review pass — the block was dropped without a
+    /// // // Migrated: annotation, violating #73/#74 rule 7.
     public var cachedToken: String? {
         state.withLock { $0 }
     }

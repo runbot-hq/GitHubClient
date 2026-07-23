@@ -45,20 +45,30 @@ public protocol EnvTokenProviding: Sendable {
     /// the full latch policy.
     ///
     /// ## Caching behaviour
-    /// `EnvTokenProvider` caches a successful shell result internally.
-    /// When `token()` resolves a value via the login-shell path, it writes
-    /// that value to the `ShellResolutionOutcome.found` state under a `Mutex`.
-    /// Subsequent calls short-circuit at that latch and return the cached value
-    /// without re-spawning `/bin/zsh`. Calling `invalidate()` clears the latch
-    /// so the next `token()` call re-runs the full resolution chain.
+    /// `EnvTokenProvider` caches a **shell** result internally, but does **not**
+    /// cache env-var hits. These two paths have different caching semantics:
     ///
-    /// This means `EnvTokenProvider` is **not** stateless — it is designed to
-    /// be used directly or wrapped in `TokenCache`. In the production wiring,
-    /// `TokenCache` provides an additional `String?` layer that short-circuits
-    /// before even reaching `EnvTokenProvider.token()`. If you are consuming
-    /// `EnvTokenKit` as a standalone library product, `EnvTokenProvider` will
-    /// cache the first resolved shell token automatically; call `invalidate()`
-    /// after a sign-out or credential rotation to force re-resolution.
+    /// - **Env-var hit** (`GH_TOKEN` / `GITHUB_TOKEN` via `ProcessInfo`):
+    ///   Not cached at the provider level. `ProcessInfo.processInfo.environment`
+    ///   is an immutable snapshot captured at process launch — there is no mutable
+    ///   state to write into, and re-reading it on every call is effectively free.
+    ///   If you consume `EnvTokenProvider` standalone (not wrapped in `TokenCache`),
+    ///   every `token()` call that hits an env var re-reads `ProcessInfo`. This is
+    ///   intentional and correct. `TokenCache` caches the resolved value at its own
+    ///   layer, so in the production wiring an env-var hit is only re-read once per
+    ///   `TokenCache` lifetime (between `invalidate()` calls).
+    ///
+    /// - **Shell hit** (login-shell subprocess result):
+    ///   Cached inside `EnvTokenProvider` via the `ShellResolutionOutcome.found`
+    ///   latch under a `Mutex`. Subsequent calls short-circuit at that latch and
+    ///   return the cached value without re-spawning `/bin/zsh`. Calling
+    ///   `invalidate()` clears the latch so the next `token()` call re-runs the
+    ///   full resolution chain.
+    ///
+    /// **Summary for standalone consumers:** if you use `EnvTokenProvider` directly
+    /// (outside of `TokenCache`), only the shell path is cached automatically.
+    /// Call `invalidate()` after a sign-out or credential rotation to force
+    /// re-resolution of both paths.
     ///
     /// - Warning: Concurrent callers can each spawn a separate `/bin/zsh`
     ///   subprocess during the window before the first shell result is cached
