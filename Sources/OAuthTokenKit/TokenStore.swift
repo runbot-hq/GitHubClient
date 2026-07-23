@@ -1,16 +1,10 @@
 // TokenStore.swift
 // OAuthTokenKit
-import Foundation
-
-// MARK: - TokenStore
 
 /// Injectable abstraction over a persistent token storage mechanism.
 ///
 /// Conforming types must be `Sendable` and implement all three operations
 /// as `nonisolated` so they can be called from any actor domain.
-///
-/// `Sendable` is required because `TokenCache` stores `any TokenStore` as a `let`
-/// property on a `Sendable` type and accesses it from async contexts.
 public protocol TokenStore: Sendable {
     /// Loads the token from storage. Returns `nil` if no token is stored.
     nonisolated func load() -> String?
@@ -22,15 +16,7 @@ public protocol TokenStore: Sendable {
     ///   pass an `onTokenSaved` closure to `GitHubClient.init` — it is called automatically
     ///   after every successful `save()`. Without it the cache will continue serving the
     ///   pre-sign-in `nil` until the process restarts.
-    ///
-    /// - Note: `@discardableResult` is intentional — most call sites log the result but
-    ///   do not need to branch on it. Callers that do care about persistence failures
-    ///   should inspect the return value explicitly.
-    ///
-    /// - Note: Migrated (PR #75) — `@discardableResult` was added to this protocol
-    ///   requirement. Existing conformers that check the return value explicitly still
-    ///   compile unchanged. New conformers should treat the return value as advisory.
-    @discardableResult nonisolated func save(_ token: String) -> Bool
+    nonisolated func save(_ token: String) -> Bool
 
     /// Deletes the token from storage. Returns `true` on success or if not found.
     ///
@@ -40,11 +26,7 @@ public protocol TokenStore: Sendable {
     ///
     ///   Implementations **must** return `true` when the item is already absent
     ///   (not-found is a success). Return `false` only on a genuine storage error.
-    ///
-    /// - Note: Migrated (PR #75) — `@discardableResult` was added to this protocol
-    ///   requirement. Existing conformers that check the return value explicitly still
-    ///   compile unchanged. New conformers should treat the return value as advisory.
-    @discardableResult nonisolated func delete() -> Bool
+    nonisolated func delete() -> Bool
 }
 
 // MARK: - NullTokenStore
@@ -53,29 +35,18 @@ public protocol TokenStore: Sendable {
 /// test init. Always returns `nil` from `load()` and reports success for
 /// `save(_:)` and `delete()` without touching any persistent storage.
 ///
-/// ## Why `public` (Migrated: internal → public)
-/// The original `NullTokenStore` in `GitHubClient` was `internal` — the
-/// `GitHubClient` production init constructed it directly inside the module.
-/// Now that the type lives in `OAuthTokenKit`, `GitHubClient` is a separate
-/// module and needs `public` access to construct it. Test targets that depend
-/// on `OAuthTokenKit` also need to construct it directly. The type is
-/// intentionally part of `OAuthTokenKit`'s public API: it is a useful test
-/// double for any downstream consumer writing their own `TokenCache`-backed
-/// component. The promotion is deliberate, not accidental.
-///
 /// ## Why this is in Sources, not Tests
 /// `GitHubClient`'s test init resolves a `nil` `tokenCache` argument to
 /// `TokenCache(tokenStore: NullTokenStore())` inside the init body. Because
 /// that expression is in a function body (not a default argument value), the
-/// `public` visibility is required so both `GitHubClient` and its test targets
-/// can construct it without a test-target dependency.
-public struct NullTokenStore: TokenStore, Sendable {
-    /// Creates a new `NullTokenStore`.
-    public init() {}
+/// internal visibility of `NullTokenStore` is sufficient — it does not need
+/// to be public. It lives in Sources rather than Tests so the production
+/// `GitHubClient` module can construct it without a test-target dependency.
+struct NullTokenStore: TokenStore {
     /// Always returns `nil` — no token is stored.
-    public nonisolated func load() -> String? { nil }
+    nonisolated func load() -> String? { nil }
     /// Discards the token and reports success.
-    @discardableResult public nonisolated func save(_ token: String) -> Bool { true }
+    nonisolated func save(_ token: String) -> Bool { true }
     /// No-ops and reports success — nothing to delete.
-    @discardableResult public nonisolated func delete() -> Bool { true }
+    nonisolated func delete() -> Bool { true }
 }
