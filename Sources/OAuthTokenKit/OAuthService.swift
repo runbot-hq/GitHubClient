@@ -327,7 +327,7 @@ public final class OAuthService: OAuthServiceProtocol {
             return
         }
         guard returnedState == pendingState else {
-            log?("OAuthService › handleCallback: state mismatch — possible CSRF", "transport")
+            log?("OAuthService › handleCallback: state mismatch — possible CSRF attempt, rejecting", "transport")
             pendingState = nil
             fireSignIn(false)
             return
