@@ -124,7 +124,7 @@ public final class TokenCache: Sendable {
     internal init(tokenStore: any TokenStore) {
         self.tokenStore = tokenStore
         self.envProvider = NullEnvTokenProvider()
-        self.logger = nil
+        self.logger = nil  // intentional: store-only test path; diagnostics not needed
     }
 
     // MARK: - Public API
@@ -165,6 +165,10 @@ public final class TokenCache: Sendable {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }
         if let envToken = await envProvider.token() {
+            // if $0 == nil guard is intentional — not redundant.
+            // A concurrent resolveFromStore() call may have already populated
+            // the cache between our store miss and this write. Keep the first
+            // writer; both values are equivalent but the store result wins.
             state.withLock { if $0 == nil { $0 = envToken } }
             return envToken
         }
@@ -299,5 +303,5 @@ internal struct NullEnvTokenProvider: EnvTokenProviding {
     /// `nonisolated` is required by `EnvTokenProviding.invalidate()`: `TokenCache.invalidate()`
     /// is itself `nonisolated` and calls this synchronously. Omitting `nonisolated` here
     /// would produce a silent actor hop if this type were ever used from a `@MainActor` context.
-    nonisolated func invalidate() {}
+    nonisolated func invalidate() {} // nonisolated: required by EnvTokenProviding protocol
 }
