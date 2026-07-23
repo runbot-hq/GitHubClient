@@ -53,6 +53,9 @@ public final class TokenCache: Sendable {
     /// An injected `TokenStore` used to persist the token to the keychain.
     private let tokenStore: any TokenStore
     /// An optional logger for diagnostic messages.
+    /// Optional because diagnostics are never required for correctness — the cache
+    /// functions identically with or without a logger. Callers that do not need
+    /// diagnostic output pass `nil` (or omit the parameter; it defaults to `nil`).
     private let logger: (any GitHubLogger)?
 
     /// Injected env+shell token provider.
@@ -92,8 +95,14 @@ public final class TokenCache: Sendable {
     ///   - tokenStore: The backing store used to load/save/delete the token.
     ///   - envProvider: Resolves steps 3+4 (env var + login shell). In production
     ///     this is `EnvTokenProvider` constructed by `GitHubClient.swift`. In tests
-    ///     pass a stub or `NullEnvTokenProvider`.
-    ///   - logger: Optional logger for diagnostic messages.
+    ///     pass a stub or `NullEnvTokenProvider`. Non-optional: env resolution is a
+    ///     load-bearing step in the resolution chain; callers that do not need it
+    ///     should pass `NullEnvTokenProvider()` explicitly rather than receiving a
+    ///     nil-guarded no-op silently.
+    ///   - logger: Optional logger for diagnostic messages. Optional because
+    ///     diagnostics are never required for correctness — the cache functions
+    ///     identically without one. Defaults to `nil`; existing call sites are
+    ///     unaffected.
     public init(
         tokenStore: any TokenStore,
         envProvider: any EnvTokenProviding,
@@ -167,10 +176,10 @@ public final class TokenCache: Sendable {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }
         if let envToken = await envProvider.token() {
-            // if $0 == nil guard is intentional — not redundant.
-            // A concurrent resolveFromStore() call may have already populated
-            // the cache between our store miss and this write. Keep the first
-            // writer; both values are equivalent but the store result wins.
+            // Write-once: a concurrent token() call may have already populated
+            // state between our resolveFromStore() miss and this lock. Keep the
+            // first writer — both values are equivalent (same env token) but we
+            // avoid a redundant write on the common non-racing path.
             state.withLock { if $0 == nil { $0 = envToken } }
             return envToken
         }
@@ -293,6 +302,10 @@ public final class TokenCache: Sendable {
         #if DEBUG
         logger?.log("TokenCache › resolved from store (len=\(token.count)), populating cache", category: "transport")
         #endif
+        // Write-once: a concurrent token() call may have already populated state
+        // between our tokenStore.load() and this lock (e.g. two callers both miss
+        // resolveFromCache() simultaneously). Keep the first writer — both values
+        // are the same Keychain token; redundant writes are harmless but avoided.
         state.withLock { if $0 == nil { $0 = token } }
         return token
     }
@@ -315,6 +328,13 @@ public final class TokenCache: Sendable {
 /// intended audience is `GitHubClientTests` via `@testable import GitHubClient`.
 internal struct NullEnvTokenProvider: EnvTokenProviding {
     /// Always returns `nil` — no env var or shell resolution is performed.
+    ///
+    /// No `nonisolated` annotation is needed here: `token()` is `async` and the
+    /// `EnvTokenProviding` protocol declares it without actor isolation, so it is
+    /// callable from any context by design. `nonisolated` on an `async` func would
+    /// be redundant — the compiler does not require it and adding it would imply a
+    /// constraint that does not exist. Contrast with `invalidate()` below, where
+    /// `nonisolated` is load-bearing because that method is synchronous.
     func token() async -> String? { nil }
     /// No-op — there is no state to reset.
     /// `nonisolated` is required by `EnvTokenProviding.invalidate()`: `TokenCache.invalidate()`
