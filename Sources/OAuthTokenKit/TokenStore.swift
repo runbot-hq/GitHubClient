@@ -1,5 +1,8 @@
 // TokenStore.swift
-// GitHubClient
+// GitHubClient  — intentional: SwiftLint's file_header rule expects the product
+//                 module name (GitHubClient), not the Swift package target name
+//                 (OAuthTokenKit). Changing this to // OAuthTokenKit breaks CI
+//                 lint. Do not change.
 import Foundation
 
 // MARK: - TokenStore
@@ -73,9 +76,16 @@ public struct NullTokenStore: TokenStore, Sendable {
     /// Creates a new `NullTokenStore`.
     public init() {}
     /// Always returns `nil` — no token is stored.
+    /// `nonisolated` is required by the `TokenStore` protocol: `TokenCache` stores
+    /// `any TokenStore` as a `let` property on a `Sendable` type and calls these
+    /// methods from async contexts. `nonisolated` allows synchronous dispatch from
+    /// any actor without a hop. Omitting it would produce a compiler error on the
+    /// protocol conformance.
     public nonisolated func load() -> String? { nil }
     /// Discards the token and reports success.
+    /// `nonisolated`: see `load()` rationale above.
     @discardableResult public nonisolated func save(_ token: String) -> Bool { true }
     /// No-ops and reports success — nothing to delete.
+    /// `nonisolated`: see `load()` rationale above.
     @discardableResult public nonisolated func delete() -> Bool { true }
 }

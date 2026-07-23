@@ -227,6 +227,18 @@ struct GitHubTokenCacheTests {
     }
   }
 
+  // MARK: - token() — StubEnvTokenProvider .found wiring
+
+  // TODO: token_stubFound_wiresThrough — add a test that constructs
+  // makeCache(envProvider: StubEnvTokenProvider(result: .found("shell-token")))
+  // with an empty store and asserts that TokenCache.token() returns "shell-token".
+  // This exercises the envProvider.token() delegation block in TokenCache.token()
+  // directly — the most important production path for shell-resolved tokens —
+  // which currently has no coverage at the TokenCache level.
+  // EnvTokenKitTests covers .found from EnvTokenProvider's perspective, but not
+  // the wiring through TokenCache's delegation block.
+  // Identified in PR #75 review; deferred to avoid blocking merge.
+
   // MARK: - invalidate()
 
   /// Clears a populated cache so the next call re-resolves from source.
