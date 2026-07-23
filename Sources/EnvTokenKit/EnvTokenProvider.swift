@@ -186,8 +186,12 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     ///   fast path will each spawn a separate `/bin/zsh` subprocess. The latch
     ///   is not set until `loginShellToken` returns (up to 10 s), so the window
     ///   spans the full shell execution time, not just a scheduling instant.
-    ///   Correctness is preserved — the Mutex guard in `token()` prevents a
-    ///   double-write. Safe in practice: `RunnerPoller` is a single serial actor.
+    ///   Correctness is preserved — both callers write `.found(sameValue)`
+    ///   because they each awaited the same shell run and got the same result;
+    ///   the write is idempotent. There is no `if case .notAttempted` guard
+    ///   before the write-back (one existed in the old two-field TokenCache
+    ///   Mutex and was removed in PR #75 when shell state moved here).
+    ///   Safe in practice: `RunnerPoller` is a single serial actor.
     public func token() async -> String? {
         if let envToken = resolveFromEnvironment() { return envToken }
         // Check the cached shell outcome before spawning a new subprocess.

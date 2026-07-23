@@ -34,10 +34,16 @@ public protocol EnvTokenProviding: Sendable {
     /// Resolves a token from the process environment or login shell.
     ///
     /// Resolution order:
-    /// 1. `GH_TOKEN` in `ProcessInfo.processInfo.environment`
-    /// 2. `GITHUB_TOKEN` in `ProcessInfo.processInfo.environment`
+    /// 1. `GH_TOKEN` via the injectable `envLookup` closure (production default:
+    ///    `ProcessInfo.processInfo.environment`; overridable in tests)
+    /// 2. `GITHUB_TOKEN` via the same `envLookup` closure
     /// 3. Login-shell subprocess (`/bin/zsh -i -l`) for Finder/Dock launches
     ///    where the process environment does not inherit shell exports.
+    ///
+    /// Note: `OAuthService.hasAnyToken` reads the same env vars via `getenv()`
+    /// rather than `ProcessInfo` — an intentional divergence for live-environment
+    /// accuracy in UI auth-state checks. That is OAuthService's policy, not this
+    /// protocol's. See `envVarIsSet(_:)` in `OAuthService.swift` for the rationale.
     ///
     /// Returns `nil` if no token is available from any source, or if the
     /// login-shell path has latched to `.failed` after a prior timeout or
@@ -48,7 +54,7 @@ public protocol EnvTokenProviding: Sendable {
     /// `EnvTokenProvider` caches a **shell** result internally, but does **not**
     /// cache env-var hits. These two paths have different caching semantics:
     ///
-    /// - **Env-var hit** (`GH_TOKEN` / `GITHUB_TOKEN` via `ProcessInfo`):
+    /// - **Env-var hit** (`GH_TOKEN` / `GITHUB_TOKEN` via `envLookup`):
     ///   Not cached at the provider level. `ProcessInfo.processInfo.environment`
     ///   is an immutable snapshot captured at process launch — there is no mutable
     ///   state to write into, and re-reading it on every call is effectively free.
