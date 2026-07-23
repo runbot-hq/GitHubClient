@@ -40,7 +40,9 @@ import Foundation
 /// The `pendingState: String?` mutable property is safe under this arrangement
 /// because all mutation paths (`makeSignInURL`, `handleCallback`, `signOut`) are
 /// `@MainActor`-isolated through the protocol. There is no unguarded write path.
-@MainActor
+// @MainActor isolation comes from OAuthServiceProtocol — see class doc comment for rationale.
+// Do NOT add @MainActor here without reading that block first.
+@MainActor // inherited via protocol conformance — class-level annotation intentionally omitted
 public final class OAuthService: OAuthServiceProtocol {
     /// Shared `JSONDecoder` — reused across token-exchange decode calls.
     private let decoder = JSONDecoder()
@@ -56,6 +58,8 @@ public final class OAuthService: OAuthServiceProtocol {
     private let redirectURI: String
     /// OAuth scopes requested during sign-in. Set at init time via the `scopes` parameter.
     private let scopes: [String]
+    // Hardcoded: OAuthTokenKit has no dependency on GitHubClient — GitHubConstants lives there.
+    // These are stable GitHub platform URLs, not app-level config. Do not move to GitHubConstants.
     /// GitHub OAuth authorisation URL.
     private let authorizeURL = "https://github.com/login/oauth/authorize" // NOSONAR
     /// GitHub OAuth token-exchange URL.
@@ -334,12 +338,10 @@ public final class OAuthService: OAuthServiceProtocol {
         }
         log?("OAuthService › handleCallback — state OK, exchanging code", "transport")
         pendingState = nil
-        // [weak self] is load-bearing here: this Task is not awaited, so if
-        // OAuthService is deallocated before exchangeCode completes (e.g. during
-        // test teardown), the [weak self] guard prevents a call to fireSignIn on
-        // a dangling continuation registry. OAuthService is a singleton in the
-        // production app (low real risk), but [weak self] is the correct form
-        // for any non-awaited Task spawned from an instance method.
+        // [weak self]: OAuthService is a singleton in production (low real risk), but [weak self]
+        // is the correct form for ANY non-awaited Task on an instance method — it prevents a
+        // retain cycle and a use-after-free on dealloc during test teardown.
+        // Do not remove on "it's a singleton" grounds.
         Task { [weak self] in
             guard let self else {
                 // self was deallocated before the Task body ran.
@@ -447,6 +449,10 @@ public final class OAuthService: OAuthServiceProtocol {
     // MARK: - Private helpers
 
     /// Returns `true` when the named environment variable is set to a non-empty string.
+    ///
+    // getenv() not ProcessInfo: ProcessInfo is a launch-time snapshot; getenv() reflects the
+    // live process environment. setenv/unsetenv mutations after launch are invisible to ProcessInfo.
+    // See hasAnyToken doc comment for the full rationale. Do not change to ProcessInfo here.
     ///
     /// Uses `getenv()` rather than `ProcessInfo.processInfo.environment` because
     /// `ProcessInfo` is a launch-time snapshot and does not reflect `setenv`/`unsetenv`
