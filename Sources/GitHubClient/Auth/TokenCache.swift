@@ -18,9 +18,9 @@
 // property declaration. Both files have genuinely independent compiler reasons;
 // neither import is redundant. Removing the import here does not satisfy the
 // requirement in GitHubClient.swift, and vice versa.
-public import EnvTokenKit
+public import EnvTokenKit   // public required: TokenCache's public init names EnvTokenProviding
+public import OAuthTokenKit // public required: TokenCache's public init names TokenStore
 import Foundation
-public import OAuthTokenKit
 import Synchronization
 
 // MARK: - TokenCache
@@ -121,6 +121,7 @@ public final class TokenCache: Sendable {
     /// call site.
     ///
     /// - Parameter tokenStore: The backing token store.
+    // periphery:ignore — called from GitHubClient.swift (same module) via tokenCache ?? TokenCache(tokenStore: NullTokenStore())
     internal init(tokenStore: any TokenStore) {
         self.tokenStore = tokenStore
         self.envProvider = NullEnvTokenProvider()
@@ -277,6 +278,8 @@ public final class TokenCache: Sendable {
 
 // MARK: - NullEnvTokenProvider
 
+// internal (not private): used by GitHubClient.swift in the same module and by
+// @testable-importing test targets. Private would make it invisible to both.
 /// A no-op `EnvTokenProviding` used when no env provider is needed.
 ///
 /// Injected by `TokenCache.init(tokenStore:)` (the test convenience init)
