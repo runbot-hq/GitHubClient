@@ -229,15 +229,33 @@ struct GitHubTokenCacheTests {
 
   // MARK: - token() — StubEnvTokenProvider .found wiring
 
-  // TODO: token_stubFound_wiresThrough — add a test that constructs
-  // makeCache(envProvider: StubEnvTokenProvider(result: .found("shell-token")))
-  // with an empty store and asserts that TokenCache.token() returns "shell-token".
-  // This exercises the envProvider.token() delegation block in TokenCache.token()
-  // directly — the most important production path for shell-resolved tokens —
-  // which currently has no coverage at the TokenCache level.
-  // EnvTokenKitTests covers .found from EnvTokenProvider's perspective, but not
-  // the wiring through TokenCache's delegation block.
-  // Identified in PR #75 review; deferred to avoid blocking merge.
+  /// `TokenCache` must wire the `envProvider.token()` delegation block through to
+  /// the caller when the store is empty and the provider returns a value.
+  ///
+  /// ## What this test covers
+  /// This is the only test that exercises the `envProvider.token()` delegation
+  /// block inside `TokenCache.token()` directly — the most important production
+  /// path for shell-resolved tokens — at the `TokenCache` level. All other tests
+  /// either return from the store (steps 1–2) or return `nil` from the provider.
+  ///
+  /// `EnvTokenKitTests` covers `.found` from `EnvTokenProvider`'s own perspective
+  /// (i.e. the shell subprocess returning a value and the outcome being latched).
+  /// This test covers the complementary half: given that the provider returns a
+  /// non-nil value, `TokenCache` must surface it to the caller unchanged.
+  ///
+  /// ## Why `StubEnvTokenProvider(result: .found(…))` and not a real `EnvTokenProvider`
+  /// A real `EnvTokenProvider` would spawn `/bin/zsh`, which is slow (~50–200 ms
+  /// on a light config), environment-dependent, and non-deterministic on CI.
+  /// `StubEnvTokenProvider` returns the injected value instantly and deterministically,
+  /// making the test fast, hermetic, and safe on all runners.
+  @Test func token_stubFound_wiresThrough() async {
+    await withCleanEnv {
+      // Empty store — ensures resolution reaches the envProvider delegation block.
+      let cache = makeCache(envProvider: StubEnvTokenProvider(result: .found("shell-token")))
+      let result = await cache.token()
+      #expect(result == "shell-token")
+    }
+  }
 
   // MARK: - invalidate()
 
