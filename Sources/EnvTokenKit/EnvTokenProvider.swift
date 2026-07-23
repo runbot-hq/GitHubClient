@@ -280,17 +280,21 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// Both variables resolve the same credential. `GH_TOKEN` is the shorter,
     /// preferred form documented in the README. Checking it first means a user
     /// who sets both gets the expected one without any silent override.
+    ///
+    /// ## Why these log calls are unconditional (not #if DEBUG)
+    /// Every other log call in this file is unconditional. The nil/empty path
+    /// is the production triage signal — when a user's token isn't resolving,
+    /// this is the log line that tells you why. Wrapping it in #if DEBUG silences
+    /// it in release builds, which is exactly when it's needed most. Both calls
+    /// are unconditional to match the rest of the file and preserve release
+    /// diagnostic coverage.
     private func resolveFromEnvironment() -> String? {
         for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
             if let value = envLookup(key), !value.isEmpty {
-                #if DEBUG
                 log?("EnvTokenProvider › resolved from env var \(key) (len=\(value.count))", "transport")
-                #endif
                 return value
             }
-            #if DEBUG
             log?("EnvTokenProvider › env var \(key): nil/empty", "transport")
-            #endif
         }
         return nil
     }
