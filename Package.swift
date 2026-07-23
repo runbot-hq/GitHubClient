@@ -79,21 +79,24 @@ let package = Package(
             //
             // The alternative — defining a parallel stub inside GitHubClientTests itself
             // (conforming to `any EnvTokenProviding`) — would duplicate the stub for no
-            // gain and would prevent tests from using the real ShellTokenResult values
-            // that StubEnvTokenProvider already encodes.
+            // gain and would prevent tests from using StubEnvTokenProvider's callCount
+            // and invalidateCalled spy properties, which are specific to the shared type.
             //
             // Consequence: GitHubClientTests has a compile-time dependency on EnvTokenKit.
             // This is an acceptable, conscious trade-off: GitHubClientTests is a test
             // target, not a shipped library, so the extra dependency does not widen the
             // public API surface or create a production coupling.
             //
-            // Coupling boundary: StubEnvTokenProvider uses only public EnvTokenKit types
-            // (EnvTokenProviding protocol + ShellTokenResult enum values). It does NOT
-            // reference any internal EnvTokenKit types (e.g. ShellResolutionOutcome).
-            // If StubEnvTokenProvider ever needs to cross into internal EnvTokenKit types,
-            // it must move into EnvTokenKit itself (as a test-support type) rather than
-            // silently growing this cross-target coupling. The compiler will not catch
-            // this drift — it must be enforced by code review.
+            // Coupling boundary: StubEnvTokenProvider imports EnvTokenKit for one reason
+            // only — to name the `EnvTokenProviding` protocol in its conformance declaration.
+            // It does NOT use ShellTokenResult or any other EnvTokenKit type beyond the
+            // protocol itself. Its result vocabulary is a local `StubEnvResult` enum defined
+            // inside StubEnvTokenProvider.swift, which mirrors the three outcomes
+            // (found/notFound/failed) without referencing any EnvTokenKit internal type.
+            // If StubEnvTokenProvider ever needs to cross into internal EnvTokenKit types
+            // (e.g. ShellResolutionOutcome), it must move into EnvTokenKit itself as a
+            // test-support type rather than silently growing this cross-target coupling.
+            // The compiler will not catch this drift — it must be enforced by code review.
             dependencies: ["GitHubClient", "EnvTokenKit"],
             path: "Tests/GitHubClientTests",
             swiftSettings: [
