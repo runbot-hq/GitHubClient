@@ -59,7 +59,7 @@ missing_docs:
   excludes_inherited_types: false
 
 file_header:
-  required_pattern: "^// [\\w+]+\\.swift\\n// (EnvTokenKit|OAuthTokenKit|GitHubClient)"
+  required_pattern: "^// [\\w+]+\\.swift\\n// GitHubClient"
 
 # ── Disabled rules ────────────────────────────────────────────────────────────
 disabled_rules:
