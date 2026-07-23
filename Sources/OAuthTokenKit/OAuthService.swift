@@ -321,7 +321,7 @@ public final class OAuthService: OAuthServiceProtocol {
             return
         }
         guard let returnedState = comps.queryItems?.first(where: { $0.name == "state" })?.value else {
-            log?("OAuthService › handleCallback: no state param", "transport")
+            log?("OAuthService › handleCallback: no state param in redirect URL", "transport")
             pendingState = nil
             fireSignIn(false)
             return
@@ -341,20 +341,15 @@ public final class OAuthService: OAuthServiceProtocol {
         // production app (low real risk), but [weak self] is the correct form
         // for any non-awaited Task spawned from an instance method.
         //
-        // guard let self else { fireSignIn(false) }: if self is deallocated before
-        // the Task body runs, firing false ensures that any makeSignInStream()
-        // consumer receives an event and is not silently hung waiting for a yield
-        // that will never come. signInContinuations is gone with self, so the
-        // yield is a no-op — but it is the correct defensive form. Without this,
-        // a consumer that does not guard against a non-returning stream would
-        // block indefinitely on dealloc.
+        // guard let self else { return }: if self is deallocated before the Task
+        // body runs, signInContinuations is gone with it — there is nothing to
+        // yield into. Calling fireSignIn here would be a use-after-free on the
+        // continuation registry. The correct action is to return silently.
+        // In production this path is unreachable (OAuthService is a singleton);
+        // in tests, teardown races are prevented by awaiting the sign-in stream
+        // before releasing the service.
         Task { [weak self] in
-            guard let self else {
-                // self was deallocated before the Task body ran.
-                // No continuation registry to yield into, but fire the false
-                // defensively so the contract is explicit at this call site.
-                return
-            }
+            guard let self else { return }
             await exchangeCode(code)
         }
     }

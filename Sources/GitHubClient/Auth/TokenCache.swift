@@ -296,5 +296,8 @@ internal struct NullEnvTokenProvider: EnvTokenProviding {
     /// Always returns `nil` — no env var or shell resolution is performed.
     func token() async -> String? { nil }
     /// No-op — there is no state to reset.
-    func invalidate() {}
+    /// `nonisolated` is required by `EnvTokenProviding.invalidate()`: `TokenCache.invalidate()`
+    /// is itself `nonisolated` and calls this synchronously. Omitting `nonisolated` here
+    /// would produce a silent actor hop if this type were ever used from a `@MainActor` context.
+    nonisolated func invalidate() {}
 }
