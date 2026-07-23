@@ -1,5 +1,5 @@
 // EnvTokenProviderLoginShell.swift
-// EnvTokenKit
+// GitHubClient
 import Foundation
 import Synchronization
 
