@@ -334,8 +334,14 @@ public final class OAuthService: OAuthServiceProtocol {
         }
         log?("OAuthService › handleCallback — state OK, exchanging code", "transport")
         pendingState = nil
-        Task { [weak self] in
-            guard let self else { return }
+        // Strong capture is intentional: OAuthService must stay alive until
+        // exchangeCode completes so that fireSignIn(true/false) is always emitted
+        // to sign-in stream consumers. A weak capture would silently drop the
+        // token exchange if the service were deallocated before this task runs,
+        // leaving every makeSignInStream() consumer hanging. OAuthService is
+        // long-lived (held by the GitHubClient singleton); the task holds no
+        // back-reference on OAuthService, so this does not create a retain cycle.
+        Task {
             await exchangeCode(code)
         }
     }

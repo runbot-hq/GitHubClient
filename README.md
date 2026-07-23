@@ -68,7 +68,7 @@ The package is split into three independently-testable library targets and three
 ### Dependency and boundary rules
 
 - `EnvTokenKit` and `OAuthTokenKit` are **peer targets** — neither depends on the other.
-- `GitHubClient` uses `internal import EnvTokenKit` (no `EnvTokenKit` type appears in `GitHubClient`'s public API) and `public import OAuthTokenKit` (required because `TokenCache`'s public initialisers name `TokenStore`, and `GitHubClient.oauthService` names `OAuthServiceProtocol`).
+- `GitHubClient` uses `public import OAuthTokenKit` (required because `TokenCache`'s public initialisers name `TokenStore`, and `GitHubClient.oauthService` names `OAuthServiceProtocol`) and `public import EnvTokenKit` in `TokenCache.swift` (required because `TokenCache`'s public initialisers name `EnvTokenProviding`). The `EnvTokenProvider` concrete type is constructed internally and is not part of `GitHubClient`'s public facade; add `EnvTokenKit` as an explicit dependency only when you need to name `EnvTokenProvider` directly.
 - `GitHubLogger` stays in `GitHubClient/Transport/`. The kits receive a `(@Sendable (String, String) -> Void)?` log closure bridged at wiring time in `GitHubClient.init` — they never import `GitHubLogger` directly.
 - Consuming apps depend **only on `GitHubClient`**. `EnvTokenKit` and `OAuthTokenKit` are transitive; you do not add them as explicit dependencies unless you need to use their types directly.
 
@@ -89,7 +89,7 @@ Add to your `Package.swift`:
 )
 ```
 
-`OAuthTokenKit` is re-exported through `GitHubClient` via `public import` — you get `OAuthServiceProtocol`, `TokenStore`, `GitHubScopes`, and related types without a separate dependency. `EnvTokenKit` is `internal import` in `GitHubClient`: the `EnvTokenProviding` protocol is transitively available (it appears in `TokenCache`'s public API), but the concrete `EnvTokenProvider` type is not part of `GitHubClient`'s public surface. If you need to name `EnvTokenProvider` directly in your own code, add `EnvTokenKit` as an explicit dependency.
+`OAuthTokenKit` is re-exported through `GitHubClient` via `public import` — you get `OAuthServiceProtocol`, `TokenStore`, `GitHubScopes`, and related types without a separate dependency. `EnvTokenKit` is also re-exported through `GitHubClient` via `public import` in `TokenCache.swift`: the `EnvTokenProviding` protocol is part of `GitHubClient`'s public API (it appears in `TokenCache`'s public initialisers). The concrete `EnvTokenProvider` type is not part of `GitHubClient`'s public surface. If you need to name `EnvTokenProvider` directly in your own code, add `EnvTokenKit` as an explicit dependency.
 
 ## Usage
 
