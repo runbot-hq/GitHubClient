@@ -150,12 +150,14 @@ public final class TokenCache: Sendable {
     /// - Warning: Concurrent callers that all miss the in-memory cache simultaneously
     ///   (e.g. on first call at app launch) will each independently walk steps 2–4.
     ///   Steps 1–2 are idempotent (double Keychain read is harmless). Step 4 is not:
-    ///   each concurrent miss spawns a separate `/bin/zsh` subprocess. The window is
-    ///   the full execution time of the shell (100–300 ms in practice), not merely a
-    ///   scheduling instant. In production this is rare because `GitHubClient` is a
-    ///   singleton and callers are typically serialised through a single call site.
-    ///   If your call pattern can produce high-concurrency first-calls, consider
-    ///   serialising the first `token()` call yourself.
+    ///   each concurrent miss spawns a separate `/bin/zsh` subprocess. The latch is
+    ///   not set until `loginShellToken` returns — up to 10 seconds — so the window
+    ///   spans the full shell execution time, not merely a scheduling instant. In
+    ///   production this is rare because `GitHubClient` is a singleton and callers
+    ///   are typically serialised through a single call site. If your call pattern
+    ///   can produce high-concurrency first-calls, consider serialising the first
+    ///   `token()` call yourself. See `EnvTokenProvider.token()` for the full
+    ///   concurrent-spawn rationale.
     ///
     ///   Historical note: an `inFlight` lock was considered and rejected — it added
     ///   complexity for a window that is rare in practice and only occurs during a

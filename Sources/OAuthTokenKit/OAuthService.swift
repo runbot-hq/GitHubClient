@@ -448,6 +448,13 @@ public final class OAuthService: OAuthServiceProtocol {
     /// mutations made after the process starts. `getenv()` always reflects the live
     /// process environment. This is load-bearing for `hasAnyToken` in UI contexts
     /// and for test isolation in `OAuthServiceAuthStateTests`.
+    ///
+    /// ## Thread safety
+    /// `getenv()` is not thread-safe under concurrent `setenv`/`unsetenv` calls (POSIX).
+    /// This is safe at all current call sites because `hasAnyToken` is `@MainActor`-isolated
+    /// via `OAuthServiceProtocol` — no concurrent env mutation runs on the main thread.
+    /// If this method is ever called from off-actor code, or if a test issues concurrent
+    /// `setenv` calls alongside `hasAnyToken` evaluation, this assumption must be revisited.
     private func envVarIsSet(_ name: String) -> Bool {
         guard let val = getenv(name) else { return false }
         return String(cString: val).isEmpty == false
