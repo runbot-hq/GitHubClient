@@ -212,10 +212,8 @@ public final class TokenCache: Sendable {
     /// If the cache is cold (e.g. first launch before the first `token()` call completes),
     /// it returns `nil` and the UI shows a neutral / loading state until the async resolution
     /// fires and triggers a state update.
-    ///
-    /// // Migrated: original ## Why this exists block was present in the pre-extraction
-    /// // TokenCache. Restored in PR #75 review pass — the block was dropped without a
-    /// // // Migrated: annotation, violating #73/#74 rule 7.
+    // Migrated from TokenCache.swift: ## Why this exists block restored in PR #75 review pass.
+    // The block was dropped without a // Migrated: annotation, violating #73/#74 rule 7.
     public var cachedToken: String? {
         state.withLock { $0 }
     }
