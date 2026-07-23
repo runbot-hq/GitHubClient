@@ -218,6 +218,9 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
             // Cache the successful outcome so subsequent calls short-circuit
             // without re-spawning /bin/zsh. Not a permanent latch — invalidate()
             // resets to .notAttempted so sign-out cycles get a fresh attempt.
+            // Unconditional write — idempotent: concurrent callers each write
+            // .found(sameValue) because they awaited the same shell result.
+            // No `if case .notAttempted` entry guard needed; see -Warning: above.
             state.withLock { $0 = .found(value) }
             return value
         case .notFound:
