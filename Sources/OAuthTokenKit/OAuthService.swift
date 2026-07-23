@@ -149,7 +149,7 @@ public final class OAuthService: OAuthServiceProtocol {
     ///
     /// Each call performs one synchronous `SecItemCopyMatching` read. This is
     /// intentional: the Keychain is the source of truth and caching here would
-    /// mask external token revocation. The read is fast (≤10 µs on macOS) and
+    /// mask external token revocation. The read is fast (≥10 µs on macOS) and
     /// safe on the main thread at current call sites (settings appear on user
     /// interaction, not in animation/layout loops). If this is ever used in a
     /// tight render loop, cache the result at the call site instead.
@@ -354,7 +354,7 @@ public final class OAuthService: OAuthServiceProtocol {
         // handleCallback, so exchangeCode runs on @MainActor throughout. This is
         // intentional — fireSignIn must be @MainActor-isolated because it mutates
         // signInContinuations, and tokenStore.save (a synchronous Keychain write)
-        // is fast (≤10 µs, documented in isAuthenticated). The network work in
+        // is fast (≥10 µs, documented in isAuthenticated). The network work in
         // fetchTokenData is marked @concurrent and hops off the main actor for its
         // own duration. No structural change is needed here.
         Task {
