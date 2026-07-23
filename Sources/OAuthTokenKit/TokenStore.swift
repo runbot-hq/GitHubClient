@@ -26,6 +26,10 @@ public protocol TokenStore: Sendable {
     /// - Note: `@discardableResult` is intentional — most call sites log the result but
     ///   do not need to branch on it. Callers that do care about persistence failures
     ///   should inspect the return value explicitly.
+    ///
+    /// - Note: Migrated (PR #75) — `@discardableResult` was added to this protocol
+    ///   requirement. Existing conformers that check the return value explicitly still
+    ///   compile unchanged. New conformers should treat the return value as advisory.
     @discardableResult nonisolated func save(_ token: String) -> Bool
 
     /// Deletes the token from storage. Returns `true` on success or if not found.
@@ -36,6 +40,10 @@ public protocol TokenStore: Sendable {
     ///
     ///   Implementations **must** return `true` when the item is already absent
     ///   (not-found is a success). Return `false` only on a genuine storage error.
+    ///
+    /// - Note: Migrated (PR #75) — `@discardableResult` was added to this protocol
+    ///   requirement. Existing conformers that check the return value explicitly still
+    ///   compile unchanged. New conformers should treat the return value as advisory.
     @discardableResult nonisolated func delete() -> Bool
 }
 
