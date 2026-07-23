@@ -8,10 +8,6 @@ import Foundation
 ///
 /// Implements the GitHub OAuth Authorization Code flow.
 ///
-/// @MainActor ensures all access to `pendingState` and continuation registries
-/// is serialised on the main thread. This matches how AppKit delivers
-/// application(_:open:) callbacks and how SwiftUI reads `isSignedIn`.
-///
 /// Flow:
 /// 1. makeSignInURL() generates a random state nonce, stores it, and returns
 ///    the GitHub authorization URL. The caller is responsible for opening it
@@ -24,27 +20,29 @@ import Foundation
 /// 6. Token is saved to tokenStore. fireSignIn(_:) yields the result to all
 ///    registered makeSignInStream() consumers.
 ///
-/// ## @MainActor isolation — class level vs. protocol level
-/// `OAuthService` does not declare `@MainActor` at the class level. Its isolation
-/// comes from `OAuthServiceProtocol`, which is `@MainActor`-annotated. This is
-/// intentional and safe for all current call sites — every caller reaches
-/// `OAuthService` through the protocol, so the actor boundary is always enforced.
+/// ## @MainActor isolation
+/// `OAuthService` is `@MainActor`-isolated at the class level (see declaration
+/// below). `OAuthServiceProtocol` also carries `@MainActor` — this is now
+/// redundant from an enforcement standpoint but kept as a self-documenting
+/// contract so that protocol consumers (e.g. mock implementations in test
+/// targets) see the isolation requirement directly on the protocol without
+/// having to inspect the concrete type.
 ///
-/// A class-level `@MainActor` annotation would be the right hardening step if
-/// `OAuthService` were ever constructed and called directly (not through the
-/// protocol) from off-MainActor code. That is not the case today; the concrete
-/// type is wired internally in `GitHubClient.init` and always accessed via
-/// `any OAuthServiceProtocol`. If that changes, add `@MainActor` to the class
-/// declaration and remove this note.
+/// All access to `pendingState` and the continuation registries
+/// (`signInContinuations`, `signOutContinuations`) is therefore serialised on
+/// the main thread. This matches how AppKit delivers
+/// `application(_:open:)` callbacks and how SwiftUI reads `isSignedIn`.
 ///
-/// The `pendingState: String?` mutable property is safe under this arrangement
-/// because all mutation paths (`makeSignInURL`, `handleCallback`, `signOut`) are
-/// `@MainActor`-isolated through the protocol. There is no unguarded write path.
+/// The `pendingState: String?` mutable property is safe without additional
+/// locking: all write paths (`makeSignInURL`, `handleCallback`, `signOut`) are
+/// `@MainActor`-isolated at the class level. There is no unguarded write path.
 @MainActor
 public final class OAuthService: OAuthServiceProtocol {
-    /// Shared `JSONDecoder` — reused across token-exchange decode calls.
+    /// Shared `JSONDecoder` — stored rather than constructed per-call to avoid
+    /// repeated allocation; reuse is idiomatic for a long-lived service.
     private let decoder = JSONDecoder()
-    /// Shared `JSONEncoder` — reused across token-exchange encode calls.
+    /// Shared `JSONEncoder` — stored rather than constructed per-call to avoid
+    /// repeated allocation; reuse is idiomatic for a long-lived service.
     private let encoder = JSONEncoder()
     /// The default OAuth redirect URI for the RunBot OAuth app.
     /// Override via the `redirectURI` parameter on `OAuthService.init`.
@@ -64,8 +62,8 @@ public final class OAuthService: OAuthServiceProtocol {
     ///
     /// Mutation is safe without additional locking: all write paths
     /// (`makeSignInURL`, `handleCallback`, `signOut`) are `@MainActor`-isolated
-    /// through `OAuthServiceProtocol`. See the class-level doc comment for the
-    /// full isolation rationale.
+    /// at the class level. See the class-level doc comment for the full
+    /// isolation rationale.
     private var pendingState: String?
     /// The GitHub OAuth app client ID.
     private let clientID: String
@@ -201,6 +199,9 @@ public final class OAuthService: OAuthServiceProtocol {
     // MARK: - Sign-out multicast
 
     /// Registered sign-out continuations keyed by UUID — one per active consumer.
+    /// UUID key: enables O(1) removal in `onTermination` without requiring
+    /// `Continuation` to be `Equatable` — an array would need `firstIndex(where:)`
+    /// which is unavailable on `AsyncStream.Continuation`.
     private var signOutContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
 
     /// Returns a new `AsyncStream` that fires once per `signOut()` call.
@@ -209,6 +210,9 @@ public final class OAuthService: OAuthServiceProtocol {
         let (stream, cont) = AsyncStream<Void>.makeStream()
         signOutContinuations[id] = cont
         cont.onTermination = { [weak self] _ in
+            // Weak capture: onTermination fires after the consumer releases the stream.
+            // A strong capture would keep OAuthService alive for the lifetime of any
+            // abandoned consumer. The @MainActor Task re-hop makes the nil-check safe.
             Task { @MainActor [weak self] in
                 self?.signOutContinuations.removeValue(forKey: id)
             }
@@ -219,6 +223,9 @@ public final class OAuthService: OAuthServiceProtocol {
     // MARK: - Sign-in multicast
 
     /// Registered sign-in continuations keyed by UUID — one per active consumer.
+    /// UUID key: enables O(1) removal in `onTermination` without requiring
+    /// `Continuation` to be `Equatable` — an array would need `firstIndex(where:)`
+    /// which is unavailable on `AsyncStream.Continuation`.
     private var signInContinuations: [UUID: AsyncStream<Bool>.Continuation] = [:]
 
     /// Returns a new `AsyncStream` that fires once per sign-in attempt (`true` = success).
@@ -227,6 +234,7 @@ public final class OAuthService: OAuthServiceProtocol {
         let (stream, cont) = AsyncStream<Bool>.makeStream()
         signInContinuations[id] = cont
         cont.onTermination = { [weak self] _ in
+            // Weak capture: see makeSignOutStream() onTermination comment above.
             Task { @MainActor [weak self] in
                 self?.signInContinuations.removeValue(forKey: id)
             }
@@ -413,8 +421,10 @@ public final class OAuthService: OAuthServiceProtocol {
     /// requires it in the token exchange if multiple redirect URIs are registered
     /// for the OAuth app — in that case it must match the value used in the
     /// authorisation step. Omitting it is correct for the single-URI case this
-    /// library targets. If multi-URI support is ever needed, forward `self.redirectURI`
-    /// as an additional body field here.
+    /// library targets. Note: `self.redirectURI` is stored on the service and
+    /// used in `makeSignInURL()` — it is deliberately not forwarded here.
+    /// If multi-URI support is ever needed, add `redirectURI` as an additional
+    /// body field at that point.
     private func makeTokenRequest(code: String) throws -> URLRequest {
         guard let url = URL(string: accessTokenURL) else { throw URLError(.badURL) }
         var req = URLRequest(url: url)
@@ -433,6 +443,7 @@ public final class OAuthService: OAuthServiceProtocol {
         return data
     }
 
+    // periphery:ignore — called exclusively from exchangeCode; not dead code.
     /// Validates the GitHub-level token response and extracts the access token.
     private func handleTokenResponse(_ response: OAuthTokenResponse) -> String? {
         if let errorCode = response.error {
@@ -460,7 +471,7 @@ public final class OAuthService: OAuthServiceProtocol {
     /// ## Thread safety
     /// `getenv()` is not thread-safe under concurrent `setenv`/`unsetenv` calls (POSIX).
     /// This is safe at all current production call sites because `hasAnyToken` is
-    /// `@MainActor`-isolated via `OAuthServiceProtocol` — no concurrent env mutation
+    /// `@MainActor`-isolated at the class level — no concurrent env mutation
     /// runs on the main thread.
     ///
     /// **Swift Testing live risk**: Swift Testing runs test cases in parallel by default.
