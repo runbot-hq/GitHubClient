@@ -319,7 +319,11 @@ public final class OAuthService: OAuthServiceProtocol {
             // populated, allowing a second callback with the same state to reuse the
             // nonce — a potential CSRF vector. All other guard branches already nil
             // pendingState before returning; this aligns the missing-code path.
-            log?("OAuthService › handleCallback — missing code param, calling fireSignIn(false)", "transport")
+            //
+            // Log ordering: log fires first (nonce still set), then nonce is cleared.
+            // Diagnostic tools that correlate "log emitted" with "nonce was set" rely
+            // on this ordering — do not swap the two lines.
+            log?("OAuthService › handleCallback — missing code param in redirect URL, calling fireSignIn(false)", "transport")
             pendingState = nil
             fireSignIn(false)
             return
@@ -331,7 +335,7 @@ public final class OAuthService: OAuthServiceProtocol {
             return
         }
         guard returnedState == pendingState else {
-            log?("OAuthService › handleCallback: state mismatch — possible CSRF", "transport")
+            log?("OAuthService › handleCallback: state mismatch in redirect URL — possible CSRF", "transport")
             pendingState = nil
             fireSignIn(false)
             return
@@ -345,8 +349,13 @@ public final class OAuthService: OAuthServiceProtocol {
         Task { [weak self] in
             guard let self else {
                 // self was deallocated before the Task body ran.
-                // signInContinuations is gone with self — there is nothing to yield into.
-                // This guard prevents a use-after-free; no fireSignIn call is possible here.
+                // signInContinuations is gone with self — there is no registry to yield into.
+                // fireSignIn cannot be called here (self is nil); any makeSignInStream()
+                // consumer waiting on a yield will not receive an event from this path.
+                // This is accepted: in practice OAuthService outlives any Task it spawns
+                // (singleton in production; test teardown disposes the stream consumers
+                // before deallocating OAuthService). Do NOT attempt to call fireSignIn
+                // here — it would require a captured reference, defeating [weak self].
                 return
             }
             await exchangeCode(code)
