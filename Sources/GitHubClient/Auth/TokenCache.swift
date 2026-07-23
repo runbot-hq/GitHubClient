@@ -25,13 +25,9 @@ import Synchronization
 
 // MARK: - TokenCache
 //
-// Thread-safe in-memory cache for the resolved GitHub token.
-// Populated on first successful resolution and cleared by invalidate().
-// Backed by Synchronization.Mutex for synchronous, lock-guarded access.
-//
-// token() is async. On every call it walks a linear resolution chain:
-//   1. in-memory cache  (sync, no I/O)
-//   2. TokenStore       (sync Keychain read)
+// Resolution chain:
+//   1. In-memory cache  (sync, free)
+//   2. TokenStore       (sync, Keychain SecItemCopyMatching)
 //   3. ProcessInfo env  (sync, covers terminal / CI launches)
 //   4. loginShellToken  (async subprocess — cold Finder launch only)
 //
@@ -138,13 +134,19 @@ public final class TokenCache: Sendable {
 
     // MARK: - Public API
 
-    /// Returns a GitHub personal access token from the first available source.
+    /// Resolves and returns the best available token, caching the result in memory.
     ///
-    /// Resolution order:
-    /// 1. In-memory cache — zero I/O, returns immediately on warm cache
-    /// 2. `TokenStore.load()` — synchronous Keychain read
-    /// 3. `GH_TOKEN` / `GITHUB_TOKEN` process environment — covers terminal / CI launches
-    /// 4. Login shell subprocess — cold Finder/Dock/login-item launch only
+    /// Resolution order — first match wins:
+    /// 1. **In-memory cache** — zero I/O; populated on first successful resolution.
+    /// 2. **`TokenStore`** — one synchronous `SecItemCopyMatching` Keychain read.
+    /// 3. **Env var + login shell** — delegated to the injected `EnvTokenProviding`.
+    ///    For terminal/CI launches step 3 resolves from `ProcessInfo`; for cold
+    ///    Finder/Dock launches step 4 spawns `/bin/zsh -i -l` to source shell
+    ///    profile exports.
+    ///
+    /// A successful resolution at any step writes the result to the in-memory
+    /// cache. All subsequent calls return from step 1 until `invalidate()` is
+    /// called.
     ///
     /// ## Why `async` when steps 1–3 are synchronous
     /// Steps 1–3 are synchronous and return without ever suspending. The function
@@ -176,169 +178,81 @@ public final class TokenCache: Sendable {
         if let cached = resolveFromCache() { return cached }
         if let stored = resolveFromStore() { return stored }
         if let envToken = await envProvider.token() {
-            // Write-once: a concurrent token() call may have already populated
-            // state between our resolveFromStore() miss and this lock. Keep the
-            // first writer — both values are equivalent (same env token) but we
-            // avoid a redundant write on the common non-racing path.
-            state.withLock { if $0 == nil { $0 = envToken } }
+            state.withLock { $0 = envToken }
             return envToken
         }
         return nil
     }
 
-    /// Clears the in-memory token cache and resets the injected provider's state.
+    /// Clears the in-memory token cache and resets the `EnvTokenProvider` shell
+    /// outcome latch.
     ///
-    /// Call after saving a new token or after sign-out so the next `token()`
-    /// call re-resolves from the store or shell.
+    /// ## Two-step atomicity window
+    /// `invalidate()` performs two operations that cannot be made atomic without
+    /// a shared lock between `TokenCache` and `EnvTokenProvider`:
     ///
-    /// Resetting `envProvider` here is intentional: a sign-out / sign-in cycle
-    /// should get exactly one fresh shell attempt on the next `token()` call,
-    /// even if the previous attempt timed out. Without this reset the user would
-    /// be permanently locked out of the shell path for the process lifetime after
-    /// a single `.failed` outcome, regardless of whether they subsequently fix
-    /// their `~/.zshrc` or reduce its startup cost.
+    /// 1. `state.withLock { $0 = nil }` — clears the in-memory token cache.
+    /// 2. `envProvider.invalidate()` — resets `EnvTokenProvider`'s shell latch.
     ///
-    /// Note the latency cost on `.failed` reset: the re-spawned shell adds
-    /// ~50–200 ms to the first poll cycle after sign-out on an affected launch
-    /// configuration. This cost recurs on every sign-out cycle (each `invalidate()`
-    /// resets the outcome), not just once per process lifetime. It is cached
-    /// immediately on success, so only the first `token()` call after each
-    /// `invalidate()` pays the penalty.
+    /// Between steps 1 and 2, a concurrent `token()` call that misses the cleared
+    /// cache but hits the not-yet-reset shell latch could return a stale shell
+    /// result. In practice this window is negligible: `RunnerPoller` is a serial
+    /// actor and does not call `token()` concurrently with sign-out. If a future
+    /// caller introduces concurrent access, either introduce a shared lock or
+    /// document the accepted race.
     ///
-    /// ## Two-step atomicity window (known, acceptable)
-    /// `state.withLock { $0 = nil }` and `envProvider.invalidate()` are two
-    /// separate operations — they cannot share a single lock because
-    /// `envProvider.invalidate()` is a protocol call whose implementation is
-    /// unknown to `TokenCache`. A concurrent `token()` call that wins the window
-    /// between these two lines will miss the cache (state is nil), call
-    /// `envProvider.token()`, and may get a still-un-invalidated shell result
-    /// written back into state — undoing the clear for one extra cycle.
-    /// This is acceptable in production: `RunnerPoller` is a serial actor and
-    /// is the only caller of `token()` in the app, so no concurrent `token()`
-    /// call can race `invalidate()` in practice. The window is a theoretical
-    /// exposure for future multi-caller configurations, not a live production risk.
-    /// If a future caller introduces genuine concurrency here, consider wrapping
-    /// both steps in a higher-level serialisation point at the call site.
-    public func invalidate() {
+    /// ## When invalidate() fires
+    /// `invalidate()` is called from two paths in production:
+    /// - **Sign-out**: `OAuthService.signOut()` → `onTokenDeleted` callback →
+    ///   `TokenCache.invalidate()`. The Keychain entry has already been deleted
+    ///   at this point; clearing the in-memory cache ensures the next `token()`
+    ///   call re-walks the full resolution chain rather than returning a stale value.
+    /// - **Sign-in**: `OAuthService.exchangeCode(_:)` → `onTokenSaved` callback →
+    ///   `TokenCache.invalidate()`. The new token has just been written to the
+    ///   Keychain; invalidating the cache forces the next `token()` call to re-read
+    ///   it from the store rather than returning a value from the previous session.
+    ///   The two-step atomicity window above therefore applies on sign-in as well
+    ///   as sign-out — specifically during the window between a successful
+    ///   `exchangeCode` write and the `envProvider.invalidate()` call here.
+    public nonisolated func invalidate() {
         state.withLock { $0 = nil }
         envProvider.invalidate()
-        logger?.log("TokenCache › invalidate — cache cleared, envProvider reset", category: "transport")
-    }
-
-    // MARK: - Synchronous cache peek
-
-    /// Returns the token currently held in the in-memory cache, or `nil` if not yet resolved.
-    ///
-    /// This is a non-async, zero-I/O read of the Mutex-guarded state — it will never
-    /// spawn a login shell, read the Keychain, or check environment variables. It reflects
-    /// only what `token()` has already resolved and cached in this `TokenCache` instance.
-    ///
-    /// ## Why this exists
-    /// UI code (e.g. `SettingsView`) needs a synchronous answer to "do we have a token
-    /// right now?" to decide which status indicator to show. Calling the async `token()`
-    /// from a synchronous SwiftUI view body is not possible without a detached Task, which
-    /// would introduce a frame of latency and a potential flicker. `cachedToken` provides
-    /// an instant, non-suspending read of whatever the last `token()` resolution produced.
-    /// If the cache is cold (e.g. first launch before the first `token()` call completes),
-    /// it returns `nil` and the UI shows a neutral / loading state until the async resolution
-    /// fires and triggers a state update.
-    ///
-    /// // Migrated: original ## Why this exists block was present in the pre-extraction
-    /// // TokenCache. Restored in PR #75 review pass — the block was dropped without a
-    /// // // Migrated: annotation, violating #73/#74 rule 7.
-    public var cachedToken: String? {
-        state.withLock { $0 }
+        logger?.log("TokenCache › invalidate — cache cleared", category: "transport")
     }
 
     // MARK: - Private helpers
 
-    /// Returns the cached token without any I/O, or `nil` if the cache is cold.
+    /// Returns the cached token if one is available, otherwise `nil`.
     private func resolveFromCache() -> String? {
-        let cached = state.withLock { $0 }
-        #if DEBUG
-        if let cached {
-            logger?.log("TokenCache › resolved from cache (len=\(cached.count))", category: "transport")
+        guard let cached = state.withLock({ $0 }) else {
+            logger?.log("TokenCache › cache miss", category: "transport")
+            return nil
         }
-        #endif
+        logger?.log("TokenCache › cache hit (len=\(cached.count))", category: "transport")
         return cached
     }
 
-    /// Loads the token from the `TokenStore`, populates the cache on success, and returns it.
+    /// Attempts to resolve the token from the injected `TokenStore` (Keychain).
+    /// On a hit, writes the result to the in-memory cache and returns it.
+    /// On a miss (nil or empty string), returns nil.
     ///
-    /// Empty strings are treated as absent (e.g. corrupted Keychain entry).
+    /// ## Why empty strings are rejected
+    /// `KeychainTokenStore.load()` can return an empty string if the Keychain
+    /// entry was written with an empty value (e.g. a corrupted save). An empty
+    /// token is not a usable credential — returning it would cause every
+    /// subsequent API call to fail with a 401. Rejecting it here forces the
+    /// resolution chain to continue to the env-var / shell path, which is the
+    /// correct fallback behaviour.
     ///
-    /// ## Cache-write side effect (not a pure read)
-    /// Writes to `state` on success. Named `resolveFrom…` to signal the
-    /// resolve-and-cache pattern; the write is the meaningful side-effect,
-    /// not the return value.
-    ///
-    /// ## Why the two failure modes are collapsed
-    /// Both `nil` (no Keychain entry) and empty string (corrupted entry) are
-    /// treated identically: return nil and fall through to the next resolution
-    /// step. Separating them into two guards with distinct log messages adds
-    /// branching for a distinction that has no actionable difference — the caller
-    /// cannot recover differently based on nil vs. empty. The log message below
-    /// covers both cases; if field diagnosis ever requires the distinction, split
-    /// this guard at that point.
-    ///
-    /// ## Why Keychain results are cached in memory
-    /// Each `TokenStore.load()` call performs a synchronous `SecItemCopyMatching`
-    /// read. On a cold RunnerPoller tick (every ~30 s) this fires once and caches
-    /// immediately — negligible cost. Caching is still the right choice because
-    /// a tight render loop or a burst of concurrent API calls would otherwise
-    /// issue multiple redundant Keychain reads. The cache is intentionally
-    /// invalidated by `invalidate()` (called on sign-in and sign-out) so external
-    /// token revocation is reflected on the next cycle, not indefinitely masked.
-    ///
-    /// > Note: Migrated from PR #75 — thundering-herd rationale moved to
-    /// > the `token()` `-Warning:` block above.
+    /// The same empty-string rejection is applied in `OAuthService.isAuthenticated`
+    /// (PR #75) for the same reason. Both rejections are intentional and symmetric.
     private func resolveFromStore() -> String? {
-        guard let token = tokenStore.load(), !token.isEmpty else {
-            #if DEBUG
-            logger?.log("TokenCache › token store returned nil or empty", category: "transport")
-            #endif
+        guard let stored = tokenStore.load(), !stored.isEmpty else {
+            logger?.log("TokenCache › store miss", category: "transport")
             return nil
         }
-        #if DEBUG
-        logger?.log("TokenCache › resolved from store (len=\(token.count)), populating cache", category: "transport")
-        #endif
-        // Write-once: a concurrent token() call may have already populated state
-        // between our tokenStore.load() and this lock (e.g. two callers both miss
-        // resolveFromCache() simultaneously). Keep the first writer — both values
-        // are the same Keychain token; redundant writes are harmless but avoided.
-        state.withLock { if $0 == nil { $0 = token } }
-        return token
+        logger?.log("TokenCache › store hit (len=\(stored.count)), writing to cache", category: "transport")
+        state.withLock { $0 = stored }
+        return stored
     }
-}
-
-// MARK: - NullEnvTokenProvider
-
-/// A no-op `EnvTokenProviding` used when no env provider is needed.
-///
-/// Injected by `TokenCache.init(tokenStore:)` (the test convenience init)
-/// when the caller does not supply a real provider. Always returns `nil`
-/// from `token()` and ignores `invalidate()` calls.
-///
-/// Access level: `internal` — visible within the `GitHubClient` module only
-/// (including `@testable`-importing test targets such as `GitHubClientTests`).
-/// `internal` does NOT cross module boundaries: code in `EnvTokenKit`,
-/// `OAuthTokenKit`, or any other separately compiled module cannot reference
-/// this type. If an `EnvTokenKit` test target ever attempts to use it, the
-/// compiler will produce a "cannot find type" error. The doc comment's
-/// intended audience is `GitHubClientTests` via `@testable import GitHubClient`.
-internal struct NullEnvTokenProvider: EnvTokenProviding {
-    /// Always returns `nil` — no env var or shell resolution is performed.
-    ///
-    /// No `nonisolated` annotation is needed here: `token()` is `async` and the
-    /// `EnvTokenProviding` protocol declares it without actor isolation, so it is
-    /// callable from any context by design. `nonisolated` on an `async` func would
-    /// be redundant — the compiler does not require it and adding it would imply a
-    /// constraint that does not exist. Contrast with `invalidate()` below, where
-    /// `nonisolated` is load-bearing because that method is synchronous.
-    func token() async -> String? { nil }
-    /// No-op — there is no state to reset.
-    /// `nonisolated` is required by `EnvTokenProviding.invalidate()`: `TokenCache.invalidate()`
-    /// is itself `nonisolated` and calls this synchronously. Omitting `nonisolated` here
-    /// would produce a silent actor hop if this type were ever used from a `@MainActor` context.
-    nonisolated func invalidate() {} // nonisolated: required by EnvTokenProviding protocol
 }

@@ -1,5 +1,9 @@
 // EnvTokenProvider.swift
-// GitHubClient
+// GitHubClient  — intentional: SwiftLint's file_header rule expects the product
+//                 module name (GitHubClient), not the Swift package target name
+//                 (EnvTokenKit). Changing this to // EnvTokenKit breaks CI lint.
+//                 Do not change. See EnvTokenProviderLoginShell.swift for the
+//                 same pattern and rationale.
 import Foundation
 import Synchronization
 
@@ -281,20 +285,24 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     /// preferred form documented in the README. Checking it first means a user
     /// who sets both gets the expected one without any silent override.
     ///
-    /// ## Why these log calls are unconditional (not #if DEBUG)
-    /// Every other log call in this file is unconditional. The nil/empty path
-    /// is the production triage signal — when a user's token isn't resolving,
-    /// this is the log line that tells you why. Wrapping it in #if DEBUG silences
-    /// it in release builds, which is exactly when it's needed most. Both calls
-    /// are unconditional to match the rest of the file and preserve release
-    /// diagnostic coverage.
+    /// ## Why miss logs are #if DEBUG
+    /// The nil/empty miss path fires on every `token()` call for OAuth-only
+    /// users who have no `GH_TOKEN` export — that is every poll cycle (~30 s)
+    /// indefinitely in production. Two unconditional log lines per cycle would
+    /// be permanent steady-state noise in release builds for every OAuth-only
+    /// user. The hit path (successful resolution) remains unconditional because
+    /// it fires at most once per `TokenCache` lifetime and is the signal that
+    /// matters for triage. The miss path is only useful during active debugging,
+    /// so it is guarded by `#if DEBUG`.
     private func resolveFromEnvironment() -> String? {
         for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
             if let value = envLookup(key), !value.isEmpty {
                 log?("EnvTokenProvider › resolved from env var \(key) (len=\(value.count))", "transport")
                 return value
             }
+            #if DEBUG
             log?("EnvTokenProvider › env var \(key): nil/empty", "transport")
+            #endif
         }
         return nil
     }

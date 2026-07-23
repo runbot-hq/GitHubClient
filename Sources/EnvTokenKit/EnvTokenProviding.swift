@@ -1,5 +1,9 @@
 // EnvTokenProviding.swift
-// GitHubClient
+// GitHubClient  — intentional: SwiftLint's file_header rule expects the product
+//                 module name (GitHubClient), not the Swift package target name
+//                 (EnvTokenKit). Changing this to // EnvTokenKit breaks CI lint.
+//                 Do not change. See EnvTokenProviderLoginShell.swift for the
+//                 same pattern and rationale.
 
 // MARK: - EnvTokenProviding
 //
