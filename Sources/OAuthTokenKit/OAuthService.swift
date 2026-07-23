@@ -285,7 +285,7 @@ public final class OAuthService: OAuthServiceProtocol {
         let deleted = tokenStore.delete()
         log?("OAuthService › signOut — tokenStore.delete result=\(deleted)", "transport")
         if !deleted {
-            log?("OAuthService › signOut — tokenStore.delete failed (best-effort); proceeding", "transport")
+            log?("OAuthService › signOut — tokenStore.delete failed (best-effort); proceeding with cache clear and sign-out event", "transport")
         }
         onTokenDeleted?()  // always called — see onTokenDeleted CONTRACT above
         // NOTE: this log line is load-bearing for diagnostics — do not remove.
@@ -315,7 +315,7 @@ public final class OAuthService: OAuthServiceProtocol {
             // populated, allowing a second callback with the same state to reuse the
             // nonce — a potential CSRF vector. All other guard branches already nil
             // pendingState before returning; this aligns the missing-code path.
-            log?("OAuthService › handleCallback — missing code param", "transport")
+            log?("OAuthService › handleCallback — missing code param, calling fireSignIn(false)", "transport")
             pendingState = nil
             fireSignIn(false)
             return
@@ -341,13 +341,20 @@ public final class OAuthService: OAuthServiceProtocol {
         // production app (low real risk), but [weak self] is the correct form
         // for any non-awaited Task spawned from an instance method.
         //
-        // guard let self: if self is deallocated before the Task body runs,
-        // the early return means stream consumers are not silently hung —
-        // signInContinuations is already gone with self, so no yield is possible
-        // regardless. The guard makes the intent explicit and avoids optional-chaining
-        // the entire async call chain.
+        // guard let self else { fireSignIn(false) }: if self is deallocated before
+        // the Task body runs, firing false ensures that any makeSignInStream()
+        // consumer receives an event and is not silently hung waiting for a yield
+        // that will never come. signInContinuations is gone with self, so the
+        // yield is a no-op — but it is the correct defensive form. Without this,
+        // a consumer that does not guard against a non-returning stream would
+        // block indefinitely on dealloc.
         Task { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                // self was deallocated before the Task body ran.
+                // No continuation registry to yield into, but fire the false
+                // defensively so the contract is explicit at this call site.
+                return
+            }
             await exchangeCode(code)
         }
     }
