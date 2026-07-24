@@ -479,6 +479,15 @@ public final class OAuthService: OAuthServiceProtocol {
     /// `@MainActor`-isolated at the class level — no concurrent env mutation
     /// runs on the main thread.
     ///
+    /// **Protocol-level caveat**: `OAuthServiceProtocol` also carries `@MainActor`,
+    /// but Swift does not enforce actor isolation on protocol conformers in the same
+    /// way it does on concrete types. A mock conformer that declares `hasAnyToken`
+    /// as `nonisolated` (or omits `@MainActor` from the struct entirely) will compile
+    /// without error but can call `envVarIsSet` from off-actor, silently violating
+    /// this assumption. If you write a mock that calls `envVarIsSet` or reads env vars
+    /// directly, ensure it carries `@MainActor` at the struct level or wraps the call
+    /// in `await MainActor.run { ... }`.
+    ///
     /// **Swift Testing parallel risk — CONFIRMED CLOSED**: Swift Testing runs test
     /// cases in parallel by default. `OAuthServiceAuthStateTests` uses `setenv`/`unsetenv`
     /// to set up fixture state, which would race on the process-global environment if
