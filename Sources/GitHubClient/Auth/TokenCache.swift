@@ -319,11 +319,15 @@ public final class TokenCache: Sendable {
         // Unconditional write is intentional: the Keychain always returns the same
         // value for a given entry, so concurrent callers writing the same token
         // are idempotent. See -Warning: in token() for the full concurrent-caller
-        // rationale. The original 'if $0.token == nil' guard is not restored here
+        // rationale. The original 'if $0 == nil' guard is not restored here
         // because it would not prevent the invalidate()-race window it appears to
-        // guard against — invalidate() sets state to nil, so a concurrent caller
-        // that read the Keychain before invalidate() and writes here after would
-        // pass the nil-check and re-stamp the cleared token either way.
+        // guard against — invalidate() sets state to nil BEFORE this write executes,
+        // so the nil-check would pass and the stale token would be written back
+        // regardless. The guard prevents a double-write on the warm path only
+        // (two concurrent store-hits while the cache is already populated); it does
+        // not close the invalidate() + resolveFromStore() interleave. The race
+        // window is accepted and documented in ## Two-step atomicity window in
+        // invalidate() above.
         state.withLock { $0 = stored }
         return stored
     }
