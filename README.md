@@ -210,11 +210,13 @@ At every API call, the token is resolved in this order — first match wins:
 
 1. **In-memory cache** — zero I/O; warmed on first successful resolution
 2. **`TokenStore`** (Keychain by default via `KeychainTokenStore`) — synchronous `SecItemCopyMatching` read
-3. **`GH_TOKEN` environment variable** — read via `getenv()` for live accuracy (not `ProcessInfo` snapshot)
+3. **`GH_TOKEN` environment variable** — read via `ProcessInfo.processInfo.environment` (a snapshot captured at process launch); handled by `EnvTokenProvider` in `EnvTokenKit`
 4. **`GITHUB_TOKEN` environment variable** — same; covers standard CI injection
 5. **Login-shell fallback** — spawns `/bin/zsh -l -c 'echo $GH_TOKEN'`; cold Finder/Dock launch only
 
 Steps 3–5 are handled by `EnvTokenProvider` (in `EnvTokenKit`). `TokenCache` delegates to it via the `EnvTokenProviding` protocol — it never names the concrete type directly.
+
+> **Note — two env-var read paths:** `EnvTokenProvider` (steps 3–4 above) reads env vars via `ProcessInfo.processInfo.environment`, a snapshot fixed at process launch. `OAuthService.hasAnyToken` reads the same vars via `getenv()`, which reflects the live process environment. In production these are equivalent. In test harnesses that inject env vars after process launch (e.g. `setenv()` in test setUp), `hasAnyToken` will see the injected value but `TokenCache.token()` will not. This divergence is intentional and documented in `EnvTokenProvider.resolveFromEnvironment()`.
 
 The cache is invalidated automatically after every sign-in and sign-out via the `onTokenSaved` / `onTokenDeleted` callbacks wired in `GitHubClient.init`.
 
@@ -284,7 +286,7 @@ if github.oauthService.hasAnyToken {
 
 ### Environment token (CI / automation)
 
-Export `GH_TOKEN` or `GITHUB_TOKEN` — the library picks it up automatically with no additional configuration. Both env vars are read via `getenv()` so they reflect the live process environment, not the `ProcessInfo` snapshot from process launch.
+Export `GH_TOKEN` or `GITHUB_TOKEN` — the library picks it up automatically with no additional configuration. `EnvTokenProvider` reads env vars from `ProcessInfo.processInfo.environment` (the snapshot captured at process launch), which is correct for standard CI runners where the environment is fixed before the process starts. `OAuthService.hasAnyToken` additionally checks the same vars via `getenv()` for a live read — see the note in [Token resolution order](#token-resolution-order) for the full divergence rationale.
 
 ## License
 
