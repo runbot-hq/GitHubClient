@@ -243,6 +243,18 @@ public final class TokenCache: Sendable {
         // Log fires after both operations — message reflects both: cache nil'd and
         // envProvider latch reset. See ## Two-step atomicity window above.
         logger?.log("TokenCache › invalidate — cache and env-provider latch reset", category: "transport")
+        // ## Why calling nonisolated invalidate() from @MainActor is safe under
+        // Swift 6 strict concurrency (SWIFT_STRICT_CONCURRENCY=complete)
+        // invalidate() is `nonisolated` — Swift permits any isolation domain,
+        // including @MainActor, to call a nonisolated function synchronously
+        // without a hop or suspension point. The two writes inside
+        // (state.withLock and envProvider.invalidate()) are Mutex-protected and
+        // nonisolated respectively — neither inherits nor requires @MainActor
+        // isolation. The onTokenDeleted closure in GitHubClient.swift captures
+        // invalidate() as `() -> Void`, executes on @MainActor (OAuthService is
+        // @MainActor), calls nonisolated invalidate() synchronously, and returns.
+        // No isolation leak, no deadlock risk. strict concurrency does not flag
+        // calling a nonisolated func from an actor — only the reverse requires await.
     }
 
     // MARK: - Private helpers
@@ -349,6 +361,15 @@ public final class TokenCache: Sendable {
         // both sources resolve the same credential today and invalidate() corrects
         // any divergence on the next sign-in/sign-out cycle — a TODO would imply
         // this is unresolved, which it is not.
+        //
+        // Specific scenario addressed: a user with a revoked OAuth Keychain token
+        // who has since set GH_TOKEN in their shell profile. resolveFromStore()
+        // loading the revoked token and writing it to state is CORRECT —
+        // TokenStore (step 2) intentionally wins over envProvider (step 3) in the
+        // resolution chain. The revoked token causes 401s, which trigger sign-out,
+        // which calls invalidate(), clearing state so the next token() call
+        // resolves the valid GH_TOKEN from the shell. Restoring the `if $0 == nil`
+        // guard to invert this precedence silently would be the wrong fix.
         state.withLock { $0 = stored }
         return stored
     }
