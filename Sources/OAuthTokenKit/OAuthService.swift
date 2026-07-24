@@ -429,6 +429,17 @@ public final class OAuthService: OAuthServiceProtocol {
         let saved = tokenStore.save(token)
         log?("OAuthService › exchangeCode — tokenStore.save result=\(saved), calling fireSignIn(\(saved))", "transport")
         if saved {
+            // onTokenSaved is intentionally gated on save success — this is asymmetric
+            // with onTokenDeleted's unconditional contract, and deliberately so.
+            // If the save failed, the Keychain still holds the previous token (or
+            // nothing). Calling invalidate() here would clear the warm in-memory
+            // cache, forcing the next token() call to re-read the Keychain — which
+            // would return the old token, not the one that just failed to save.
+            // Invalidating toward a stale Keychain value is worse than keeping the
+            // warm cache as-is. onTokenDeleted's unconditional policy is correct for
+            // sign-out because clearing a potentially-stale cache is always safe there
+            // (the user is signing out regardless); the same logic does not apply on
+            // a failed save.
             onTokenSaved?()
         } else {
             log?("OAuthService › exchangeCode: tokenStore.save failed", "transport")
