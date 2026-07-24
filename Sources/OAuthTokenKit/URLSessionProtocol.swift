@@ -9,6 +9,20 @@ import Foundation
 /// `URLSession.data(for:)` is declared in a Foundation extension and is therefore
 /// not `open` — it cannot be overridden in a subclass defined outside the module.
 /// Using a protocol instead avoids that restriction entirely.
+///
+/// ## Why this lives in OAuthTokenKit and not a shared module
+/// `URLSessionProtocol` is used exclusively by `OAuthService` for token-exchange
+/// network calls. It lives here rather than in a shared transport layer because no
+/// other current target needs it — `GitHubTransport` in `GitHubClient` has its own
+/// networking layer and does not use this seam.
+///
+/// If `GitHubTransport` ever needs a `URLSession` mock seam, it should define its
+/// own protocol in `GitHubClient` rather than importing `OAuthTokenKit` for this
+/// type alone. Importing `OAuthTokenKit` into `GitHubTransport` solely for a
+/// two-line protocol would create a peer-target coupling with no architectural
+/// justification. The duplication of a two-line protocol is the correct trade-off.
+/// If a shared networking layer is ever introduced as a separate SPM target, both
+/// protocols can be consolidated there at that point.
 public protocol URLSessionProtocol: Sendable {
     /// Fetches the contents of a URL request and returns the data.
     func data(for request: URLRequest) async throws -> (Data, URLResponse)
