@@ -1,6 +1,19 @@
 // GitHubClient.swift
 // GitHubClient
+internal import EnvTokenKit  // internal: no EnvTokenKit type appears in GitHubClient's public API
 import Foundation
+// public import OAuthTokenKit: two independent compiler requirements force this above internal:
+// 1. `public let oauthService: any OAuthServiceProtocol` — OAuthServiceProtocol is an OAuthTokenKit
+//    type in a public property declaration; Swift forbids naming it via an internally-imported module.
+// 2. TokenCache's public initialisers name `TokenStore` (an OAuthTokenKit protocol) directly in
+//    their public parameter lists; re-exposing TokenCache through the test init's `tokenCache:`
+//    parameter inherits the same constraint.
+// Do NOT downgrade to internal without resolving both of the above.
+// See also: TokenCache.swift — also requires public import OAuthTokenKit and public import
+// EnvTokenKit for its own independent compiler reasons (public initialisers with protocol-typed
+// parameters). Both imports are load-bearing in both files; removing the import here does not
+// satisfy or remove the requirement in TokenCache.swift, and vice versa.
+public import OAuthTokenKit
 
 // MARK: - GitHubClient
 //
@@ -98,10 +111,11 @@ public final class GitHubClient {
 
     /// Creates a fully wired `GitHubClient` backed by the macOS Keychain.
     ///
-    /// Internally constructs one `KeychainTokenStore`, one `TokenCache`, one
-    /// `OAuthService`, and one `GitHubTransport` — all sharing the same token
-    /// path. `TokenCache.invalidate()` is called automatically after every
-    /// successful sign-in and sign-out.
+    /// Internally constructs one `KeychainTokenStore`, one `EnvTokenProvider`,
+    /// one `TokenCache`, one `OAuthService`, and one `GitHubTransport` — all
+    /// sharing the same token path. `TokenCache.invalidate()` is called
+    /// automatically after every successful sign-in and sign-out, which resets
+    /// both the in-memory token cache and `EnvTokenProvider`'s shell outcome latch.
     ///
     /// - Parameters:
     ///   - clientID: The GitHub OAuth app client ID.
@@ -112,7 +126,7 @@ public final class GitHubClient {
     ///     `GitHubScopes.default`. Must not be empty. Use `GitHubScopes`
     ///     constants for type safety and discoverability.
     ///   - redirectURI: The OAuth redirect URI sent to GitHub during authorisation.
-    ///     Defaults to `OAuthService.defaultRedirectURI` (`GitHubConstants.oauthRedirectURI`).
+    ///     Defaults to `OAuthService.defaultRedirectURI` (`runbot://oauth/callback`).
     ///     Override for staging environments, white-label builds, or a second OAuth app.
     ///     Existing call sites are unaffected — omitting this parameter preserves current behaviour.
     ///   - logger: Optional logger for diagnostic messages.
@@ -126,21 +140,58 @@ public final class GitHubClient {
         redirectURI: String = OAuthService.defaultRedirectURI,
         logger: (any GitHubLogger)? = nil
     ) {
-        let store = KeychainTokenStore(service: service, account: account, logger: logger)
-        let cache = TokenCache(tokenStore: store, logger: logger)
+        // Bridge GitHubLogger → log closure for kit injection.
+        // GitHubLogger stays in GitHubClient/Transport — kits are closure-injected
+        // to avoid any shared logger dependency between targets.
+        //
+        // ## Why `if let` and not `.map { l in { ... } }`
+        // The spec (#73/#74) shows a single-expression map form as an example.
+        // Here the capture body requires a `@Sendable` attribute on the closure
+        // literal, which cannot be expressed inside a `.map` trailing closure
+        // without a cast. The `if let` + explicit `@Sendable` annotation is the
+        // idiomatic form for a multi-attribute closure at an imperative call site.
+        // Both forms produce identical code; this is not a deviation from the
+        // spec's intent — only from its illustrative example.
+        let log: (@Sendable (String, String) -> Void)?
+        if let lg = logger {
+            log = { @Sendable message, category in lg.log(message, category: category) }
+        } else {
+            log = nil
+        }
+        // public import OAuthTokenKit — not internal — for two reasons, both compiler-enforced:
+        // 1. TokenCache's public initialisers name TokenStore (an OAuthTokenKit protocol) directly
+        //    in their public parameter lists. TokenCache itself is constructed here and re-exposed
+        //    through the test-only init's `tokenCache:` parameter. Swift forbids a public
+        //    declaration from using an internally-imported type.
+        // 2. `public let oauthService: any OAuthServiceProtocol` on GitHubClient names
+        //    OAuthServiceProtocol (an OAuthTokenKit protocol) in a public property declaration.
+        //    This independently requires public import even if reason 1 were resolved.
+        // KeychainTokenStore and OAuthService are concrete OAuthTokenKit types that never appear
+        // in GitHubClient's own public API surface. The public import is forced by TokenCache's
+        // signature and the oauthService property, not by the concrete wiring done here.
+        let store = KeychainTokenStore(service: service, account: account, log: log)
+        // internal import EnvTokenKit — unlike OAuthTokenKit above, this stays internal because
+        // no public API of GitHubClient names any EnvTokenKit type. EnvTokenProvider is
+        // constructed locally and immediately erased to `any EnvTokenProviding` before being
+        // passed into TokenCache, which only ever knows the protocol — see TokenCache Boundary
+        // Rule in #74. EnvTokenProvider is the only EnvTokenKit concrete type named in this file.
+        let envProvider = EnvTokenProvider(log: log)
+        let cache = TokenCache(tokenStore: store, envProvider: envProvider, logger: logger)
         let oauth = OAuthService(
             clientID: clientID,
             clientSecret: clientSecret,
             tokenStore: store,
             scopes: scopes,
             redirectURI: redirectURI,
-            logger: logger,
+            log: log,
             session: URLSession.shared,
             // Both callbacks call invalidate() so the next token() call re-resolves
-            // from the store after any credential change. Side-effect: a user whose
-            // shell is broken (.failed latch) will re-spawn /bin/zsh on the next
-            // token() call after *both* sign-in and sign-out — not just sign-out.
-            // Low-frequency and intentional; tracked in #68.
+            // from the store after any credential change. invalidate() resets both
+            // the in-memory token cache AND EnvTokenProvider's shell outcome latch —
+            // see EnvTokenProvider.invalidate() for the full .failed vs .notFound
+            // reset policy. Side-effect: a user whose shell is broken (.failed latch)
+            // will re-spawn /bin/zsh on the next token() call after *both* sign-in
+            // and sign-out — not just sign-out. Low-frequency and intentional; tracked in #68.
             onTokenSaved: { cache.invalidate() },
             onTokenDeleted: { cache.invalidate() }
         )
@@ -159,7 +210,7 @@ public final class GitHubClient {
         // all API calls would return 401 until the user re-launches.
         // Periphery / compiler "assigned but never read" warnings are false
         // positives here: the value IS read, just indirectly through
-        // currentTransport in a different file.
+        // currentTransport in a different file (GitHubTransportShims.swift).
         sharedTransportStorage = transport
         self.oauthService = oauth
         self.transport = transport
@@ -195,6 +246,9 @@ public final class GitHubClient {
     /// - Parameters:
     ///   - oauthService: A mock or stub conforming to `OAuthServiceProtocol`.
     ///   - transport: A mock or stub conforming to `GitHubTransportProtocol`.
+    ///   - tokenCache: An optional pre-configured `TokenCache`. When `nil` a
+    ///     `NullTokenStore`-backed cache is constructed automatically — suitable
+    ///     for tests that do not exercise the token-resolution path.
     public init(
         oauthService: any OAuthServiceProtocol,
         transport: any GitHubTransportProtocol,
