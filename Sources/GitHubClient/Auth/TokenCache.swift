@@ -28,10 +28,12 @@ import Synchronization
 // Resolution chain:
 //   1. In-memory cache  (sync, free)
 //   2. TokenStore       (sync, Keychain SecItemCopyMatching)
-//   3. ProcessInfo env  (sync, covers terminal / CI launches)
-//   4. loginShellToken  (async subprocess — cold Finder launch only)
+//   3+4. EnvTokenProvider.token() — delegated to injected EnvTokenProviding
+//        (ProcessInfo env var for terminal/CI launches; login-shell subprocess
+//        for cold Finder/Dock launches). TokenCache has no visibility into
+//        how steps 3+4 work — it only calls envProvider.token() and caches
+//        the result. See EnvTokenProvider.token() for the full step 3+4 rationale.
 //
-// Steps 3+4 are fully delegated to the injected `any EnvTokenProviding`.
 // TokenCache never names the concrete EnvTokenProvider type — it only
 // knows the protocol. The concrete type is constructed and injected
 // exclusively by GitHubClient.swift at wiring time.
@@ -231,7 +233,9 @@ public final class TokenCache: Sendable {
     public nonisolated func invalidate() {
         state.withLock { $0 = nil }
         envProvider.invalidate()
-        logger?.log("TokenCache › invalidate — cache cleared", category: "transport")
+        // Log fires after both operations — message reflects both: cache nil'd and
+        // envProvider latch reset. See ## Two-step atomicity window above.
+        logger?.log("TokenCache › invalidate — cache and env-provider latch reset", category: "transport")
     }
 
     // MARK: - Private helpers
@@ -309,6 +313,14 @@ public final class TokenCache: Sendable {
         #if DEBUG
         logger?.log("TokenCache › store hit (len=\(stored.count)), writing to cache", category: "transport")
         #endif
+        // Unconditional write is intentional: the Keychain always returns the same
+        // value for a given entry, so concurrent callers writing the same token
+        // are idempotent. See -Warning: in token() for the full concurrent-caller
+        // rationale. The original 'if $0.token == nil' guard is not restored here
+        // because it would not prevent the invalidate()-race window it appears to
+        // guard against — invalidate() sets state to nil, so a concurrent caller
+        // that read the Keychain before invalidate() and writes here after would
+        // pass the nil-check and re-stamp the cleared token either way.
         state.withLock { $0 = stored }
         return stored
     }

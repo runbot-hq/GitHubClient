@@ -49,6 +49,10 @@ public final class OAuthService: OAuthServiceProtocol {
     /// Hardcoded: custom URI scheme registered in the GitHub OAuth app settings.
     /// NOSONAR suppresses the static-analysis hardcoded-URL warning — this is
     /// intentional; the value is a stable app-level constant, not a secret.
+    ///
+    /// NOTE: `GitHubConstants.oauthRedirectURI` no longer exists — it was removed
+    /// as part of PR #75 (OAuthTokenKit extraction). This literal is now the sole
+    /// source of truth for the redirect URI. There is no drift risk.
     public static let defaultRedirectURI: String = "runbot://oauth/callback" // NOSONAR
     /// The OAuth redirect URI. Must match the value registered in the GitHub OAuth app settings.
     private let redirectURI: String
@@ -178,8 +182,9 @@ public final class OAuthService: OAuthServiceProtocol {
     /// `ProcessInfo.processInfo.environment` is a snapshot captured at process
     /// launch. `setenv`/`unsetenv` mutations after launch are invisible to it.
     /// `getenv()` always reflects the live process environment and is consistent
-    /// with `EnvTokenProvider.resolveFromEnvironment()`. Empty strings are rejected
-    /// to match that behaviour. See `envVarIsSet(_:)` below.
+    /// with `EnvTokenProvider`'s env-var read behaviour (which also uses `getenv()`
+    /// rather than `ProcessInfo`). Empty strings are rejected to match that
+    /// behaviour. See `envVarIsSet(_:)` below.
     ///
     /// ## Why `hasAnyToken` lives in `OAuthTokenKit` and not `EnvTokenKit`
     /// `hasAnyToken` pairs the Keychain check (`isAuthenticated`) with the env-var
