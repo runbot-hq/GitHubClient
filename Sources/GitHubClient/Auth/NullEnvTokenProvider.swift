@@ -8,24 +8,38 @@ import EnvTokenKit
 /// A no-op `EnvTokenProviding` implementation that always returns `nil` from
 /// `token()` and does nothing in `invalidate()`.
 ///
-/// Used by `TokenCache.init(tokenStore:)` (the test-convenience init) when
-/// no env-var or login-shell resolution is needed — parallel to `NullTokenStore`.
+/// ## Role: null-object for the env-provider slot
+/// `TokenCache` stores `any EnvTokenProviding` as a non-optional field.
+/// Making it optional would add a nil-check on every `token()` and
+/// `invalidate()` call across the production path — just to handle the
+/// cases where env resolution is not needed. `NullEnvTokenProvider` follows
+/// the null-object pattern instead: callers that have no env source inject
+/// this type explicitly, keeping the hot path clean.
 ///
-/// ## When to use
-/// Pass `NullEnvTokenProvider()` (or omit the `envProvider:` parameter and
-/// let `TokenCache.init(tokenStore:)` construct it implicitly) when the test
-/// under construction does not exercise env-var or shell-path token resolution.
-/// For tests that do exercise those paths, use `StubEnvTokenProvider` or
-/// `EnvReadingStubProvider` from the test target instead.
+/// ## When it is used
+/// `TokenCache.init(tokenStore:)` — the convenience init — stores
+/// `NullEnvTokenProvider()` automatically. That init is called from
+/// `GitHubClient.init(oauthService:transport:tokenCache:)` when `tokenCache`
+/// is `nil`. Despite the parameter names, that init is `public` and is used
+/// in production builds wherever a fully-wired `GitHubClient` is not needed:
+///
+/// - **SwiftUI previews** — inject a `MockOAuthService` and `MockTransport`
+///   without touching the Keychain or spawning a login shell.
+/// - **Demo / sandbox apps** — same pattern.
+/// - **Unit and integration tests** — the most common caller.
+///
+/// The production init (`GitHubClient.init(clientID:clientSecret:…)`) always
+/// injects a real `EnvTokenProvider` via the primary `TokenCache` init and
+/// never reaches this type.
 ///
 /// ## Why internal, not public
-/// `NullEnvTokenProvider` is a test-support type for `GitHubClient`'s own
-/// secondary init. It is not part of the library's public API and should not
-/// be vended to downstream consumers. Public env-provider stubs belong in a
-/// dedicated `GitHubClientTestSupport` product if that is ever added.
+/// `NullEnvTokenProvider` is constructed internally by `TokenCache.init(tokenStore:)`.
+/// No downstream caller ever names this type directly — they get it implicitly
+/// by omitting the `tokenCache:` parameter on `GitHubClient`'s mock init.
+/// Keeping it `internal` prevents it from leaking into the public API surface.
 struct NullEnvTokenProvider: EnvTokenProviding {
-    /// Always returns `nil` — no env-var or shell resolution is performed.
+    /// Always returns `nil` — no env-var read or shell subprocess is performed.
     func token() async -> String? { nil }
-    /// No-op — there is no shell outcome latch to reset in the null provider.
+    /// No-op — there is no shell outcome latch or cached state to reset.
     nonisolated func invalidate() {}
 }
