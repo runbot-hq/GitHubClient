@@ -134,6 +134,20 @@ public final class TokenCache: Sendable {
 
     // MARK: - Public API
 
+    /// The token that the in-memory cache has already resolved, or `nil` if no
+    /// `token()` call has completed yet during this cache lifetime.
+    ///
+    /// This is a **synchronous, zero-I/O** read — it never spawns a login shell,
+    /// reads the Keychain, or checks environment variables. It reflects only what
+    /// a prior `token()` call has already written into the in-memory cache.
+    ///
+    /// ## Typical use
+    /// UI code that needs to show an auth-status indicator without going `async`
+    /// can read this property after at least one `token()` call has completed
+    /// (e.g. from a `.task` modifier that awaits `token()` on appear). Forwarded
+    /// by `GitHubClient.cachedToken` as a convenience accessor on the facade.
+    public var cachedToken: String? { state.withLock { $0 } }
+
     /// Resolves and returns the best available token, caching the result in memory.
     ///
     /// Resolution order — first match wins:
@@ -225,7 +239,9 @@ public final class TokenCache: Sendable {
     /// Returns the cached token if one is available, otherwise `nil`.
     private func resolveFromCache() -> String? {
         guard let cached = state.withLock({ $0 }) else {
+            #if DEBUG
             logger?.log("TokenCache › cache miss", category: "transport")
+            #endif
             return nil
         }
         logger?.log("TokenCache › cache hit (len=\(cached.count))", category: "transport")
@@ -246,9 +262,19 @@ public final class TokenCache: Sendable {
     ///
     /// The same empty-string rejection is applied in `OAuthService.isAuthenticated`
     /// (PR #75) for the same reason. Both rejections are intentional and symmetric.
+    ///
+    /// ## Why miss logs are #if DEBUG
+    /// The store-miss path fires on every `token()` call until the cache warms up
+    /// and on every call after `invalidate()` when the store is empty (e.g. a
+    /// signed-out user). Logging unconditionally in release builds would produce
+    /// steady-state noise on every RunnerPoller cycle (~30 s) for signed-out users.
+    /// The hit path remains unconditional because it fires at most once per cache
+    /// lifetime and is the signal that matters for triage.
     private func resolveFromStore() -> String? {
         guard let stored = tokenStore.load(), !stored.isEmpty else {
+            #if DEBUG
             logger?.log("TokenCache › store miss", category: "transport")
+            #endif
             return nil
         }
         logger?.log("TokenCache › store hit (len=\(stored.count)), writing to cache", category: "transport")
