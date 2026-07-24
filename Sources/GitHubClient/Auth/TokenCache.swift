@@ -328,6 +328,20 @@ public final class TokenCache: Sendable {
         // not close the invalidate() + resolveFromStore() interleave. The race
         // window is accepted and documented in ## Two-step atomicity window in
         // invalidate() above.
+        //
+        // ## Env-provider-overwrite scenario (accepted)
+        // The removed guard also prevented one other scenario: a concurrent
+        // envProvider.token() write completing between the Keychain read above
+        // and this lock call, which this unconditional write would then silently
+        // overwrite. This is accepted and idempotent in the current architecture:
+        // both the Keychain store and envProvider resolve the same credential
+        // (GH_TOKEN / GITHUB_TOKEN / OAuth token), so store-wins-over-env-provider
+        // produces the correct value. If the two sources ever diverge (e.g. a
+        // credential rotation where the Keychain has the old token and the env
+        // has the new one), invalidate() will correct the cache on the next
+        // sign-in/sign-out cycle. This scenario is noted here rather than in
+        // ## Two-step atomicity window because it is a property of the write
+        // site, not of the invalidate() sequencing.
         state.withLock { $0 = stored }
         return stored
     }
