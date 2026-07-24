@@ -179,7 +179,11 @@ public final class TokenCache: Sendable {
     ///   Steps 1–2 are idempotent (double Keychain read is harmless; `resolveFromStore()`
     ///   writes `state` unconditionally but the Keychain always returns the same value
     ///   for a given entry — see the inline comment on the write site in
-    ///   `resolveFromStore()` for the full rationale). Step 4 is not idempotent:
+    ///   `resolveFromStore()` for the full rationale). Note: a concurrent caller
+    ///   racing steps 1–2 cannot overwrite a valid cached value — both callers only
+    ///   reach `resolveFromStore()` after `resolveFromCache()` confirmed `state == nil`,
+    ///   so the unconditional write can only write the same Keychain value twice,
+    ///   which is idempotent. Step 4 is not idempotent:
     ///   each concurrent miss spawns a separate `/bin/zsh` subprocess. The latch is
     ///   not set until `loginShellToken` returns — up to 10 seconds — so the window
     ///   spans the full shell execution time, not merely a scheduling instant. In

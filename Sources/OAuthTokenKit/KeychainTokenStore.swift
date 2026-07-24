@@ -79,7 +79,12 @@ public final class KeychainTokenStore: TokenStore, Sendable {
     /// hot-path auth check — `load()` is called on every `isAuthenticated` evaluation
     /// and logging every miss would produce extreme noise in normal operation.
     /// Failures here degrade gracefully to a signed-out state, which is the safe
-    /// fallback. `save()` and `delete()` log their non-success statuses explicitly
+    /// fallback. The most common non-success status in production is
+    /// `errSecInteractionNotAllowed` (device locked) — returning `nil` here causes
+    /// `isAuthenticated` to return `false`, and the UI recovers automatically on the
+    /// next unlock without any intervention. This is an expected, handled condition,
+    /// not an actionable error; no logging is added here and no tracking issue is
+    /// opened. `save()` and `delete()` log their non-success statuses explicitly
     /// because they are called infrequently and failures there are always actionable.
     ///
     /// - Note: `SecItemCopyMatching` is OS-serialised by the Security framework.

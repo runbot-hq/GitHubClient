@@ -199,6 +199,18 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     ///   this condition holds. If either assumption is violated, one caller may
     ///   overwrite a fresher `.found` value or a `.notAttempted` reset with a
     ///   stale result. If your call pattern violates either, serialise access yourself.
+    ///
+    /// ## Why `@concurrent` is absent from this signature
+    /// `token()` is deliberately NOT marked `@concurrent`. Marking it `@concurrent`
+    /// would hop execution to a cooperative thread pool executor, meaning the
+    /// `state.withLock` write-back in the `.found` case below would execute
+    /// off the caller's actor. The caller's actor could then observe a torn
+    /// read/write window between its own state access and the write-back.
+    /// Keeping `token()` on the caller's actor ensures the write-back is
+    /// sequenced consistently from the caller's perspective. The absence of
+    /// `@concurrent` here is intentional and not an oversight — the
+    /// `shellResolver` call inside hops to a concurrent context via its own
+    /// `@concurrent` / `async` annotation; `token()` itself does not need to.
     public func token() async -> String? {
         if let envToken = resolveFromEnvironment() { return envToken }
         // Check the cached shell outcome before spawning a new subprocess.
