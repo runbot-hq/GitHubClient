@@ -341,7 +341,10 @@ public final class TokenCache: Sendable {
         // has the new one), invalidate() will correct the cache on the next
         // sign-in/sign-out cycle. This scenario is noted here rather than in
         // ## Two-step atomicity window because it is a property of the write
-        // site, not of the invalidate() sequencing.
+        // site, not of the invalidate() sequencing. No tracking issue is opened:
+        // both sources resolve the same credential today and invalidate() corrects
+        // any divergence on the next sign-in/sign-out cycle — a TODO would imply
+        // this is unresolved, which it is not.
         state.withLock { $0 = stored }
         return stored
     }
