@@ -375,7 +375,11 @@ public final class OAuthService: OAuthServiceProtocol {
         // handleCallback, so exchangeCode runs on @MainActor throughout. This is
         // intentional — fireSignIn must be @MainActor-isolated because it mutates
         // signInContinuations, and tokenStore.save (a synchronous Keychain write)
-        // is fast (≥10 µs, documented in isAuthenticated). The network work in
+        // runs on the main thread. Keychain writes (SecItemAdd/SecItemUpdate) are
+        // generally fast but can stall under lock contention (e.g. screen-lock
+        // events, concurrent Keychain ops from another process) — unlike the
+        // SecItemCopyMatching read floor documented in isAuthenticated. Acceptable
+        // at current call frequency (once per sign-in). The network work in
         // fetchTokenData is marked @concurrent and hops off the main actor for its
         // own duration. No structural change is needed here.
         Task {
