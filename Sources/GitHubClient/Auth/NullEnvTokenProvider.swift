@@ -24,6 +24,8 @@ import EnvTokenKit
 /// be vended to downstream consumers. Public env-provider stubs belong in a
 /// dedicated `GitHubClientTestSupport` product if that is ever added.
 struct NullEnvTokenProvider: EnvTokenProviding {
+    /// Always returns `nil` — no env-var or shell resolution is performed.
     func token() async -> String? { nil }
+    /// No-op — there is no shell outcome latch to reset in the null provider.
     nonisolated func invalidate() {}
 }
