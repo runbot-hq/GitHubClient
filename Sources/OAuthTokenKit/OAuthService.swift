@@ -97,7 +97,7 @@ public final class OAuthService: OAuthServiceProtocol {
     /// - Parameters:
     ///   - clientID: The GitHub OAuth app client ID.
     ///   - clientSecret: The GitHub OAuth app client secret.
-    ///   - tokenStore: The backing store used to save/delete/load the OAuth token.
+    ///   - tokenStore: The backing store used to load/save/delete the OAuth token.
     ///   - scopes: The OAuth scopes to request during sign-in. Defaults to `GitHubScopes.default`.
     ///     Must not be empty — a `precondition` failure is raised at init time if an empty array
     ///     is passed (fires in both debug and release builds — this is intentional; an empty
@@ -474,13 +474,17 @@ public final class OAuthService: OAuthServiceProtocol {
     /// `@MainActor`-isolated at the class level — no concurrent env mutation
     /// runs on the main thread.
     ///
-    /// **Swift Testing live risk**: Swift Testing runs test cases in parallel by default.
-    /// `OAuthServiceAuthStateTests` uses `setenv`/`unsetenv` to set up fixture state.
-    /// If that suite does not carry `@Suite(.serialized)` (or wrap every env-touching
-    /// test body in a `withCleanEnv` helper), concurrent test cases will race on the
-    /// process-global environment — a live data race today, not a hypothetical.
-    /// Verify that `OAuthServiceAuthStateTests` is serialised before adding new
-    /// env-touching test cases to that suite.
+    /// **Swift Testing parallel risk — CONFIRMED CLOSED**: Swift Testing runs test
+    /// cases in parallel by default. `OAuthServiceAuthStateTests` uses `setenv`/`unsetenv`
+    /// to set up fixture state, which would race on the process-global environment if
+    /// tests ran concurrently — a live data race, not a hypothetical.
+    /// This is structurally enforced: `OAuthServiceAuthStateTests` carries both
+    /// `@Suite(.serialized)` and `@MainActor` at the struct declaration, and every
+    /// env-touching test body is wrapped in `withCleanEnv`. See
+    /// `Tests/OAuthTokenKitTests/OAuthServiceAuthStateTests.swift` — the suite
+    /// header documents the full serialisation rationale.
+    /// When adding new env-touching tests to that suite, keep them inside
+    /// `withCleanEnv` — do not remove `.serialized` or the `@MainActor` annotation.
     ///
     /// If this method is ever called from off-actor production code, the `@MainActor`
     /// isolation guarantee is gone and the thread-safety assumption must be revisited.
