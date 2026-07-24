@@ -1,5 +1,9 @@
 // OAuthService.swift
-// GitHubClient
+// GitHubClient  — intentional: SwiftLint's file_header rule expects the product
+//                 module name (GitHubClient), not the Swift package target name
+//                 (OAuthTokenKit). Changing this to // OAuthTokenKit breaks CI lint.
+//                 Do not change. See EnvTokenProvider.swift for the same pattern
+//                 and rationale.
 import Foundation
 
 // MARK: - OAuthService
