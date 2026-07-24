@@ -435,7 +435,10 @@ struct GitHubTokenCacheTests {
 
       let second = await cache.token()
       #expect(second == nil)
-      // TokenCache always delegates; the real latch is inside EnvTokenProvider.
+      // callCount == 2, not 1 — despite the function name "latches", TokenCache
+      // does NOT latch. The name is a preserved CI identifier (see doc comment
+      // above). The real latch lives in EnvTokenProvider; TokenCache delegates
+      // unconditionally on every call.
       #expect(stub.callCount.withLock { $0 } == 2)
     }
   }
