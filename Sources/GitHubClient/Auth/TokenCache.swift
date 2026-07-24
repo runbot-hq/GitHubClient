@@ -189,7 +189,7 @@ public final class TokenCache: Sendable {
     ///   cold Finder/Dock launch where the shell path fires. The thundering-herd
     ///   window is bounded by the shell startup time, not unbounded.
     public func token() async -> String? {
-        if let cached = resolveFromCache() { return cached }
+        if let cached = resolveFromCache() { return cached }  // Fast path — no I/O, no subprocess
         if let stored = resolveFromStore() { return stored }
         if let envToken = await envProvider.token() {
             state.withLock { $0 = envToken }
@@ -244,13 +244,35 @@ public final class TokenCache: Sendable {
             #endif
             return nil
         }
+        // Cache-hit log is #if DEBUG: invalidate() fires on every sign-in and
+        // sign-out, so on an active RunnerPoller cycle (~30 s) this would fire
+        // unconditionally in release builds on every warm call after a credential
+        // rotation — steady-state release noise with no triage value.
+        // (Original code pre-PR #75 also gated the hit log on #if DEBUG.)
+        #if DEBUG
         logger?.log("TokenCache › cache hit (len=\(cached.count))", category: "transport")
+        #endif
         return cached
     }
 
     /// Attempts to resolve the token from the injected `TokenStore` (Keychain).
     /// On a hit, writes the result to the in-memory cache and returns it.
     /// On a miss (nil or empty string), returns nil.
+    ///
+    /// ## Cache-write side effect (not a pure read)
+    /// Despite being named `resolveFrom…`, this method writes to `state` on a
+    /// store hit. The write is intentional: once a valid token is found in the
+    /// Keychain it is promoted to the in-memory cache so all subsequent calls
+    /// return from `resolveFromCache()` without touching the Keychain again.
+    /// Migrated from the original `resolveFromStore()` doc block; relocated here
+    /// from the body comment in the pre-PR #75 implementation.
+    ///
+    /// ## Why Keychain results are cached in memory
+    /// `SecItemCopyMatching` involves a synchronous XPC round-trip to `securityd`.
+    /// Caching avoids that round-trip on every `token()` call — especially relevant
+    /// for `RunnerPoller` which calls `token()` on every ~30 s poll cycle.
+    /// Migrated from the original `## Why Keychain results are cached in memory`
+    /// doc block; that block lived on the old `resolveFromStore()` helper.
     ///
     /// ## Why empty strings are rejected
     /// `KeychainTokenStore.load()` can return an empty string if the Keychain
@@ -268,8 +290,8 @@ public final class TokenCache: Sendable {
     /// and on every call after `invalidate()` when the store is empty (e.g. a
     /// signed-out user). Logging unconditionally in release builds would produce
     /// steady-state noise on every RunnerPoller cycle (~30 s) for signed-out users.
-    /// The hit path remains unconditional because it fires at most once per cache
-    /// lifetime and is the signal that matters for triage.
+    /// The hit path is also #if DEBUG — see `resolveFromCache()` for rationale.
+    /// Migrated from the original `## Why miss logs are #if DEBUG` doc block.
     private func resolveFromStore() -> String? {
         guard let stored = tokenStore.load(), !stored.isEmpty else {
             #if DEBUG
