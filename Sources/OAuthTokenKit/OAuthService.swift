@@ -181,10 +181,26 @@ public final class OAuthService: OAuthServiceProtocol {
     /// ## Why `getenv()` and not `ProcessInfo.processInfo.environment`
     /// `ProcessInfo.processInfo.environment` is a snapshot captured at process
     /// launch. `setenv`/`unsetenv` mutations after launch are invisible to it.
-    /// `getenv()` always reflects the live process environment and is consistent
-    /// with `EnvTokenProvider`'s env-var read behaviour (which also uses `getenv()`
-    /// rather than `ProcessInfo`). Empty strings are rejected to match that
-    /// behaviour. See `envVarIsSet(_:)` below.
+    /// `getenv()` always reflects the live process environment — correct for a
+    /// UI auth-state check that must be accurate at the moment it is called.
+    ///
+    /// ## Intentional divergence from `EnvTokenProvider`
+    /// `EnvTokenProvider.resolveFromEnvironment()` reads env vars via the
+    /// injected `envLookup` closure, which defaults to
+    /// `ProcessInfo.processInfo.environment` — a launch-time snapshot.
+    /// `hasAnyToken` uses `getenv()` instead. The two paths **intentionally
+    /// diverge**: `EnvTokenProvider` is not expected to observe env mutations
+    /// within a running process; `hasAnyToken` is. See `envLookup` in
+    /// `EnvTokenProvider.swift` and the "Note — two env-var read paths" block
+    /// in the README for the full rationale.
+    ///
+    /// **Consequence in test harnesses:** a test that injects an env var via
+    /// `setenv()` after process launch will see `hasAnyToken == true` but
+    /// `TokenCache.token()` will not pick it up (ProcessInfo snapshot is fixed).
+    /// This divergence is documented and tested in `OAuthServiceAuthStateTests`.
+    ///
+    /// Empty strings are rejected to match `EnvTokenProvider`'s behaviour.
+    /// See `envVarIsSet(_:)` below.
     ///
     /// ## Why `hasAnyToken` lives in `OAuthTokenKit` and not `EnvTokenKit`
     /// `hasAnyToken` pairs the Keychain check (`isAuthenticated`) with the env-var

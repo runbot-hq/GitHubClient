@@ -37,7 +37,17 @@ import EnvTokenKit
 /// No downstream caller ever names this type directly — they get it implicitly
 /// by omitting the `tokenCache:` parameter on `GitHubClient`'s mock init.
 /// Keeping it `internal` prevents it from leaking into the public API surface.
-struct NullEnvTokenProvider: EnvTokenProviding {
+///
+/// ## Sendable
+/// Explicitly conforms to `Sendable` (in addition to the synthesis from
+/// `EnvTokenProviding: Sendable`). Zero stored properties means the compiler
+/// synthesises this correctly, but the explicit declaration makes the intent
+/// clear: this type is designed for injection into a `Mutex`-guarded
+/// `any EnvTokenProviding` slot. If a stored property is ever added (e.g. a
+/// `callCount` spy), an explicit `Sendable` conformance requires that property
+/// to also be `Sendable` — producing a compiler error rather than a silent
+/// data-race regression.
+struct NullEnvTokenProvider: EnvTokenProviding, Sendable {
     /// Always returns `nil` — no env-var read or shell subprocess is performed.
     func token() async -> String? { nil }
     /// No-op — there is no shell outcome latch or cached state to reset.
