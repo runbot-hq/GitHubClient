@@ -176,7 +176,10 @@ public final class TokenCache: Sendable {
     ///
     /// - Warning: Concurrent callers that all miss the in-memory cache simultaneously
     ///   (e.g. on first call at app launch) will each independently walk steps 2–4.
-    ///   Steps 1–2 are idempotent (double Keychain read is harmless). Step 4 is not:
+    ///   Steps 1–2 are idempotent (double Keychain read is harmless; `resolveFromStore()`
+    ///   writes `state` unconditionally but the Keychain always returns the same value
+    ///   for a given entry — see the inline comment on the write site in
+    ///   `resolveFromStore()` for the full rationale). Step 4 is not idempotent:
     ///   each concurrent miss spawns a separate `/bin/zsh` subprocess. The latch is
     ///   not set until `loginShellToken` returns — up to 10 seconds — so the window
     ///   spans the full shell execution time, not merely a scheduling instant. In
