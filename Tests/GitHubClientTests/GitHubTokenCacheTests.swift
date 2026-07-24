@@ -1,6 +1,15 @@
 // GitHubTokenCacheTests.swift
 // GitHubClientTests
 //
+// NOTE: Spec #74 Step 6 said "delete GitHubTokenCacheTests.swift".
+// This file was REPLACED, not deleted. The original file contained
+// env-provider tests that have since migrated to EnvTokenKitTests/.
+// This new file is the wrapper-level TokenCache suite for GitHubClientTests,
+// covering TokenCache's resolution order, caching, and invalidation at the
+// GitHubClient module boundary. The filename is retained as the stable CI
+// identifier referenced in issue comments and CI logs. Deleting it entirely
+// would leave the TokenCache wrapper layer untested in GitHubClientTests.
+//
 // Exercises `TokenCache` resolution order, in-memory caching, and invalidation.
 //
 // ⚠️ ISOLATION REQUIREMENT
