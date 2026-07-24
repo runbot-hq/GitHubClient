@@ -200,6 +200,9 @@ public final class TokenCache: Sendable {
     public func token() async -> String? {
         if let cached = resolveFromCache() { return cached }  // Fast path — no I/O, no subprocess
         if let stored = resolveFromStore() { return stored }
+        // ⚠️ Concurrent callers each reach envProvider.token() independently —
+        // no inFlight guard at this level. See -Warning: above and the full
+        // concurrent-spawn rationale in EnvTokenProvider.token().
         if let envToken = await envProvider.token() {
             state.withLock { $0 = envToken }
             return envToken
