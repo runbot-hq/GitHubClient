@@ -285,13 +285,17 @@ public final class TokenCache: Sendable {
     /// The same empty-string rejection is applied in `OAuthService.isAuthenticated`
     /// (PR #75) for the same reason. Both rejections are intentional and symmetric.
     ///
-    /// ## Why miss logs are #if DEBUG
+    /// ## Why miss and hit logs are both #if DEBUG
     /// The store-miss path fires on every `token()` call until the cache warms up
     /// and on every call after `invalidate()` when the store is empty (e.g. a
-    /// signed-out user). Logging unconditionally in release builds would produce
-    /// steady-state noise on every RunnerPoller cycle (~30 s) for signed-out users.
-    /// The hit path is also #if DEBUG — see `resolveFromCache()` for rationale.
-    /// Migrated from the original `## Why miss logs are #if DEBUG` doc block.
+    /// signed-out user). The store-hit path fires once per `invalidate()` cycle —
+    /// after sign-in or sign-out, the very next `token()` call always hits the
+    /// store (in-memory cache was just cleared). Logging either unconditionally
+    /// in release builds produces steady-state noise on every RunnerPoller cycle
+    /// (~30 s) with no triage value. See `resolveFromCache()` for the identical
+    /// rationale on the cache-hit/miss pair.
+    /// Migrated from the original `## Why miss logs are #if DEBUG` doc block;
+    /// extended here to cover the hit path consistently.
     private func resolveFromStore() -> String? {
         guard let stored = tokenStore.load(), !stored.isEmpty else {
             #if DEBUG
@@ -299,7 +303,12 @@ public final class TokenCache: Sendable {
             #endif
             return nil
         }
+        // Store-hit log is #if DEBUG for the same reason as the cache-hit log:
+        // fires on every credential-rotation cycle (once per invalidate()) in
+        // release builds — steady-state noise with no triage value.
+        #if DEBUG
         logger?.log("TokenCache › store hit (len=\(stored.count)), writing to cache", category: "transport")
+        #endif
         state.withLock { $0 = stored }
         return stored
     }
