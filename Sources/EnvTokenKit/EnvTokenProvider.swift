@@ -190,10 +190,15 @@ public final class EnvTokenProvider: EnvTokenProviding, Sendable {
     ///   fast path will each spawn a separate `/bin/zsh` subprocess. The latch
     ///   is not set until `loginShellToken` returns (up to 10 s), so the window
     ///   spans the full shell execution time, not just a scheduling instant.
-    ///   Correctness is preserved — concurrent callers write `.found(sameValue)`
-    ///   idempotently because they each awaited the same shell run and got the
-    ///   same result. If your call pattern can produce concurrent `token()` calls
-    ///   before the first shell result is cached, serialise access yourself.
+    ///   Correctness is preserved under two assumptions that hold in practice:
+    ///   (1) `GH_TOKEN` / `GITHUB_TOKEN` are static for the process lifetime
+    ///   (set before launch, not mutated at runtime), so concurrent shell runs
+    ///   each resolve the same value and write `.found(sameValue)` idempotently;
+    ///   (2) `invalidate()` is not called concurrently with an in-progress shell
+    ///   spawn — in production it is driven by a serial `RunnerPoller` actor so
+    ///   this condition holds. If either assumption is violated, one caller may
+    ///   overwrite a fresher `.found` value or a `.notAttempted` reset with a
+    ///   stale result. If your call pattern violates either, serialise access yourself.
     public func token() async -> String? {
         if let envToken = resolveFromEnvironment() { return envToken }
         // Check the cached shell outcome before spawning a new subprocess.
